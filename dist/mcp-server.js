@@ -21604,6 +21604,10 @@ var Protocol = class {
     this._progressHandlers.clear();
     this._taskProgressTokens.clear();
     this._pendingDebouncedNotifications.clear();
+    for (const info of this._timeoutInfo.values()) {
+      clearTimeout(info.timeoutId);
+    }
+    this._timeoutInfo.clear();
     for (const controller of this._requestHandlerAbortControllers.values()) {
       controller.abort();
     }
@@ -21734,7 +21738,9 @@ var Protocol = class {
         await capturedTransport?.send(errorResponse);
       }
     }).catch((error2) => this._onerror(new Error(`Failed to send response: ${error2}`))).finally(() => {
-      this._requestHandlerAbortControllers.delete(request.id);
+      if (this._requestHandlerAbortControllers.get(request.id) === abortController) {
+        this._requestHandlerAbortControllers.delete(request.id);
+      }
     });
   }
   _onprogress(notification) {
@@ -25264,40 +25270,77 @@ ${JSON.stringify(value, null, 2)}
 
 // src/llm.ts
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { execSync } from "child_process";
+import { writeFileSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 async function callHaiku(systemPrompt, userMessage, maxTokens = 2048) {
   const model = process.env.MEMORY_BANK_FACT_MODEL || "haiku";
-  try {
-    for await (const message of query({
-      prompt: `${systemPrompt}
+  const useCli = process.env.MEMORY_BANK_USE_CLI === "true";
+  if (!useCli) {
+    try {
+      for await (const message of query({
+        prompt: `${systemPrompt}
 
 ${userMessage}`,
-      options: {
-        model,
-        max_tokens: maxTokens,
-        systemPrompt
+        options: {
+          model,
+          max_tokens: maxTokens,
+          systemPrompt
+        }
+      })) {
+        if (message && typeof message === "object" && "type" in message && message.type === "result") {
+          return message.result || "";
+        }
       }
-    })) {
-      if (message && typeof message === "object" && "type" in message && message.type === "result") {
-        return message.result || "";
+      return "";
+    } catch (agentSdkError) {
+    }
+  }
+  try {
+    return callClaudeCli(systemPrompt, userMessage, maxTokens);
+  } catch (cliError) {
+    console.error("CLI fallback failed:", cliError.message);
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.MEMORY_BANK_API_TOKEN;
+  if (!apiKey) {
+    throw new Error("LLM call failed: Agent SDK, CLI, and API all unavailable. Set ANTHROPIC_API_KEY or ensure claude CLI is installed.");
+  }
+  const { default: Anthropic2 } = await Promise.resolve().then(() => (init_sdk(), sdk_exports));
+  const baseURL = process.env.MEMORY_BANK_API_BASE_URL;
+  const client = new Anthropic2({ apiKey, ...baseURL ? { baseURL } : {} });
+  const response = await client.messages.create({
+    model: process.env.MEMORY_BANK_FACT_MODEL || "claude-haiku-4-5-20251001",
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userMessage }]
+  });
+  const textBlock = response.content.find((b2) => b2.type === "text");
+  return textBlock?.text || "";
+}
+function callClaudeCli(systemPrompt, userMessage, maxTokens = 2048) {
+  const cliModel = process.env.MEMORY_BANK_CLI_MODEL || "haiku";
+  const prompt = `${systemPrompt}
+
+${userMessage}`;
+  const tmpFile = join(tmpdir(), `memory-bank-prompt-${Date.now()}.txt`);
+  try {
+    writeFileSync(tmpFile, prompt, "utf-8");
+    const result = execSync(
+      `claude -p "$(cat '${tmpFile}')" --model ${cliModel} --output-format text`,
+      {
+        encoding: "utf-8",
+        timeout: 12e4,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" }
       }
+    );
+    return result.trim();
+  } finally {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
     }
-    return "";
-  } catch (agentSdkError) {
-    const apiKey = process.env.ANTHROPIC_API_KEY || process.env.MEMORY_BANK_API_TOKEN;
-    if (!apiKey) {
-      throw new Error(`LLM call failed: ${agentSdkError instanceof Error ? agentSdkError.message : agentSdkError}`);
-    }
-    const { default: Anthropic2 } = await Promise.resolve().then(() => (init_sdk(), sdk_exports));
-    const baseURL = process.env.MEMORY_BANK_API_BASE_URL;
-    const client = new Anthropic2({ apiKey, ...baseURL ? { baseURL } : {} });
-    const response = await client.messages.create({
-      model: process.env.MEMORY_BANK_FACT_MODEL || "claude-haiku-4-5-20251001",
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }]
-    });
-    const textBlock = response.content.find((b2) => b2.type === "text");
-    return textBlock?.text || "";
   }
 }
 function parseJsonResponse(text) {
