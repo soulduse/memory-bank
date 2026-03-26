@@ -1,4 +1,8 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { execSync } from 'child_process';
+import { writeFileSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 /**
  * Get API environment overrides for summarization calls.
@@ -39,7 +43,7 @@ function extractSummary(text) {
     // Fallback if no tags found
     return text.trim();
 }
-async function callClaude(prompt, sessionId, useFallback = false) {
+async function callClaudeViaAgentSdk(prompt, sessionId, useFallback = false) {
     const primaryModel = process.env.MEMORY_BANK_API_MODEL || 'haiku';
     const fallbackModel = process.env.MEMORY_BANK_API_MODEL_FALLBACK || 'sonnet';
     const model = useFallback ? fallbackModel : primaryModel;
@@ -50,8 +54,6 @@ async function callClaude(prompt, sessionId, useFallback = false) {
             max_tokens: 4096,
             env: getApiEnv(),
             resume: sessionId,
-            // Don't override systemPrompt when resuming - it uses the original session's prompt
-            // Instead, the prompt itself should provide clear instructions
             ...(sessionId ? {} : {
                 systemPrompt: 'Write concise, factual summaries. Output ONLY the summary - no preamble, no "Here is", no "I will". Your output will be indexed directly.'
             })
@@ -59,19 +61,53 @@ async function callClaude(prompt, sessionId, useFallback = false) {
     })) {
         if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
             const result = message.result;
-            // Check if result is an API error (SDK returns errors as result strings)
             if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens')) {
                 if (!useFallback) {
                     console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
-                    return await callClaude(prompt, sessionId, true);
+                    return await callClaudeViaAgentSdk(prompt, sessionId, true);
                 }
-                // If fallback also fails, return error message
                 return result;
             }
             return result;
         }
     }
     return '';
+}
+function callClaudeViaCli(prompt, model) {
+    const tmpFile = join(tmpdir(), `memory-bank-summary-${Date.now()}.txt`);
+    try {
+        writeFileSync(tmpFile, prompt, 'utf-8');
+        const result = execSync(`claude -p "$(cat '${tmpFile}')" --model ${model} --output-format text`, {
+            encoding: 'utf-8',
+            timeout: 120000,
+            maxBuffer: 1024 * 1024,
+            env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+        });
+        return result.trim();
+    }
+    finally {
+        try {
+            unlinkSync(tmpFile);
+        }
+        catch { }
+    }
+}
+async function callClaude(prompt, sessionId, useFallback = false) {
+    const useCli = process.env.MEMORY_BANK_USE_CLI === 'true';
+    // If CLI mode is forced, skip Agent SDK
+    if (!useCli) {
+        try {
+            return await callClaudeViaAgentSdk(prompt, sessionId, useFallback);
+        }
+        catch {
+            // Continue to CLI fallback
+        }
+    }
+    // CLI fallback (uses Max/Pro subscription, no API key needed)
+    const model = useFallback
+        ? (process.env.MEMORY_BANK_API_MODEL_FALLBACK || 'sonnet')
+        : (process.env.MEMORY_BANK_API_MODEL || 'haiku');
+    return callClaudeViaCli(prompt, process.env.MEMORY_BANK_CLI_MODEL || model);
 }
 function chunkExchanges(exchanges, chunkSize) {
     const chunks = [];
