@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory Bank Cloud Context Sharing — MCP + Supabase Architecture</title>
+<meta name="description" content="Memory Bank Cloud의 회사·조직·팀·개인 context 공유 구조. MCP token login, Supabase host, Claude/Codex 자동 context bundle 시각화.">
+<meta name="author" content="Hugh Kim">
+<meta name="theme-color" content="#08090c">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Newsreader:ital,wght@0,300;0,700;1,300&family=Space+Grotesk:wght@300;400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #08090c;
+    --surface: #0f1114;
+    --surface2: #14171c;
+    --surface3: #191d24;
+    --border: #1a1d23;
+    --border-hover: #2a2f38;
+    --text: #a0a8b4;
+    --text-dim: #545b67;
+    --text-bright: #e8ecf1;
+    --accent: #c8956c;
+    --accent2: #7c9cba;
+    --accent3: #8fb47a;
+    --accent4: #b48fc7;
+    --red: #c75c5c;
+    --cyan: #67d3e5;
+    --green: #8fb47a;
+    --mono: 'JetBrains Mono', monospace;
+    --serif: 'Newsreader', Georgia, serif;
+    --sans: 'Space Grotesk', sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--sans);
+    background:
+      radial-gradient(circle at 20% 0%, rgba(124,156,186,0.07), transparent 34%),
+      radial-gradient(circle at 82% 14%, rgba(200,149,108,0.08), transparent 30%),
+      var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    opacity: 0.026;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 128px;
+  }
+  a { color: var(--accent2); text-decoration: none; }
+  a:hover { color: var(--text-bright); }
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    height: 52px;
+    padding: 0 clamp(16px,4vw,48px);
+    background: rgba(8,9,12,0.84);
+    backdrop-filter: blur(20px) saturate(1.4);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  nav .logo { font-family: var(--mono); font-weight: 700; font-size: 0.82em; color: var(--text-dim); letter-spacing: 0.04em; }
+  nav .logo b { color: var(--text-bright); }
+  nav .nav-links { display: flex; gap: 20px; align-items: center; }
+  nav .nav-links a { font-family: var(--mono); font-size: 0.72em; color: var(--text-dim); letter-spacing: 0.04em; transition: color 0.2s; }
+  nav .nav-links a:hover { color: var(--text-bright); }
+  .top-line { height: 2px; background: linear-gradient(90deg, var(--red), var(--accent), var(--accent4), var(--accent2)); }
+
+  .hero {
+    padding: clamp(64px,10vw,116px) clamp(24px,6vw,80px) clamp(42px,6vw,72px);
+    max-width: 1240px;
+    margin: 0 auto;
+    position: relative;
+  }
+  .hero::after {
+    content: '';
+    position: absolute;
+    right: -12%; top: -8%;
+    width: 520px; height: 520px;
+    background: radial-gradient(circle, rgba(199,92,92,0.18), transparent 70%);
+    opacity: 0.34;
+    pointer-events: none;
+  }
+  .hero-eyebrow { font-family: var(--mono); font-size: 0.72em; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+  .hero-eyebrow::before { content: ''; width: 24px; height: 1px; background: var(--accent); }
+  .hero h1 { font-family: var(--serif); font-size: clamp(2.25em,5vw,4.4em); line-height: 1.06; letter-spacing: -0.035em; color: var(--text-bright); margin-bottom: 22px; }
+  .hero h1 em { font-style: italic; font-weight: 300; color: var(--accent); }
+  .hero-desc { max-width: 780px; font-size: 1.02em; font-weight: 300; color: var(--text); line-height: 1.78; }
+  .hero-desc strong { color: var(--text-bright); font-weight: 500; }
+  .hero-desc code, code { font-family: var(--mono); color: var(--accent); background: rgba(200,149,108,0.1); padding: 2px 6px; border-radius: 3px; }
+  .hero-meta { margin-top: 26px; display: flex; gap: 24px; flex-wrap: wrap; }
+  .hero-meta-item { font-family: var(--mono); font-size: 0.72em; color: var(--text-dim); letter-spacing: 0.04em; }
+  .hero-meta-item span { color: var(--text); }
+
+  .container { max-width: 1240px; margin: 0 auto; padding: 0 clamp(24px,6vw,80px); }
+  .section { margin-bottom: 88px; }
+  .section-label { font-family: var(--mono); font-size: 0.65em; color: var(--accent); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .section-label::before { content: ''; width: 12px; height: 1px; background: var(--accent); }
+  .section-title { font-family: var(--serif); font-size: clamp(1.6em,3vw,2.3em); color: var(--text-bright); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 26px; }
+  .prose { font-size: 0.95em; font-weight: 300; color: var(--text); line-height: 1.82; max-width: 880px; margin-bottom: 24px; }
+  .prose strong { color: var(--text-bright); font-weight: 500; }
+
+  .stats-bar { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; margin-bottom: 48px; }
+  .stat-item { padding: 26px 18px; background: var(--surface); border: 1px solid var(--border); text-align: center; }
+  .stat-value { font-family: var(--mono); font-size: 1.55em; font-weight: 700; color: var(--text-bright); }
+  .stat-value.warn { color: var(--red); }
+  .stat-value.green { color: var(--green); }
+  .stat-value.blue { color: var(--accent2); }
+  .stat-label { font-family: var(--mono); font-size: 0.62em; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 6px; }
+
+  .diagram {
+    background: linear-gradient(180deg, rgba(15,17,20,0.98), rgba(10,12,16,0.98));
+    border: 1px solid var(--border);
+    padding: clamp(16px,3vw,32px);
+    overflow-x: auto;
+    margin-bottom: 32px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.28);
+  }
+  .diagram svg { display: block; min-width: 1060px; margin: 0 auto; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card, .reason-card, .quote-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 24px 26px;
+  }
+  .card:hover { border-color: var(--border-hover); }
+  .card-num { font-family: var(--mono); color: var(--text-dim); font-size: 0.68em; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 8px; }
+  .card-title { font-family: var(--serif); font-size: 1.22em; color: var(--text-bright); font-weight: 700; margin-bottom: 9px; letter-spacing: -0.02em; }
+  .card-desc { font-size: 0.88em; font-weight: 300; line-height: 1.7; color: var(--text); }
+  .card-tags { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .tag { font-family: var(--mono); font-size: 0.62em; color: var(--text-dim); letter-spacing: 0.06em; padding: 3px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 2px; }
+  .quote-block { border-left: 3px solid var(--accent); }
+  .quote-text { font-family: var(--serif); font-size: 1.15em; font-style: italic; color: var(--text-bright); font-weight: 300; line-height: 1.72; }
+  .comparison-table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  .comparison-table th { font-family: var(--mono); font-size: 0.7em; color: var(--accent); letter-spacing: 0.07em; text-transform: uppercase; padding: 14px 16px; border-bottom: 2px solid var(--border); text-align: left; background: var(--surface); }
+  .comparison-table td { font-size: 0.87em; color: var(--text); padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface); vertical-align: top; }
+  .comparison-table td:first-child { font-family: var(--mono); color: var(--text-bright); font-weight: 500; white-space: nowrap; }
+  .comparison-table tr:hover td { background: var(--surface2); }
+  .footer { border-top: 1px solid var(--border); padding: 28px clamp(24px,6vw,80px); font-family: var(--mono); font-size: 0.7em; color: var(--text-dim); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+  @media (max-width: 820px) {
+    .stats-bar, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    nav .nav-links { display: none; }
+    .hero { padding-top: 68px; }
+  }
+</style>
+</head>
+<body>
+<nav>
+  <div class="logo">HUGH KIM · <b>MEMORY BANK CLOUD</b></div>
+  <div class="nav-links">
+    <a href="#overview">OVERVIEW</a>
+    <a href="#flow">TOKEN FLOW</a>
+    <a href="#scopes">SCOPES</a>
+    <a href="#supabase">SUPABASE</a>
+  </div>
+</nav>
+<div class="top-line"></div>
+
+<header class="hero">
+  <div class="hero-eyebrow">Context Sharing Architecture</div>
+  <h1>Memory Bank Cloud는<br><em>조직 context plane</em>이다</h1>
+  <p class="hero-desc">
+    목표는 Claude/Codex/Worker가 서로 작업 내용을 계속 주고받는 구조가 아니다.
+    <strong>private MCP token login</strong>으로 회사·조직·팀·프로젝트·개인 계정 context를 복원하고,
+    토큰 발급 주체의 scope 안에서만 <strong>Supabase-backed memory-bank-cloud</strong> context bundle을 공유하게 만드는 구조다.
+  </p>
+  <div class="hero-meta">
+    <div class="hero-meta-item">BRANCH <span>feature/memory-bank-cloud-context-sharing</span></div>
+    <div class="hero-meta-item">SOURCE <span>enterprise-harness-complexity.html</span></div>
+    <div class="hero-meta-item">STYLE <span>claude-code-site</span></div>
+  </div>
+</header>
+
+<main class="container">
+  <section class="section" id="overview">
+    <div class="section-label">01 — Problem Reframe</div>
+    <h2 class="section-title">분산 agent 통신을 늘리는 게 아니라, 공유 context plane으로 줄인다</h2>
+    <p class="prose">
+      <code>enterprise-harness-complexity.html</code>의 핵심 경고는 조직 확장에서 scope, governance, observability,
+      multi-team coordination이 곱셈으로 복잡해진다는 것이다. 그래서 Memory Bank Cloud는 모든 Worker가 직접 합의·전파하는 구조 대신,
+      Supabase MCP host가 scope별 context를 관리하고 Claude/Codex가 로그인 시 자동으로 읽는 구조로 단순화한다.
+    </p>
+    <div class="stats-bar">
+      <div class="stat-item"><div class="stat-value warn">N²</div><div class="stat-label">agent communication avoided</div></div>
+      <div class="stat-item"><div class="stat-value">5</div><div class="stat-label">context scopes</div></div>
+      <div class="stat-item"><div class="stat-value green">1</div><div class="stat-label">shared context plane</div></div>
+      <div class="stat-item"><div class="stat-value blue">4</div><div class="stat-label">MCP cloud tools</div></div>
+      <div class="stat-item"><div class="stat-value">RLS</div><div class="stat-label">tenant boundary</div></div>
+    </div>
+    <div class="quote-block">
+      <div class="quote-text">“이 MCP는 공개 MCP가 아니다. 인증토큰 발급 주체의 company/org/team/project/personal 경계 안에서만 context가 공유되어야 한다.”</div>
+    </div>
+  </section>
+
+  <section class="section" id="flow">
+    <div class="section-label">02 — System Flow</div>
+    <h2 class="section-title">Private MCP token login → issuer boundary 복원 → scoped context 자동 공유</h2>
+    <div class="diagram" aria-label="Memory Bank Cloud architecture overview diagram">
+      <svg viewBox="0 0 1160 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="overviewTitle overviewDesc">
+        <title id="overviewTitle">Memory Bank Cloud MCP and Supabase context sharing architecture</title>
+        <desc id="overviewDesc">Claude and Codex login with private MCP tokens, Supabase host resolves issuer-bound tenant organization team project user context, and scoped context is shared only inside that boundary.</desc>
+        <defs>
+          <pattern id="grid" width="38" height="38" patternUnits="userSpaceOnUse">
+            <path d="M 38 0 L 0 0 0 38" fill="none" stroke="#1a1d23" stroke-width="0.8" opacity="0.75"/>
+          </pattern>
+          <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+            <polygon points="0 0, 10 4, 0 8" fill="#64748b"/>
+          </marker>
+          <marker id="arrowAccent" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+            <polygon points="0 0, 10 4, 0 8" fill="#c8956c"/>
+          </marker>
+          <linearGradient id="planeGrad" x1="0" x2="1">
+            <stop offset="0" stop-color="#111827"/>
+            <stop offset="1" stop-color="#0f1114"/>
+          </linearGradient>
+          <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="4" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <rect width="1160" height="720" fill="#08090c"/>
+        <rect width="1160" height="720" fill="url(#grid)"/>
+
+        <!-- Connection arrows behind boxes -->
+        <path d="M185 140 C310 140, 338 196, 458 196" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M185 248 C315 248, 337 224, 458 224" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M620 210 C692 210, 720 210, 790 210" fill="none" stroke="#c8956c" stroke-width="2" marker-end="url(#arrowAccent)"/>
+        <path d="M934 210 C1010 210, 1020 300, 920 334" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M790 388 C665 418, 620 458, 515 510" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M458 510 C340 484, 260 430, 184 330" fill="none" stroke="#64748b" stroke-dasharray="6 6" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M458 548 C330 562, 278 598, 184 598" fill="none" stroke="#64748b" stroke-dasharray="6 6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <!-- Left clients -->
+        <text x="58" y="64" fill="#c8956c" font-family="JetBrains Mono" font-size="11" font-weight="700" letter-spacing="1">MCP CLIENTS</text>
+        <rect x="50" y="90" width="136" height="92" rx="8" fill="#0f1114"/>
+        <rect x="50" y="90" width="136" height="92" rx="8" fill="rgba(124,156,186,0.13)" stroke="#7c9cba" stroke-width="1.4"/>
+        <text x="118" y="121" fill="#e8ecf1" font-family="Space Grotesk" font-size="16" font-weight="700" text-anchor="middle">Claude</text>
+        <text x="118" y="146" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">claude-code</text>
+        <text x="118" y="164" fill="#545b67" font-family="JetBrains Mono" font-size="9" text-anchor="middle">MCP login</text>
+
+        <rect x="50" y="206" width="136" height="92" rx="8" fill="#0f1114"/>
+        <rect x="50" y="206" width="136" height="92" rx="8" fill="rgba(143,180,122,0.13)" stroke="#8fb47a" stroke-width="1.4"/>
+        <text x="118" y="237" fill="#e8ecf1" font-family="Space Grotesk" font-size="16" font-weight="700" text-anchor="middle">Codex</text>
+        <text x="118" y="262" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">gpt/codex</text>
+        <text x="118" y="280" fill="#545b67" font-family="JetBrains Mono" font-size="9" text-anchor="middle">MCP login</text>
+
+        <rect x="50" y="532" width="136" height="92" rx="8" fill="#0f1114"/>
+        <rect x="50" y="532" width="136" height="92" rx="8" fill="rgba(180,143,199,0.12)" stroke="#b48fc7" stroke-width="1.4"/>
+        <text x="118" y="563" fill="#e8ecf1" font-family="Space Grotesk" font-size="15" font-weight="700" text-anchor="middle">Workers</text>
+        <text x="118" y="588" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">team / agents</text>
+        <text x="118" y="606" fill="#545b67" font-family="JetBrains Mono" font-size="9" text-anchor="middle">same plane</text>
+
+        <!-- MCP host -->
+        <text x="458" y="64" fill="#c8956c" font-family="JetBrains Mono" font-size="11" font-weight="700" letter-spacing="1">MCP HOST</text>
+        <rect x="458" y="116" width="164" height="196" rx="12" fill="#0f1114"/>
+        <rect x="458" y="116" width="164" height="196" rx="12" fill="rgba(200,149,108,0.12)" stroke="#c8956c" stroke-width="1.6"/>
+        <text x="540" y="150" fill="#e8ecf1" font-family="Space Grotesk" font-size="17" font-weight="700" text-anchor="middle">Private Token Host</text>
+        <text x="540" y="178" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">admin issue_token</text>
+        <text x="540" y="198" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">login_with_token</text>
+        <text x="540" y="218" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">put_context</text>
+        <text x="540" y="238" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">get_context</text>
+        <line x1="488" y1="260" x2="592" y2="260" stroke="#2a2f38"/>
+        <text x="540" y="282" fill="#c8956c" font-family="JetBrains Mono" font-size="9" text-anchor="middle">issuer-bound · raw token never stored</text>
+
+        <!-- Supabase -->
+        <text x="794" y="64" fill="#c8956c" font-family="JetBrains Mono" font-size="11" font-weight="700" letter-spacing="1">SUPABASE MCP HOST</text>
+        <rect x="790" y="102" width="286" height="360" rx="18" fill="rgba(15,17,20,0.92)" stroke="#1a1d23" stroke-width="1.2"/>
+        <rect x="816" y="132" width="108" height="70" rx="8" fill="#0f1114"/>
+        <rect x="816" y="132" width="108" height="70" rx="8" fill="rgba(136,19,55,0.18)" stroke="#c75c5c" stroke-width="1.2"/>
+        <text x="870" y="160" fill="#e8ecf1" font-family="Space Grotesk" font-size="13" font-weight="700" text-anchor="middle">Auth</text>
+        <text x="870" y="181" fill="#a0a8b4" font-family="JetBrains Mono" font-size="9" text-anchor="middle">token_hash</text>
+
+        <rect x="944" y="132" width="108" height="70" rx="8" fill="#0f1114"/>
+        <rect x="944" y="132" width="108" height="70" rx="8" fill="rgba(143,180,122,0.14)" stroke="#8fb47a" stroke-width="1.2"/>
+        <text x="998" y="160" fill="#e8ecf1" font-family="Space Grotesk" font-size="13" font-weight="700" text-anchor="middle">RLS</text>
+        <text x="998" y="181" fill="#a0a8b4" font-family="JetBrains Mono" font-size="9" text-anchor="middle">tenant gates</text>
+
+        <rect x="816" y="224" width="236" height="150" rx="10" fill="#0f1114"/>
+        <rect x="816" y="224" width="236" height="150" rx="10" fill="rgba(124,156,186,0.10)" stroke="#7c9cba" stroke-width="1.2"/>
+        <text x="934" y="254" fill="#e8ecf1" font-family="Space Grotesk" font-size="15" font-weight="700" text-anchor="middle">Postgres Context Store</text>
+        <text x="934" y="282" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">tenants · orgs · teams</text>
+        <text x="934" y="304" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">projects · users · memberships</text>
+        <text x="934" y="326" fill="#a0a8b4" font-family="JetBrains Mono" font-size="10" text-anchor="middle">context_entries · audit_events</text>
+        <text x="934" y="350" fill="#c8956c" font-family="JetBrains Mono" font-size="9" text-anchor="middle">scope_type + scope_id on every row</text>
+
+        <rect x="816" y="394" width="236" height="42" rx="6" fill="rgba(180,143,199,0.12)" stroke="#b48fc7" stroke-width="1.1"/>
+        <text x="934" y="420" fill="#b48fc7" font-family="JetBrains Mono" font-size="10" font-weight="700" text-anchor="middle">Audit + provenance stream</text>
+
+        <!-- Context plane -->
+        <text x="456" y="392" fill="#c8956c" font-family="JetBrains Mono" font-size="11" font-weight="700" letter-spacing="1">AUTOMATIC CONTEXT PLANE</text>
+        <rect x="456" y="420" width="208" height="178" rx="14" fill="url(#planeGrad)" stroke="#2a2f38" stroke-width="1.3"/>
+        <text x="560" y="454" fill="#e8ecf1" font-family="Space Grotesk" font-size="16" font-weight="700" text-anchor="middle">Context Bundle</text>
+        <g font-family="JetBrains Mono" font-size="10" text-anchor="middle">
+          <rect x="482" y="476" width="156" height="24" rx="4" fill="rgba(199,92,92,0.13)" stroke="#c75c5c"/>
+          <text x="560" y="492" fill="#e8ecf1">company</text>
+          <rect x="482" y="506" width="156" height="24" rx="4" fill="rgba(200,149,108,0.13)" stroke="#c8956c"/>
+          <text x="560" y="522" fill="#e8ecf1">organization</text>
+          <rect x="482" y="536" width="156" height="24" rx="4" fill="rgba(143,180,122,0.13)" stroke="#8fb47a"/>
+          <text x="560" y="552" fill="#e8ecf1">team / project</text>
+          <rect x="482" y="566" width="156" height="24" rx="4" fill="rgba(124,156,186,0.13)" stroke="#7c9cba"/>
+          <text x="560" y="582" fill="#e8ecf1">personal</text>
+        </g>
+
+        <!-- Key annotation -->
+        <rect x="772" y="542" width="326" height="88" rx="10" fill="rgba(8,9,12,0.76)" stroke="#2a2f38" stroke-width="1"/>
+        <text x="936" y="572" fill="#e8ecf1" font-family="Newsreader" font-size="20" font-weight="700" text-anchor="middle">No more manual context relay</text>
+        <text x="936" y="598" fill="#a0a8b4" font-family="Space Grotesk" font-size="13" text-anchor="middle">MCP clients read the same scoped memory plane.</text>
+      </svg>
+    </div>
+  </section>
+
+  <section class="section" id="scopes">
+    <div class="section-label">03 — Scope Model</div>
+    <h2 class="section-title">company → org → team → project → personal</h2>
+    <div class="grid-3">
+      <div class="card">
+        <div class="card-num">SCOPE 01</div>
+        <div class="card-title">Company / Org</div>
+        <div class="card-desc">테넌트 hard boundary와 조직 운영 규칙. 모든 row는 <code>tenant_id</code>를 갖고 RLS 대상이 된다.</div>
+        <div class="card-tags"><span class="tag">tenant</span><span class="tag">org</span><span class="tag">RLS</span></div>
+      </div>
+      <div class="card">
+        <div class="card-num">SCOPE 02</div>
+        <div class="card-title">Team / Project</div>
+        <div class="card-desc">실제 협업 context. 팀 컨벤션, repo rule, QA 기준, MCP 사용 패턴이 여기서 자동 공유된다.</div>
+        <div class="card-tags"><span class="tag">team</span><span class="tag">project</span><span class="tag">context</span></div>
+      </div>
+      <div class="card">
+        <div class="card-num">SCOPE 03</div>
+        <div class="card-title">Personal</div>
+        <div class="card-desc">개인 말투·선호·private facts. 별도 promotion policy 없이 팀/조직으로 자동 승격하지 않는다.</div>
+        <div class="card-tags"><span class="tag">private</span><span class="tag">promotion-gate</span></div>
+      </div>
+    </div>
+
+    <table class="comparison-table" aria-label="Scope visibility table">
+      <thead><tr><th>Scope</th><th>Visible to</th><th>Primary use</th><th>Hard rule</th></tr></thead>
+      <tbody>
+        <tr><td>company</td><td>tenant members by policy</td><td>전사 운영 원칙, 보안/QA 불변 규칙</td><td>governance approval 필요</td></tr>
+        <tr><td>org</td><td>same org</td><td>조직별 하네스/품질 기준</td><td>조직 밖으로 누출 금지</td></tr>
+        <tr><td>team</td><td>same team</td><td>팀 컨벤션, shared workflow</td><td>다른 팀에는 보이지 않음</td></tr>
+        <tr><td>project</td><td>project members</td><td>repo별 architecture, test, deploy context</td><td>repo mapping 필수</td></tr>
+        <tr><td>personal</td><td>same user only</td><td>말투, 개인 선호, private memory</td><td>자동 promotion 금지</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section" id="supabase">
+    <div class="section-label">04 — Supabase Host</div>
+    <h2 class="section-title">MCP host 역할은 Supabase/Postgres + RLS + audit로 구성한다</h2>
+    <div class="diagram" aria-label="Token login sequence diagram">
+      <svg viewBox="0 0 1160 510" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="sequenceTitle sequenceDesc">
+        <title id="sequenceTitle">Memory Bank Cloud token login sequence</title>
+        <desc id="sequenceDesc">Private admin/control-plane issues an issuer-bound token, Claude or Codex logs in, Supabase resolves clipped account context, and context bundle is returned.</desc>
+        <defs>
+          <marker id="seqArrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="#64748b"/></marker>
+          <pattern id="seqGrid" width="38" height="38" patternUnits="userSpaceOnUse"><path d="M 38 0 L 0 0 0 38" fill="none" stroke="#1a1d23" stroke-width="0.8" opacity="0.65"/></pattern>
+        </defs>
+        <rect width="1160" height="510" fill="#08090c"/><rect width="1160" height="510" fill="url(#seqGrid)"/>
+        <g font-family="JetBrains Mono" font-size="10" fill="#545b67">
+          <line x1="120" y1="100" x2="120" y2="430" stroke="#2a2f38" stroke-dasharray="5 6"/>
+          <line x1="360" y1="100" x2="360" y2="430" stroke="#2a2f38" stroke-dasharray="5 6"/>
+          <line x1="600" y1="100" x2="600" y2="430" stroke="#2a2f38" stroke-dasharray="5 6"/>
+          <line x1="840" y1="100" x2="840" y2="430" stroke="#2a2f38" stroke-dasharray="5 6"/>
+          <line x1="1040" y1="100" x2="1040" y2="430" stroke="#2a2f38" stroke-dasharray="5 6"/>
+        </g>
+        <g font-family="Space Grotesk" font-weight="700" font-size="15" text-anchor="middle" fill="#e8ecf1">
+          <text x="120" y="72">Admin / CLI</text>
+          <text x="360" y="72">MCP Client</text>
+          <text x="600" y="72">Cloud MCP Host</text>
+          <text x="840" y="72">Supabase RLS</text>
+          <text x="1040" y="72">Context Bundle</text>
+        </g>
+        <g font-family="JetBrains Mono" font-size="11">
+          <path d="M120 132 H590" stroke="#c8956c" stroke-width="1.8" marker-end="url(#seqArrow)"/><text x="355" y="124" fill="#c8956c" text-anchor="middle">1. validate issuer + issue scoped token</text>
+          <path d="M600 176 H835" stroke="#64748b" stroke-width="1.5" marker-end="url(#seqArrow)"/><text x="720" y="168" fill="#a0a8b4" text-anchor="middle">2. store token_hash</text>
+          <path d="M360 230 H590" stroke="#7c9cba" stroke-width="1.8" marker-end="url(#seqArrow)"/><text x="475" y="222" fill="#7c9cba" text-anchor="middle">3. login with token</text>
+          <path d="M600 282 H835" stroke="#64748b" stroke-width="1.5" marker-end="url(#seqArrow)"/><text x="720" y="274" fill="#a0a8b4" text-anchor="middle">4. resolve membership</text>
+          <path d="M840 334 H1032" stroke="#8fb47a" stroke-width="1.8" marker-end="url(#seqArrow)"/><text x="936" y="326" fill="#8fb47a" text-anchor="middle">5. scoped context rows</text>
+          <path d="M1038 390 H370" stroke="#b48fc7" stroke-width="1.8" stroke-dasharray="7 6" marker-end="url(#seqArrow)"/><text x="704" y="382" fill="#b48fc7" text-anchor="middle">6. automatic company/org/team/project/personal bundle</text>
+        </g>
+        <rect x="62" y="444" width="1036" height="38" rx="8" fill="rgba(200,149,108,0.09)" stroke="#2a2f38"/>
+        <text x="580" y="468" fill="#a0a8b4" font-family="Space Grotesk" font-size="13" text-anchor="middle">핵심: Claude와 Codex는 서로 직접 전달하지 않고 token issuer scope 안의 context bundle만 읽는다.</text>
+      </svg>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-num">IMPLEMENTED</div>
+        <div class="card-title">Local contract slice</div>
+        <div class="card-desc"><code>src/memory-bank-cloud.ts</code>와 <code>src/memory-bank-cloud-mcp.ts</code>가 token/login/context bundle core를 testable하게 구현한다.</div>
+      </div>
+      <div class="card">
+        <div class="card-num">SUPABASE TARGET</div>
+        <div class="card-title">Schema + RLS skeleton</div>
+        <div class="card-desc"><code>docs/memory-bank-cloud-supabase-schema.sql</code>가 tenants, memberships, context_entries, audit_events와 RLS policy의 시작점을 정의한다.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">05 — MCP Tools</div>
+    <h2 class="section-title">Cloud memory를 private MCP session contract로 고정한다</h2>
+    <div class="grid-2">
+      <div class="card"><div class="card-num">TOOL 01</div><div class="card-title">memory_bank_cloud_issue_token</div><div class="card-desc">admin/control-plane 전용. issuer envelope를 검증한 뒤 issuer scope를 넘지 않는 login token만 발급한다.</div></div>
+      <div class="card"><div class="card-num">TOOL 02</div><div class="card-title">memory_bank_cloud_login</div><div class="card-desc">발급 토큰으로 로그인하고 Claude/Codex session에 issuer boundary로 clip된 account context와 memberships를 붙인다.</div></div>
+      <div class="card"><div class="card-num">TOOL 03</div><div class="card-title">memory_bank_cloud_put_context</div><div class="card-desc">personal/project/team/org/company scope에 context를 저장한다. scope 밖 write는 거부한다.</div></div>
+      <div class="card"><div class="card-num">TOOL 04</div><div class="card-title">memory_bank_cloud_get_context</div><div class="card-desc">현재 session token issuer boundary 안에서 볼 수 있는 context bundle만 자동 반환한다.</div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">06 — Verification Evidence</div>
+    <h2 class="section-title">현재 feature branch의 검증 상태</h2>
+    <table class="comparison-table">
+      <thead><tr><th>Check</th><th>Evidence</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>targeted tests</td><td><code>npx vitest run test/memory-bank-cloud.test.ts</code> — 8 tests</td><td>PASS</td></tr>
+        <tr><td>typecheck</td><td><code>npx tsc --noEmit</code></td><td>PASS</td></tr>
+        <tr><td>full regression</td><td><code>npm test</code> — 30 files / 239 tests</td><td>PASS</td></tr>
+        <tr><td>HTML source</td><td><code>docs/memory-bank-cloud-context-sharing.html</code></td><td>generated</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<footer class="footer">
+  <div>Hugh Kim · Memory Bank Cloud Context Sharing · MCP + Supabase</div>
+  <div>Generated in feature/memory-bank-cloud-context-sharing · 2026-05-10 KST</div>
+</footer>
+</body>
+</html>

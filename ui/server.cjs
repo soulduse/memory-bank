@@ -7,16 +7,65 @@ const http = require('http');
 const path = require('path');
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 const Database = require(path.join(PLUGIN_ROOT, 'node_modules/better-sqlite3'));
+const {
+  ACCESS_COOKIE_NAME,
+  createReplacementOsAccessState,
+  authenticateReplacementOsAccess,
+  isReplacementOsAuthenticated,
+  getReplacementOsQuota,
+  consumeReplacementOsQuota,
+  renderReplacementOsLoginPage,
+  renderReplacementOsPage,
+  readReplacementOsPublication,
+  chatWithReplacementOs,
+} = require('./replacement-os.cjs');
 
 const DB_PATH = path.join(process.env.HOME, '.config/superpowers/conversation-index/db.sqlite');
 const PORT = process.env.PORT || 3847;
+const replacementOsAccess = createReplacementOsAccessState();
 
 let db;
 try { db = new Database(DB_PATH, { readonly: true }); }
-catch (e) { console.error(`DB open failed: ${DB_PATH}\n${e.message}`); process.exit(1); }
+catch (e) {
+  db = null;
+  console.error(`DB open failed: ${DB_PATH}\n${e.message}\nDashboard APIs will return errors, but /hue-os still works.`);
+}
 
-function query(sql, params = []) { return db.prepare(sql).all(...params); }
-function queryOne(sql, params = []) { return db.prepare(sql).get(...params); }
+function ensureDb() {
+  if (!db) throw new Error(`Conversation DB unavailable: ${DB_PATH}`);
+}
+function query(sql, params = []) { ensureDb(); return db.prepare(sql).all(...params); }
+function queryOne(sql, params = []) { ensureDb(); return db.prepare(sql).get(...params); }
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const cookies = {};
+  for (const part of header.split(';')) {
+    const [rawKey, ...rawValue] = part.trim().split('=');
+    if (!rawKey) continue;
+    cookies[rawKey] = decodeURIComponent(rawValue.join('=') || '');
+  }
+  return cookies;
+}
+
+function clientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function replacementOsToken(req) {
+  return parseCookies(req)[ACCESS_COOKIE_NAME];
+}
+
+function isReplacementOsRequestAuthenticated(req) {
+  return isReplacementOsAuthenticated(replacementOsAccess, replacementOsToken(req));
+}
+
+function writeJson(res, status, payload, headers = {}) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
+  res.end(JSON.stringify(payload));
+}
 
 // Translation cache (in-memory, persists during server lifetime)
 const translationCache = new Map();
@@ -209,6 +258,24 @@ apiHandlers['/api/project-detail'] = (params) => {
   return { project, info, toolUsage, activity, recentPrompts, facts, sessions };
 };
 
+const handleHueOsLogin = async (params, body) => authenticateReplacementOsAccess(replacementOsAccess, String(body && body.password || ''));
+const handleHueOsProfile = async (params, body, context) => ({
+  ...readReplacementOsPublication(),
+  quota: getReplacementOsQuota(replacementOsAccess, context.ip),
+});
+const handleHueOsChat = async (params, body, context) => {
+  const quota = consumeReplacementOsQuota(replacementOsAccess, context.ip);
+  if (!quota.ok) {
+    const error = `오늘 대화 한도 ${quota.limit}회를 모두 사용했습니다. 00:00에 초기화됩니다.`;
+    const blocked = new Error(error);
+    blocked.statusCode = 429;
+    blocked.payload = { error, quota };
+    throw blocked;
+  }
+  const result = await chatWithReplacementOs(body || {}, { signal: context.signal });
+  return { ...result, quota };
+};
+
 // Translation API (async handler - special case)
 const asyncHandlers = {
   '/api/translate': async (params, body) => {
@@ -216,7 +283,13 @@ const asyncHandlers = {
     if (!texts.length) return { translated: [] };
     const translated = await translateTexts(texts.slice(0, 50)); // max 50 at a time
     return { translated };
-  }
+  },
+  '/api/hue-os/login': handleHueOsLogin,
+  '/api/hue-os/profile': handleHueOsProfile,
+  '/api/hue-os/chat': handleHueOsChat,
+  '/api/replacement-os/login': handleHueOsLogin,
+  '/api/replacement-os/profile': handleHueOsProfile,
+  '/api/replacement-os/chat': handleHueOsChat,
 };
 
 // Graph 3D data API
@@ -279,19 +352,38 @@ const server = http.createServer((req, res) => {
     res.end(getHTML());
     return;
   }
+  if (url.pathname === '/hue-os' || url.pathname === '/replacement-os' || url.pathname === '/os' || url.pathname === '/replacement') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(isReplacementOsRequestAuthenticated(req) ? renderReplacementOsPage() : renderReplacementOsLoginPage());
+    return;
+  }
   // Async API handlers (translation etc.)
   if (asyncHandlers[url.pathname]) {
+    const abortController = new AbortController();
+    req.on('aborted', () => abortController.abort());
+    res.on('close', () => {
+      if (!res.writableEnded) abortController.abort();
+    });
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
+      const isReplacementApi = url.pathname.startsWith('/api/replacement-os/');
+      const isHueOsApi = url.pathname.startsWith('/api/hue-os/');
+      const isHueOsLogin = url.pathname === '/api/hue-os/login' || url.pathname === '/api/replacement-os/login';
+      if ((isReplacementApi || isHueOsApi) && !isHueOsLogin && !isReplacementOsRequestAuthenticated(req)) {
+        writeJson(res, 401, { error: 'authentication_required' });
+        return;
+      }
       try {
         const parsed = body ? JSON.parse(body) : {};
-        const result = await asyncHandlers[url.pathname](url.searchParams, parsed);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify(result));
+        const result = await asyncHandlers[url.pathname](url.searchParams, parsed, { ip: clientIp(req), signal: abortController.signal });
+        const headers = { 'Access-Control-Allow-Origin': '*' };
+        if (isHueOsLogin && result.ok && result.token) {
+          headers['Set-Cookie'] = `${ACCESS_COOKIE_NAME}=${encodeURIComponent(result.token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`;
+        }
+        writeJson(res, 200, isHueOsLogin && result.ok ? { ok: true } : result, headers);
       } catch (e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
+        writeJson(res, e.statusCode || 500, e.payload || { error: e.message });
       }
     });
     return;
@@ -310,9 +402,12 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
-server.listen(PORT, () => console.log(`Memory Bank UI: http://localhost:${PORT}`));
-process.on('SIGINT', () => { db.close(); process.exit(); });
-process.on('SIGTERM', () => { db.close(); process.exit(); });
+server.listen(PORT, () => {
+  console.log(`Memory Bank UI: http://localhost:${PORT}`);
+  console.log(`Hue OS: http://localhost:${PORT}/hue-os`);
+});
+process.on('SIGINT', () => { if (db) db.close(); process.exit(); });
+process.on('SIGTERM', () => { if (db) db.close(); process.exit(); });
 
 function getHTML() {
   return `<!DOCTYPE html>

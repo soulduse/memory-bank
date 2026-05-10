@@ -168,12 +168,14 @@ A cinematic dark-theme web interface for browsing and searching your conversatio
 - **Search** -- Full-text search across all conversations
 - **User Prompts** -- Browse and search only user messages
 - **Exchange Detail** -- View full user/assistant messages with tool call history
+- **Hue OS Publication** -- Q&A-only personal mirror chat backed by the personal mirror artifacts in `~/.codex/personal-mirror`
 
 ### Run
 
 ```bash
 node ui/server.cjs
 # Memory Bank UI: http://localhost:3847
+# Hue OS: http://localhost:3847/hue-os
 ```
 
 Custom port:
@@ -182,6 +184,13 @@ PORT=8080 node ui/server.cjs
 ```
 
 > **Note:** Requires `memory-bank sync` to have been run at least once to populate the database.
+> The Hue OS publication route (`/hue-os`, with `/replacement-os` kept as a compatibility alias) can still load from local Personal Mirror artifacts when the conversation database is unavailable.
+> Chat defaults to local terminal CLIs instead of API keys: Claude via `claude --print --model sonnet`, GPT via `codex exec --model gpt-5.5`.
+> Override with `REPLACEMENT_OS_CLAUDE_COMMAND`, `REPLACEMENT_OS_CLAUDE_ARGS_JSON`, `REPLACEMENT_OS_GPT_COMMAND`, or `REPLACEMENT_OS_GPT_ARGS_JSON`.
+> If local terminal providers are unavailable, the route falls back to a deterministic safety-preserving response mode.
+> Public sharing guardrails: `/hue-os` requires password login (`REPLACEMENT_OS_ACCESS_PASSWORD`, default `0525`; 4 digits auto-submit in the login UI) and limits each client IP to 200 chat requests per local day (`REPLACEMENT_OS_DAILY_LIMIT`, reset at 00:00). The chat UI hides provider selection, disables Send during responses, shows an in-chat loading bar while Hue OS answers, and uses Esc to cancel an in-flight answer.
+> Hue OS answer boundary: it refuses access/security-sensitive questions, including passwords, tokens, cookies, env values, server/tunnel URLs, auth bypasses, quota bypasses, and security-weakening instructions.
+> Vercel sharing bridge: `vercel/hue-os/` is a standalone Vercel project that proxies `/api/hue-os/*` to a public HTTPS tunnel for this local server. Vercel cannot call your private `localhost` directly; keep this server running and set `HUE_OS_LOCAL_ORIGIN` to the tunnel/reverse-proxy origin so Claude/Codex subscription CLI auth stays local.
 
 ## Claude Desktop Integration
 

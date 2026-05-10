@@ -1,0 +1,55 @@
+flowchart LR
+  subgraph Edge[Developer machines]
+    T[10 terminals per user]
+    S[Memory Bank sidecar]
+    LC[(Local SQLite/offline spool)]
+    T --> S --> LC
+  end
+
+  subgraph Ingest[Cloud ingest plane]
+    GW[Regional API Gateway]
+    AUTH[OIDC/SAML + mTLS device auth]
+    ING[Stateless ingestion API pods]
+    Q[(Kafka/PubSub/Kinesis event bus)]
+    GW --> AUTH --> ING --> Q
+  end
+
+  subgraph Durable[Durable storage]
+    OBJ[(Raw JSONL object archive)]
+    PG[(Partitioned Postgres metadata/facts/policies)]
+    VEC[(Tenant-aware vector DB)]
+    TXT[(OpenSearch text index)]
+    REDIS[(Redis Cluster hot context cache)]
+    AUDIT[(Append-only audit ledger)]
+  end
+
+  subgraph Workers[Async processing]
+    IDX[Index workers]
+    EMB[Embedding workers]
+    FACT[Fact extraction/consolidation]
+    POL[Policy/HARD gate workers]
+    O11Y[OpenTelemetry collector]
+  end
+
+  subgraph APIs[Serving and governance plane]
+    MCP[MCP context/search API]
+    ADMIN[Admin/org/team UI API]
+    QA[Evidence/QA contract API]
+  end
+
+  S --> GW
+  ING --> OBJ
+  ING --> AUDIT
+  Q --> IDX --> PG
+  Q --> EMB --> VEC
+  Q --> FACT --> PG
+  IDX --> TXT
+  POL --> PG
+  POL --> AUDIT
+  MCP --> REDIS
+  MCP --> PG
+  MCP --> VEC
+  MCP --> TXT
+  ADMIN --> PG
+  QA --> PG
+  O11Y --> REDIS

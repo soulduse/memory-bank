@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory Bank Cloud Enterprise Architecture — Hugh Kim Style</title>
+<meta name="description" content="Memory Bank를 1,000명 동시 사용자와 10,000개 터미널 세션을 견디는 멀티테넌트 클라우드 메모리 OS로 확장하는 아키텍처 다이어그램과 실행 설계.">
+<meta name="author" content="Hugh Kim / Codex">
+<meta name="theme-color" content="#08090c">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Newsreader:ital,wght@0,300;0,700;1,300&family=Space+Grotesk:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #08090c;
+    --surface: #0f1114;
+    --surface2: #14171c;
+    --surface3: #0c1118;
+    --border: #1a1d23;
+    --border-hover: #2a2f38;
+    --text: #a0a8b4;
+    --text-dim: #545b67;
+    --text-bright: #e8ecf1;
+    --accent: #c8956c;
+    --accent2: #7c9cba;
+    --accent3: #8fb47a;
+    --accent4: #b48fc7;
+    --red: #c75c5c;
+    --cyan: #22d3ee;
+    --emerald: #34d399;
+    --violet: #a78bfa;
+    --amber: #fbbf24;
+    --rose: #fb7185;
+    --orange: #fb923c;
+    --mono: 'JetBrains Mono', monospace;
+    --serif: 'Newsreader', Georgia, serif;
+    --sans: 'Space Grotesk', sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--sans);
+    background: radial-gradient(circle at 80% -10%, rgba(124,156,186,0.08), transparent 38%), var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+    position: relative;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 128px;
+  }
+  a { color: var(--accent2); text-decoration: none; }
+  a:hover { color: var(--text-bright); }
+  code {
+    font-family: var(--mono); font-size: 0.86em; color: var(--text-bright);
+    background: rgba(255,255,255,0.04); padding: 1px 5px; border-radius: 2px;
+  }
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    height: 52px; padding: 0 clamp(16px,4vw,48px);
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(8,9,12,0.88); backdrop-filter: blur(20px) saturate(1.4);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .logo { font-family: var(--mono); font-weight: 700; font-size: 0.82em; color: var(--text-dim); letter-spacing: 0.04em; }
+  nav .logo b { color: var(--text-bright); }
+  nav .nav-links { display: flex; gap: 18px; align-items: center; }
+  nav .nav-links a { font-family: var(--mono); font-size: 0.72em; color: var(--text-dim); letter-spacing: 0.04em; }
+  nav .nav-links a:hover { color: var(--text-bright); }
+  .scroll-progress { position: fixed; top: 52px; left: 0; height: 2px; z-index: 101; background: linear-gradient(90deg, var(--accent2), var(--accent3), var(--red), var(--accent4)); width: 0%; transition: width .1s; }
+  #dot-canvas { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+
+  .hero { padding: clamp(64px,10vw,120px) clamp(24px,6vw,80px) clamp(42px,6vw,78px); max-width: 1400px; margin: 0 auto; position: relative; }
+  .hero::after { content: ''; position: absolute; top: -25%; right: -12%; width: 560px; height: 560px; background: radial-gradient(circle, rgba(124,156,186,0.16) 0%, transparent 70%); opacity: .45; pointer-events:none; }
+  .hero-eyebrow { font-family: var(--mono); font-size: .72em; color: var(--accent2); letter-spacing: .12em; text-transform: uppercase; margin-bottom: 20px; display:flex; align-items:center; gap:10px; }
+  .hero-eyebrow::before { content:''; width:24px; height:1px; background:var(--accent2); }
+  .pulse { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent2); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.85)} }
+  .hero h1 { font-family: var(--serif); font-weight: 700; font-size: clamp(2.35em,5.8vw,5.2em); color: var(--text-bright); letter-spacing: -0.04em; line-height: 1.02; margin-bottom: 24px; max-width: 980px; }
+  .hero h1 em { font-style: italic; font-weight: 300; color: var(--accent2); }
+  .hero-desc { max-width: 760px; font-size: 1.02em; font-weight: 300; color: var(--text); line-height: 1.78; }
+  .hero-actions { margin-top: 30px; display:flex; gap:12px; flex-wrap:wrap; }
+  .pill { font-family:var(--mono); font-size:.72em; color:var(--text-dim); border:1px solid var(--border); border-radius:999px; padding:8px 12px; background:rgba(255,255,255,.02); }
+  .pill strong { color:var(--text-bright); font-weight:600; }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 0 clamp(24px,6vw,80px) 80px; }
+  .section { margin-bottom: 76px; }
+  .section-label { font-family: var(--mono); font-size: .65em; color: var(--accent2); letter-spacing: .15em; text-transform: uppercase; margin-bottom: 12px; display:flex; align-items:center; gap:8px; }
+  .section-label::before { content:''; width:12px; height:1px; background:var(--accent2); }
+  .section-title { font-family: var(--serif); color: var(--text-bright); font-size: clamp(1.55em,3vw,2.25em); font-weight:700; letter-spacing:-.025em; line-height:1.15; margin-bottom:18px; }
+  .section-copy { max-width: 860px; color: var(--text); font-weight:300; margin-bottom:24px; }
+
+  .stats-bar { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:1px; background:var(--border); border:1px solid var(--border); border-radius:6px; overflow:hidden; margin-bottom:70px; }
+  .stat-item { background: rgba(15,17,20,.94); padding:24px 22px; }
+  .stat-value { font-family:var(--serif); font-size: clamp(2em,4vw,3.2em); color:var(--text-bright); line-height:1; letter-spacing:-.04em; }
+  .stat-value .unit { font-family:var(--mono); font-size:.3em; color:var(--text-dim); margin-left:5px; }
+  .stat-label { font-family:var(--mono); font-size:.68em; color:var(--text-dim); letter-spacing:.08em; text-transform:uppercase; margin-top:10px; }
+
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: clamp(14px, 2.5vw, 30px); overflow-x:auto; cursor: zoom-in; position:relative; transition: border-color .2s; box-shadow: 0 30px 80px rgba(0,0,0,.28); }
+  .diagram:hover { border-color: var(--border-hover); }
+  .diagram svg { width: 100%; min-width: 1180px; display:block; }
+  .diagram-hint { font-family:var(--mono); font-size:.7em; color:var(--text-dim); letter-spacing:.04em; text-align:right; margin-top:10px; }
+  .two-col { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:20px; }
+  .cards { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:16px; }
+  .card, .panel { background: rgba(15,17,20,.78); border:1px solid var(--border); border-radius:8px; padding:22px; }
+  .card h3, .panel h3 { font-family:var(--mono); font-size:.84em; color:var(--text-bright); letter-spacing:.04em; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+  .dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+  .cyan { background:var(--cyan); } .emerald { background:var(--emerald); } .violet { background:var(--violet); } .amber { background:var(--amber); } .rose { background:var(--rose); } .orange { background:var(--orange); }
+  .card p, .panel p { font-size:.92em; color:var(--text); font-weight:300; }
+  .card ul, .panel ul { list-style:none; font-family:var(--mono); font-size:.74em; color:var(--text); margin-top:8px; }
+  .card li, .panel li { margin:8px 0; padding-left:16px; position:relative; }
+  .card li::before, .panel li::before { content:'•'; position:absolute; left:0; color:var(--accent2); }
+  .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:8px; background:rgba(15,17,20,.72); }
+  table { width:100%; border-collapse:collapse; min-width:760px; }
+  th, td { padding:14px 16px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+  th { font-family:var(--mono); font-size:.68em; letter-spacing:.1em; text-transform:uppercase; color:var(--text-dim); background:rgba(255,255,255,.02); }
+  td { font-size:.9em; color:var(--text); }
+  tr:last-child td { border-bottom:0; }
+  .callout { border:1px solid rgba(199,92,92,.28); background:linear-gradient(135deg, rgba(199,92,92,.08), rgba(124,156,186,.04)); border-radius:8px; padding:22px; color:var(--text); }
+  .callout strong { color:var(--text-bright); }
+  .timeline { display:grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap:10px; }
+  .phase { border:1px solid var(--border); background:rgba(20,23,28,.74); padding:16px; border-radius:8px; min-height:132px; }
+  .phase .num { font-family:var(--mono); color:var(--accent2); font-size:.72em; margin-bottom:10px; }
+  .phase h4 { color:var(--text-bright); font-size:.92em; margin-bottom:8px; }
+  .phase p { color:var(--text); font-size:.8em; font-weight:300; }
+  .footer { border-top:1px solid var(--border); padding:30px clamp(24px,6vw,80px); text-align:center; color:var(--text-dim); font-family:var(--mono); font-size:.72em; }
+
+  .lightbox { position:fixed; inset:0; z-index:9000; background:rgba(8,9,12,.94); backdrop-filter:blur(12px) saturate(1.2); display:none; opacity:0; transition:opacity .25s ease; }
+  .lightbox.open { display:flex; flex-direction:column; opacity:1; }
+  .lightbox-head { flex-shrink:0; padding:14px clamp(16px,3vw,32px); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:rgba(8,9,12,.65); }
+  .lightbox-title { font-family:var(--mono); font-size:.78em; font-weight:700; color:var(--text-bright); letter-spacing:.04em; }
+  .lightbox-actions { display:flex; gap:10px; align-items:center; }
+  .lightbox-btn { font-family:var(--mono); font-size:.74em; padding:7px 14px; background:transparent; border:1px solid var(--border); color:var(--text-dim); border-radius:4px; cursor:pointer; letter-spacing:.04em; }
+  .lightbox-btn:hover { border-color:var(--accent2); color:var(--text-bright); background:rgba(124,156,186,.08); }
+  .lightbox-body { flex:1; overflow:auto; padding:clamp(20px,3vw,48px); display:flex; align-items:flex-start; justify-content:center; }
+  .lightbox-body svg { width:100%; min-width:1500px; height:auto; background:var(--surface); border:1px solid var(--border); border-radius:8px; transform-origin:top center; }
+  body.lightbox-open { overflow:hidden; }
+
+  .node-text { font-family: var(--mono); }
+  @media (max-width: 960px) { .stats-bar, .cards, .two-col, .timeline { grid-template-columns: 1fr; } nav .nav-links { display:none; } }
+</style>
+</head>
+<body>
+<canvas id="dot-canvas" aria-hidden="true"></canvas>
+<nav>
+  <div class="logo">MEMORY <b>BANK</b> CLOUD</div>
+  <div class="nav-links">
+    <a href="#diagram">Diagram</a>
+    <a href="#slo">SLO</a>
+    <a href="#gates">Gates</a>
+    <a href="#migration">Migration</a>
+  </div>
+</nav>
+<div class="scroll-progress" id="scroll-progress"></div>
+
+<header class="hero">
+  <div class="hero-eyebrow"><span class="pulse"></span>Enterprise Architecture</div>
+  <h1>Memory Bank Cloud<br><em>AI Memory OS</em></h1>
+  <p class="hero-desc">
+    <code>docs/cloud-enterprise-architecture.md</code>를 기반으로, 로컬 SQLite 기반 메모리 뱅크를 회사→조직→팀→프로젝트→사용자→터미널 단위로 격리·관리하는 클라우드 아키텍처로 재구성했다. 핵심은 “SQLite를 서버에 올리는 것”이 아니라, 원본 아카이브 우선 저장·테넌트 격리·비동기 인덱싱·HARD 증거 게이트를 갖춘 멀티테넌트 메모리 운영체제다.
+  </p>
+  <div class="hero-actions">
+    <div class="pill"><strong>Target</strong> 1,000 users × 10 terminals</div>
+    <div class="pill"><strong>Invariant</strong> zero accepted-event loss</div>
+    <div class="pill"><strong>Invariant</strong> zero cross-tenant leakage</div>
+    <div class="pill"><strong>Mode</strong> L6+ / L7-oriented evidence gates</div>
+  </div>
+</header>
+
+<main class="container">
+  <section class="stats-bar" aria-label="capacity targets">
+    <div class="stat-item"><div class="stat-value">1,000<span class="unit">users</span></div><div class="stat-label">Concurrent users</div></div>
+    <div class="stat-item"><div class="stat-value">10,000<span class="unit">sessions</span></div><div class="stat-label">Active terminals</div></div>
+    <div class="stat-item"><div class="stat-value">2,000<span class="unit">/sec</span></div><div class="stat-label">Sustained exchange events</div></div>
+    <div class="stat-item"><div class="stat-value">250<span class="unit">ms p95</span></div><div class="stat-label">Durable ingest ack</div></div>
+  </section>
+
+  <section class="section" id="diagram">
+    <div class="section-label">Reference Cloud Diagram</div>
+    <h2 class="section-title">Edge spool에서 증거 게이트까지: 멀티테넌트 메모리 파이프라인</h2>
+    <p class="section-copy">화살표는 승인된 이벤트가 로컬 터미널에서 클라우드 ingest plane으로 올라간 뒤, 원본 아카이브·이벤트 버스·메타데이터/벡터/텍스트 저장소·비동기 워커·MCP/API 제공면으로 분리되는 경로를 보여준다.</p>
+
+    <div class="diagram" id="diagram-container" role="button" tabindex="0" aria-label="Memory Bank Cloud architecture diagram. Click to zoom.">
+      <svg viewBox="0 0 1500 980" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="main-title main-desc">
+        <title id="main-title">Memory Bank Cloud Enterprise Architecture</title>
+        <desc id="main-desc">Multi-tenant architecture with developer sidecars, cloud ingestion, durable storage, async workers, serving APIs, and HARD evidence gates.</desc>
+        <defs>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+          <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/></marker>
+          <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/></marker>
+          <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/></marker>
+          <filter id="glow"><feGaussianBlur stdDeviation="3" result="coloredBlur"/><feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        <rect width="1500" height="980" fill="#08090c"/>
+        <rect width="1500" height="980" fill="url(#grid)" opacity="0.75"/>
+
+        <!-- connections behind components -->
+        <g stroke="#64748b" stroke-width="1.7" fill="none" marker-end="url(#arrowhead)" opacity="0.9">
+          <path d="M 190 258 C 235 258, 235 258, 278 258"/>
+          <path d="M 420 258 C 462 258, 462 258, 505 258"/>
+          <path d="M 645 258 C 690 258, 690 258, 735 258"/>
+          <path d="M 875 258 C 914 258, 914 258, 954 258"/>
+          <path d="M 1095 258 C 1138 258, 1138 258, 1180 258"/>
+          <path d="M 875 258 C 945 360, 945 422, 1000 480"/>
+          <path d="M 875 258 C 945 420, 945 570, 1000 640"/>
+          <path d="M 1295 258 C 1350 345, 1350 455, 1292 542"/>
+          <path d="M 1295 258 C 1360 420, 1360 600, 1292 700"/>
+          <path d="M 1180 542 C 1115 542, 1115 542, 1052 542"/>
+          <path d="M 1180 700 C 1105 700, 1105 700, 1030 700"/>
+          <path d="M 920 480 C 810 480, 810 480, 700 480"/>
+          <path d="M 920 640 C 805 640, 805 640, 690 640"/>
+          <path d="M 360 590 C 470 590, 470 590, 580 590"/>
+          <path d="M 700 590 C 810 590, 810 590, 920 590"/>
+          <path d="M 520 742 C 610 742, 610 742, 700 742"/>
+          <path d="M 822 742 C 905 742, 905 742, 988 742"/>
+          <path d="M 1108 742 C 1190 742, 1190 742, 1272 742"/>
+        </g>
+        <g stroke="#fb7185" stroke-width="1.4" fill="none" marker-end="url(#arrow-rose)" stroke-dasharray="5,5" opacity="0.95">
+          <path d="M 560 162 C 630 120, 742 120, 815 190"/>
+          <path d="M 1182 358 C 1088 395, 1088 395, 994 430"/>
+        </g>
+
+        <!-- boundaries -->
+        <rect x="30" y="80" width="430" height="320" rx="16" fill="rgba(30,41,59,0.28)" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="8,4"/>
+        <text x="52" y="108" fill="#94a3b8" font-size="13" font-family="JetBrains Mono" font-weight="700">EDGE / DEVELOPER MACHINES</text>
+        <rect x="500" y="80" width="410" height="320" rx="16" fill="rgba(120,53,15,0.08)" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="8,4"/>
+        <text x="522" y="108" fill="#fbbf24" font-size="13" font-family="JetBrains Mono" font-weight="700">CLOUD INGEST PLANE</text>
+        <rect x="950" y="80" width="500" height="735" rx="16" fill="rgba(8,51,68,0.07)" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="8,4"/>
+        <text x="972" y="108" fill="#22d3ee" font-size="13" font-family="JetBrains Mono" font-weight="700">REGIONAL CELL / SERVING + STORAGE</text>
+        <rect x="42" y="448" width="875" height="367" rx="16" fill="rgba(6,78,59,0.05)" stroke="#34d399" stroke-width="1.2" stroke-dasharray="8,4"/>
+        <text x="64" y="476" fill="#34d399" font-size="13" font-family="JetBrains Mono" font-weight="700">ASYNC PROCESSING + LOOP ERA HARD GATES</text>
+
+        <!-- components -->
+        <g font-family="JetBrains Mono" text-anchor="middle">
+          <rect x="70" y="220" width="120" height="76" rx="8" fill="#0f172a"/><rect x="70" y="220" width="120" height="76" rx="8" fill="rgba(30,41,59,0.55)" stroke="#94a3b8" stroke-width="1.5"/>
+          <text x="130" y="246" fill="#fff" font-size="13" font-weight="700">Terminals</text><text x="130" y="265" fill="#94a3b8" font-size="10">10 per user</text><text x="130" y="282" fill="#94a3b8" font-size="9">Claude / Codex</text>
+          <rect x="280" y="220" width="140" height="76" rx="8" fill="#0f172a"/><rect x="280" y="220" width="140" height="76" rx="8" fill="rgba(6,78,59,0.40)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="350" y="246" fill="#fff" font-size="13" font-weight="700">Sidecar</text><text x="350" y="265" fill="#94a3b8" font-size="10">redact + batch</text><text x="350" y="282" fill="#34d399" font-size="9">event_seq</text>
+          <rect x="155" y="325" width="160" height="54" rx="8" fill="#0f172a"/><rect x="155" y="325" width="160" height="54" rx="8" fill="rgba(76,29,149,0.38)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="235" y="347" fill="#fff" font-size="12" font-weight="700">Local spool</text><text x="235" y="365" fill="#94a3b8" font-size="9">offline SQLite cache</text>
+
+          <rect x="505" y="220" width="140" height="76" rx="8" fill="#0f172a"/><rect x="505" y="220" width="140" height="76" rx="8" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="575" y="246" fill="#fff" font-size="13" font-weight="700">API Gateway</text><text x="575" y="265" fill="#94a3b8" font-size="10">regional LB</text><text x="575" y="282" fill="#fbbf24" font-size="9">rate limits</text>
+          <rect x="735" y="220" width="140" height="76" rx="8" fill="#0f172a"/><rect x="735" y="220" width="140" height="76" rx="8" fill="rgba(136,19,55,0.36)" stroke="#fb7185" stroke-width="1.5"/>
+          <text x="805" y="246" fill="#fff" font-size="13" font-weight="700">Auth / Policy</text><text x="805" y="265" fill="#94a3b8" font-size="10">OIDC + SAML</text><text x="805" y="282" fill="#fb7185" font-size="9">mTLS device</text>
+          <rect x="535" y="325" width="145" height="54" rx="8" fill="#0f172a"/><rect x="535" y="325" width="145" height="54" rx="8" fill="rgba(6,78,59,0.40)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="607" y="347" fill="#fff" font-size="12" font-weight="700">Ingestion API</text><text x="607" y="365" fill="#94a3b8" font-size="9">stateless pods</text>
+          <rect x="715" y="325" width="155" height="54" rx="8" fill="#0f172a"/><rect x="715" y="325" width="155" height="54" rx="8" fill="rgba(251,146,60,0.25)" stroke="#fb923c" stroke-width="1.5"/>
+          <text x="792" y="347" fill="#fff" font-size="12" font-weight="700">Event Bus</text><text x="792" y="365" fill="#94a3b8" font-size="9">Kafka / PubSub</text>
+
+          <rect x="955" y="220" width="140" height="76" rx="8" fill="#0f172a"/><rect x="955" y="220" width="140" height="76" rx="8" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="1025" y="246" fill="#fff" font-size="12" font-weight="700">Raw Archive</text><text x="1025" y="265" fill="#94a3b8" font-size="9">object storage</text><text x="1025" y="282" fill="#fbbf24" font-size="8">JSONL replay</text>
+          <rect x="1180" y="220" width="145" height="76" rx="8" fill="#0f172a"/><rect x="1180" y="220" width="145" height="76" rx="8" fill="rgba(76,29,149,0.38)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="1252" y="246" fill="#fff" font-size="12" font-weight="700">Postgres</text><text x="1252" y="265" fill="#94a3b8" font-size="9">facts / policies</text><text x="1252" y="282" fill="#a78bfa" font-size="8">tenant partitions</text>
+          <rect x="1180" y="505" width="145" height="74" rx="8" fill="#0f172a"/><rect x="1180" y="505" width="145" height="74" rx="8" fill="rgba(76,29,149,0.38)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="1252" y="531" fill="#fff" font-size="12" font-weight="700">Vector DB</text><text x="1252" y="550" fill="#94a3b8" font-size="9">tenant-aware</text><text x="1252" y="566" fill="#a78bfa" font-size="8">Qdrant / Milvus</text>
+          <rect x="1180" y="665" width="145" height="74" rx="8" fill="#0f172a"/><rect x="1180" y="665" width="145" height="74" rx="8" fill="rgba(76,29,149,0.38)" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="1252" y="691" fill="#fff" font-size="12" font-weight="700">Text Index</text><text x="1252" y="710" fill="#94a3b8" font-size="9">OpenSearch</text><text x="1252" y="726" fill="#a78bfa" font-size="8">filters + highlights</text>
+          <rect x="982" y="505" width="125" height="74" rx="8" fill="#0f172a"/><rect x="982" y="505" width="125" height="74" rx="8" fill="rgba(8,51,68,0.40)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="1045" y="531" fill="#fff" font-size="12" font-weight="700">Redis</text><text x="1045" y="550" fill="#94a3b8" font-size="9">hot context</text><text x="1045" y="566" fill="#22d3ee" font-size="8">p95 &lt;100ms</text>
+          <rect x="982" y="665" width="125" height="74" rx="8" fill="#0f172a"/><rect x="982" y="665" width="125" height="74" rx="8" fill="rgba(136,19,55,0.36)" stroke="#fb7185" stroke-width="1.5"/>
+          <text x="1045" y="691" fill="#fff" font-size="12" font-weight="700">Audit Ledger</text><text x="1045" y="710" fill="#94a3b8" font-size="9">append-only</text><text x="1045" y="726" fill="#fb7185" font-size="8">retention</text>
+
+          <rect x="110" y="550" width="125" height="72" rx="8" fill="#0f172a"/><rect x="110" y="550" width="125" height="72" rx="8" fill="rgba(6,78,59,0.40)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="172" y="576" fill="#fff" font-size="12" font-weight="700">Index</text><text x="172" y="595" fill="#94a3b8" font-size="9">text chunks</text><text x="172" y="611" fill="#34d399" font-size="8">&lt;5s visible</text>
+          <rect x="270" y="550" width="125" height="72" rx="8" fill="#0f172a"/><rect x="270" y="550" width="125" height="72" rx="8" fill="rgba(6,78,59,0.40)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="332" y="576" fill="#fff" font-size="12" font-weight="700">Embedding</text><text x="332" y="595" fill="#94a3b8" font-size="9">2k chunks/s</text><text x="332" y="611" fill="#34d399" font-size="8">async GPU/CPU</text>
+          <rect x="580" y="550" width="145" height="72" rx="8" fill="#0f172a"/><rect x="580" y="550" width="145" height="72" rx="8" fill="rgba(6,78,59,0.40)" stroke="#34d399" stroke-width="1.5"/>
+          <text x="652" y="576" fill="#fff" font-size="12" font-weight="700">Fact Workers</text><text x="652" y="595" fill="#94a3b8" font-size="9">extract + merge</text><text x="652" y="611" fill="#34d399" font-size="8">p95 &lt;2min</text>
+          <rect x="775" y="550" width="145" height="72" rx="8" fill="#0f172a"/><rect x="775" y="550" width="145" height="72" rx="8" fill="rgba(136,19,55,0.36)" stroke="#fb7185" stroke-width="1.5"/>
+          <text x="847" y="576" fill="#fff" font-size="12" font-weight="700">HARD Gates</text><text x="847" y="595" fill="#94a3b8" font-size="9">policy + evidence</text><text x="847" y="611" fill="#fb7185" font-size="8">block unsafe</text>
+          <rect x="400" y="705" width="125" height="72" rx="8" fill="#0f172a"/><rect x="400" y="705" width="125" height="72" rx="8" fill="rgba(30,41,59,0.55)" stroke="#94a3b8" stroke-width="1.5"/>
+          <text x="462" y="731" fill="#fff" font-size="12" font-weight="700">Signals</text><text x="462" y="750" fill="#94a3b8" font-size="9">QA / fixes</text><text x="462" y="766" fill="#94a3b8" font-size="8">trend input</text>
+          <rect x="700" y="705" width="125" height="72" rx="8" fill="#0f172a"/><rect x="700" y="705" width="125" height="72" rx="8" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="762" y="731" fill="#fff" font-size="12" font-weight="700">Canary</text><text x="762" y="750" fill="#94a3b8" font-size="9">rule bundle</text><text x="762" y="766" fill="#fbbf24" font-size="8">keep/discard</text>
+          <rect x="990" y="705" width="125" height="72" rx="8" fill="#0f172a"/><rect x="990" y="705" width="125" height="72" rx="8" fill="rgba(8,51,68,0.40)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="1052" y="731" fill="#fff" font-size="12" font-weight="700">Publish</text><text x="1052" y="750" fill="#94a3b8" font-size="9">versioned</text><text x="1052" y="766" fill="#22d3ee" font-size="8">rollback-ready</text>
+          <rect x="1272" y="705" width="125" height="72" rx="8" fill="#0f172a"/><rect x="1272" y="705" width="125" height="72" rx="8" fill="rgba(8,51,68,0.40)" stroke="#22d3ee" stroke-width="1.5"/>
+          <text x="1334" y="731" fill="#fff" font-size="12" font-weight="700">MCP/API</text><text x="1334" y="750" fill="#94a3b8" font-size="9">context/search</text><text x="1334" y="766" fill="#22d3ee" font-size="8">RBAC + ABAC</text>
+        </g>
+
+        <!-- labels -->
+        <g font-family="JetBrains Mono" font-size="9" fill="#94a3b8" text-anchor="middle">
+          <text x="235" y="247">events</text><text x="462" y="247">batch upload</text><text x="690" y="247">authz</text><text x="914" y="247">archive + queue</text><text x="1138" y="247">metadata</text>
+          <text x="960" y="410">async fan-out</text><text x="1356" y="426">serves reads</text><text x="830" y="730">tested bundle</text><text x="1190" y="730">safe context</text>
+        </g>
+
+        <!-- invariants footer and legend -->
+        <rect x="40" y="850" width="1420" height="92" rx="12" fill="rgba(15,17,20,0.84)" stroke="#1a1d23"/>
+        <g font-family="JetBrains Mono" font-size="11" fill="#94a3b8">
+          <text x="64" y="880" fill="#e8ecf1" font-weight="700">Hard invariants</text>
+          <text x="64" y="906">1. every persisted row/object/vector/cache key includes tenant scope</text>
+          <text x="530" y="906">2. sidecar deletes spool only after archived + queued ack</text>
+          <text x="970" y="906">3. org/company promotion requires DLP + approval + audit</text>
+          <rect x="64" y="920" width="16" height="10" rx="2" fill="rgba(30,41,59,.55)" stroke="#94a3b8"/><text x="88" y="929">edge/external</text>
+          <rect x="190" y="920" width="16" height="10" rx="2" fill="rgba(6,78,59,.40)" stroke="#34d399"/><text x="214" y="929">backend/worker</text>
+          <rect x="330" y="920" width="16" height="10" rx="2" fill="rgba(76,29,149,.38)" stroke="#a78bfa"/><text x="354" y="929">database/search</text>
+          <rect x="490" y="920" width="16" height="10" rx="2" fill="rgba(136,19,55,.36)" stroke="#fb7185"/><text x="514" y="929">security/gate</text>
+          <rect x="640" y="920" width="16" height="10" rx="2" fill="rgba(251,146,60,.25)" stroke="#fb923c"/><text x="664" y="929">event bus</text>
+        </g>
+      </svg>
+    </div>
+    <div class="diagram-hint">click diagram to zoom · inline SVG · standalone HTML</div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">Architecture Decisions</div>
+    <h2 class="section-title">서버화가 아니라 운영체제화</h2>
+    <div class="cards">
+      <article class="card"><h3><span class="dot rose"></span>Tenant isolation first</h3><p>테넌트는 고객/회사 단위의 하드 격리 경계다. 모든 API, DB row, object key, vector payload, cache key는 <code>tenant_id</code>를 첫 번째 필터로 가져야 한다.</p><ul><li>pool/silo/hybrid isolation mode</li><li>RBAC + ABAC + audit trail</li><li>cross-tenant test blocks deploy</li></ul></article>
+      <article class="card"><h3><span class="dot amber"></span>Archive-first ingestion</h3><p>검색·벡터·팩트 추출은 늦어질 수 있지만, 승인된 원본 이벤트 손실은 허용하지 않는다. 원본 아카이브와 큐 publish가 sidecar spool 삭제의 기준이다.</p><ul><li>raw JSONL object archive</li><li>idempotency by terminal/session/event_seq</li><li>backpressure defers expensive work</li></ul></article>
+      <article class="card"><h3><span class="dot emerald"></span>Evidence-gated Loopy-Era</h3><p>자가개선은 자동 생성이 아니라 검증된 승격이다. QA 실패·fix commit·정책 위반 시그널은 canary bundle, replay, load smoke, 승인을 통과해야 publish된다.</p><ul><li>signed evidence contract</li><li>keep/discard/rollback lifecycle</li><li>no BLOCKED marker completion claim</li></ul></article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">Scope Model</div>
+    <h2 class="section-title">회사→조직→팀→프로젝트→사용자→터미널까지 메모리 경계를 명시한다</h2>
+    <div class="two-col">
+      <div class="diagram" id="scope-diagram" role="button" tabindex="0" aria-label="Tenant and memory scope diagram. Click to zoom.">
+        <svg viewBox="0 0 700 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Memory scope hierarchy">
+          <defs><pattern id="grid2" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M 32 0 L 0 0 0 32" fill="none" stroke="#1e293b" stroke-width="0.45"/></pattern></defs>
+          <rect width="700" height="560" fill="#08090c"/><rect width="700" height="560" fill="url(#grid2)"/>
+          <g font-family="JetBrains Mono" text-anchor="middle">
+            <rect x="70" y="48" width="560" height="56" rx="8" fill="rgba(136,19,55,.28)" stroke="#fb7185"/><text x="350" y="81" fill="#fff" font-size="15" font-weight="700">Company / Tenant</text>
+            <rect x="105" y="126" width="490" height="52" rx="8" fill="rgba(120,53,15,.24)" stroke="#fbbf24"/><text x="350" y="158" fill="#fff" font-size="14" font-weight="700">Organization</text>
+            <rect x="140" y="200" width="420" height="52" rx="8" fill="rgba(251,146,60,.22)" stroke="#fb923c"/><text x="350" y="232" fill="#fff" font-size="14" font-weight="700">Team</text>
+            <rect x="175" y="274" width="350" height="52" rx="8" fill="rgba(8,51,68,.36)" stroke="#22d3ee"/><text x="350" y="306" fill="#fff" font-size="14" font-weight="700">Project / Repository</text>
+            <rect x="210" y="348" width="280" height="52" rx="8" fill="rgba(76,29,149,.32)" stroke="#a78bfa"/><text x="350" y="380" fill="#fff" font-size="14" font-weight="700">User</text>
+            <rect x="245" y="422" width="210" height="52" rx="8" fill="rgba(30,41,59,.55)" stroke="#94a3b8"/><text x="350" y="454" fill="#fff" font-size="14" font-weight="700">Terminal / Session</text>
+            <text x="350" y="514" fill="#94a3b8" font-size="11">Required on every object: tenant_id · org_id · team_id · project_id · user_id · terminal_id · session_id</text>
+          </g>
+        </svg>
+      </div>
+      <div class="panel">
+        <h3><span class="dot violet"></span>Promotion rules</h3>
+        <ul>
+          <li><code>personal</code>: user-only; never auto-promote without explicit policy event.</li>
+          <li><code>project</code>: project members; maintainer approval or repeated evidence.</li>
+          <li><code>team</code>: DLP/secret scan plus team admin approval.</li>
+          <li><code>org/company</code>: steward/security approval, canary validation, rollback plan.</li>
+          <li><code>global_template</code>: vendor-owned generic patterns only; never tenant data.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="slo">
+    <div class="section-label">Performance SLO</div>
+    <h2 class="section-title">성능 목표는 “빠른 체감”과 “느려져도 안전한 처리”로 분리한다</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Operation</th><th>Target</th><th>Design pressure</th></tr></thead>
+        <tbody>
+          <tr><td>Ingest auth/schema validation</td><td>p95 &lt; 50 ms, p99 &lt; 150 ms</td><td>stateless API pods, cached policy bundle, fast schema validation</td></tr>
+          <tr><td>Durable ingest ack</td><td>p95 &lt; 250 ms, p99 &lt; 1 s</td><td>object archive + durable bus before spool deletion</td></tr>
+          <tr><td>Cached context lookup</td><td>p95 &lt; 100 ms, p99 &lt; 250 ms</td><td>Redis Cluster hot facts and recent context by tenant/project/user</td></tr>
+          <tr><td>Hybrid text/vector search</td><td>p95 &lt; 500 ms, p99 &lt; 1.5 s</td><td>OpenSearch + vector DB with tenant-aware filters and shard promotion</td></tr>
+          <tr><td>Fact visibility</td><td>p95 &lt; 2 min normal priority</td><td>LLM/API limited workers, backlog SLOs, quota-aware batching</td></tr>
+          <tr><td>Accepted event loss</td><td>RPO 0</td><td>raw archive replay, idempotency key, append-only audit</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section" id="gates">
+    <div class="section-label">Hard Verification Gates</div>
+    <h2 class="section-title">엔터프라이즈 준비 완료는 JSON 증거 파일이 PASS일 때만 말할 수 있다</h2>
+    <div class="callout"><strong>Release invariant:</strong> load, tenant isolation, failover, security scan, policy rollback evidence가 모두 PASS가 아니면 클라우드 엔터프라이즈 readiness를 주장하지 않는다. Smoke test나 수동 확인은 HARD gate를 대체하지 못한다.</div>
+    <div class="cards" style="margin-top:16px;">
+      <article class="card"><h3><span class="dot cyan"></span>Load evidence</h3><ul><li><code>.cloud-evidence/load-10k-terminals.json</code></li><li><code>.cloud-evidence/search-qps.json</code></li><li>p95/p99 latency + 0 accepted-event loss</li></ul></article>
+      <article class="card"><h3><span class="dot rose"></span>Isolation evidence</h3><ul><li><code>cloud/tests/test_tenant_isolation.py</code></li><li>no cross-tenant DB/cache/vector/object reads</li><li>policy decision audit retained</li></ul></article>
+      <article class="card"><h3><span class="dot emerald"></span>Runtime evidence</h3><ul><li>sidecar compatibility tests</li><li>policy rollback tests</li><li>OpenTelemetry SLO burn alerts</li></ul></article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">Self-Improve Lifecycle</div>
+    <h2 class="section-title">Loopy-Era는 범위 분류와 canary 검증을 통과한 개선만 승격한다</h2>
+    <div class="diagram" id="lifecycle-diagram" role="button" tabindex="0" aria-label="Loopy Era self-improvement lifecycle. Click to zoom.">
+      <svg viewBox="0 0 1180 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Self-improve lifecycle">
+        <defs><marker id="life-arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker></defs>
+        <rect width="1180" height="320" fill="#08090c"/>
+        <g stroke="#64748b" stroke-width="1.7" marker-end="url(#life-arrow)" fill="none"><path d="M145 160 L210 160"/><path d="M315 160 L380 160"/><path d="M495 160 L560 160"/><path d="M675 160 L740 160"/><path d="M855 160 L920 160"/><path d="M1035 160 L1090 160"/></g>
+        <g font-family="JetBrains Mono" text-anchor="middle">
+          <g><rect x="35" y="118" width="110" height="84" rx="8" fill="rgba(30,41,59,.55)" stroke="#94a3b8"/><text x="90" y="150" fill="#fff" font-size="12" font-weight="700">Signal</text><text x="90" y="170" fill="#94a3b8" font-size="9">QA / fix / policy</text></g>
+          <g><rect x="210" y="118" width="110" height="84" rx="8" fill="rgba(6,78,59,.35)" stroke="#34d399"/><text x="265" y="150" fill="#fff" font-size="12" font-weight="700">Proposal</text><text x="265" y="170" fill="#94a3b8" font-size="9">rule candidate</text></g>
+          <g><rect x="380" y="118" width="120" height="84" rx="8" fill="rgba(120,53,15,.28)" stroke="#fbbf24"/><text x="440" y="150" fill="#fff" font-size="12" font-weight="700">Classify</text><text x="440" y="170" fill="#94a3b8" font-size="9">personal → org</text></g>
+          <g><rect x="560" y="118" width="120" height="84" rx="8" fill="rgba(8,51,68,.35)" stroke="#22d3ee"/><text x="620" y="150" fill="#fff" font-size="12" font-weight="700">Canary</text><text x="620" y="170" fill="#94a3b8" font-size="9">version bundle</text></g>
+          <g><rect x="740" y="118" width="120" height="84" rx="8" fill="rgba(136,19,55,.32)" stroke="#fb7185"/><text x="800" y="150" fill="#fff" font-size="12" font-weight="700">Tests</text><text x="800" y="170" fill="#94a3b8" font-size="9">replay + isolation</text></g>
+          <g><rect x="920" y="118" width="120" height="84" rx="8" fill="rgba(76,29,149,.34)" stroke="#a78bfa"/><text x="980" y="150" fill="#fff" font-size="12" font-weight="700">Approve</text><text x="980" y="170" fill="#94a3b8" font-size="9">if broad/irreversible</text></g>
+          <g><rect x="1090" y="118" width="70" height="84" rx="8" fill="rgba(8,51,68,.35)" stroke="#22d3ee"/><text x="1125" y="150" fill="#fff" font-size="12" font-weight="700">Keep</text><text x="1125" y="170" fill="#94a3b8" font-size="9">or rollback</text></g>
+          <text x="590" y="262" fill="#94a3b8" font-size="11">HARD failure at any step blocks publication and writes an evidence record.</text>
+        </g>
+      </svg>
+    </div>
+  </section>
+
+  <section class="section" id="migration">
+    <div class="section-label">Migration Path</div>
+    <h2 class="section-title">현재 로컬-first Memory Bank에서 클라우드 셀까지의 이행 순서</h2>
+    <div class="timeline">
+      <div class="phase"><div class="num">Phase 0</div><h4>Contracts</h4><p>event schema, tenant IDs, evidence JSON, policy contract를 먼저 고정한다.</p></div>
+      <div class="phase"><div class="num">Phase 1</div><h4>Sidecar</h4><p>local hook/sync를 offline spool + idempotent upload로 감싼다.</p></div>
+      <div class="phase"><div class="num">Phase 2</div><h4>Ingest</h4><p>auth, raw archive, event bus, Postgres metadata write path를 만든다.</p></div>
+      <div class="phase"><div class="num">Phase 3</div><h4>Search</h4><p>text/vector index workers와 cached context API를 분리한다.</p></div>
+      <div class="phase"><div class="num">Phase 4</div><h4>Governance</h4><p>org/team admin, scope promotion, DLP, audit, rollback을 붙인다.</p></div>
+      <div class="phase"><div class="num">Phase 5</div><h4>Evidence</h4><p>10k terminals, 15k QPS, tenant isolation, failover gates를 release blocker로 만든다.</p></div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">Generated from docs/cloud-enterprise-architecture.md · Architecture Diagram Codex skill · claude-code-site visual language · 2026-05-04 KST</footer>
+
+<div class="lightbox" id="lightbox" aria-hidden="true">
+  <div class="lightbox-head"><div class="lightbox-title">Diagram zoom</div><div class="lightbox-actions"><button class="lightbox-btn" id="zoom-out">−</button><button class="lightbox-btn" id="zoom-reset">100%</button><button class="lightbox-btn" id="zoom-in">+</button><button class="lightbox-btn" id="lightbox-close">Close</button></div></div>
+  <div class="lightbox-body" id="lightbox-body"></div>
+</div>
+
+<script>
+(function() {
+  const progress = document.getElementById('scroll-progress');
+  function updateProgress() {
+    const total = document.documentElement.scrollHeight - window.innerHeight;
+    progress.style.width = total > 0 ? `${(window.scrollY / total) * 100}%` : '0%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  const canvas = document.getElementById('dot-canvas');
+  const ctx = canvas.getContext('2d');
+  function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+  function drawDots() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const spacing = 40;
+    for (let x = 0; x < canvas.width; x += spacing) {
+      for (let y = 0; y < canvas.height; y += spacing) {
+        const op = Math.random() * 0.055 + 0.01;
+        ctx.fillStyle = `rgba(168, 176, 188, ${op})`;
+        ctx.beginPath(); ctx.arc(x, y, 0.8, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+  resizeCanvas(); drawDots();
+  window.addEventListener('resize', () => { resizeCanvas(); drawDots(); });
+
+  const lightbox = document.getElementById('lightbox');
+  const body = document.getElementById('lightbox-body');
+  const close = document.getElementById('lightbox-close');
+  const zoomIn = document.getElementById('zoom-in');
+  const zoomOut = document.getElementById('zoom-out');
+  const zoomReset = document.getElementById('zoom-reset');
+  let zoom = 1;
+  function clearNode(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function applyZoom() { const svg = body.querySelector('svg'); if (svg) svg.style.transform = `scale(${zoom})`; }
+  function openFrom(container) {
+    const svg = container.querySelector('svg'); if (!svg) return;
+    clearNode(body); const cloned = svg.cloneNode(true); cloned.removeAttribute('style'); body.appendChild(cloned);
+    zoom = 1; applyZoom(); lightbox.classList.add('open'); document.body.classList.add('lightbox-open'); lightbox.setAttribute('aria-hidden', 'false');
+  }
+  function closeBox() { lightbox.classList.remove('open'); document.body.classList.remove('lightbox-open'); lightbox.setAttribute('aria-hidden', 'true'); setTimeout(() => clearNode(body), 250); }
+  document.querySelectorAll('.diagram[role="button"]').forEach((el) => {
+    el.addEventListener('click', () => openFrom(el));
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFrom(el); } });
+  });
+  close.addEventListener('click', closeBox);
+  lightbox.addEventListener('click', (e) => { if (e.target === lightbox || e.target.classList.contains('lightbox-body')) closeBox(); });
+  zoomIn.addEventListener('click', (e) => { e.stopPropagation(); zoom = Math.min(3, zoom + 0.25); applyZoom(); });
+  zoomOut.addEventListener('click', (e) => { e.stopPropagation(); zoom = Math.max(0.5, zoom - 0.25); applyZoom(); });
+  zoomReset.addEventListener('click', (e) => { e.stopPropagation(); zoom = 1; applyZoom(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && lightbox.classList.contains('open')) closeBox(); });
+})();
+</script>
+</body>
+</html>
