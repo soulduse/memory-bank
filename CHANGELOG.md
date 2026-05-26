@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-12
+
+### Added
+- **Multi coding-agent tagging**: Conversations and extracted facts now record which coding agent produced them.
+  - Default source remains `claude-code`.
+  - Additional sources can be configured with `MEMORY_BANK_AGENT_SOURCES` or `conversation-index/agent-sources.json`.
+  - Supported agent labels include `claude-code`, `codex`, `opencode`, and custom agent names.
+- **Agent-aware search filters**: MCP and library search paths can filter conversations and facts by `coding_agent`.
+  - `search` supports a `coding_agent` filter.
+  - `search_facts` supports a `coding_agent` filter.
+  - Search result formatting shows an agent tag for non-default sources.
+
+### Changed
+- **Sync now preserves source-agent identity**: Synced exchanges are tagged during indexing so multi-agent setups can share one memory bank without losing provenance.
+- **Search agent upgraded to Sonnet**: The bundled `search-conversations` agent now uses Sonnet instead of Haiku for stronger retrieval and synthesis.
+- **Plugin update docs clarified**: README update instructions now use the correct `/plugin update memory-bank` command.
+
+### Fixed
+- **Facts inherit coding-agent metadata**: Fact extraction now carries the exchange agent through to saved facts.
+- **Search and fact schema migrations are backward-compatible**: Existing databases gain the new `coding_agent` columns through idempotent migrations.
+
+## [1.0.16] - 2026-03-25
+
+### Added
+- **`/show-memory-bank` slash command**: Opens the Memory Bank web dashboard from Claude Code.
+- **Automatic command installation**: SessionStart hooks install bundled slash commands into user scope.
+
+### Changed
+- **Plugin command manifest format**: `commands` now points to the commands directory so Claude Code can discover bundled commands correctly.
+
 ## [1.0.15] - 2025-12-17
 
 ### Changed
