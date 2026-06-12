@@ -20,9 +20,9 @@ export function exportForSync() {
     const db = initDatabase();
     const syncDir = getSyncDir();
     try {
-        // Export facts
+        // Export facts (fact_kr included so other devices can build Korean vectors)
         const facts = db.prepare(`
-      SELECT id, fact, category, scope_type, scope_project, source_exchange_ids,
+      SELECT id, fact, fact_kr, category, scope_type, scope_project, source_exchange_ids,
              created_at, updated_at, consolidated_count, ontology_category_id
       FROM facts WHERE is_active = 1
     `).all();

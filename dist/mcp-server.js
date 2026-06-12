@@ -23170,6 +23170,57 @@ function getDbPath() {
   return path.join(getIndexDir(), "db.sqlite");
 }
 
+// src/project-canon.ts
+var slugCache = /* @__PURE__ */ new Map();
+function isSlugProject(project) {
+  return typeof project === "string" && project.startsWith("-");
+}
+function slugifyPath(p) {
+  return p.replace(/[/._]/g, "-");
+}
+function canonicalizeProject(db, project) {
+  if (!project || !isSlugProject(project)) return project;
+  const cached2 = slugCache.get(project);
+  if (cached2) return cached2;
+  let resolved = project;
+  try {
+    const rows = db.prepare(`
+      SELECT cwd, COUNT(*) AS n FROM exchanges
+      WHERE project = ? AND cwd IS NOT NULL
+      GROUP BY cwd ORDER BY n DESC
+    `).all(project);
+    const exact = rows.find((r) => slugifyPath(r.cwd) === project);
+    resolved = (exact || rows[0])?.cwd ?? project;
+  } catch {
+  }
+  if (resolved !== project) slugCache.set(project, resolved);
+  return resolved;
+}
+function autoHealScopeProjects(db) {
+  let healed = 0;
+  try {
+    const probe = db.prepare(
+      "SELECT 1 FROM facts WHERE scope_type = 'project' AND scope_project LIKE '-%' LIMIT 1"
+    ).get();
+    if (!probe) return 0;
+    const slugs = db.prepare(
+      "SELECT DISTINCT scope_project AS s FROM facts WHERE scope_type = 'project' AND scope_project LIKE '-%'"
+    ).all();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    for (const { s } of slugs) {
+      const canon = canonicalizeProject(db, s);
+      if (canon && canon !== s) {
+        const r = db.prepare(
+          "UPDATE facts SET scope_project = ?, updated_at = ? WHERE scope_type = 'project' AND scope_project = ?"
+        ).run(canon, now, s);
+        healed += r.changes;
+      }
+    }
+  } catch {
+  }
+  return healed;
+}
+
 // src/db.ts
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
@@ -23325,6 +23376,12 @@ function initDatabase() {
     )
   `);
   db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_domains (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -23354,6 +23411,15 @@ function initDatabase() {
   if (!factColumnNames.has("coding_agent")) {
     db.prepare("ALTER TABLE facts ADD COLUMN coding_agent TEXT DEFAULT 'claude-code'").run();
   }
+  if (!factColumnNames.has("embedding_version")) {
+    db.prepare("ALTER TABLE facts ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 1").run();
+  }
+  const exchangeColumns = db.prepare(
+    `SELECT name FROM pragma_table_info('exchanges')`
+  ).all();
+  if (!exchangeColumns.some((c) => c.name === "embedding_version")) {
+    db.prepare("ALTER TABLE exchanges ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 0").run();
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_relations (
       id TEXT PRIMARY KEY,
@@ -23369,27 +23435,35 @@ function initDatabase() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
+  autoHealScopeProjects(db);
   return db;
 }
 
 // src/embeddings.ts
 import { pipeline } from "@xenova/transformers";
+var EMBEDDING_MODEL = process.env.MEMORY_BANK_EMBEDDING_MODEL || "Xenova/multilingual-e5-small";
 var embeddingPipeline = null;
 async function initEmbeddings() {
   if (!embeddingPipeline) {
-    console.error("Loading embedding model (first run may take time)...");
+    console.error(`Loading embedding model ${EMBEDDING_MODEL} (first run may take time)...`);
     embeddingPipeline = await pipeline(
       "feature-extraction",
-      "Xenova/all-MiniLM-L6-v2"
+      EMBEDDING_MODEL
     );
     console.error("Embedding model loaded");
   }
 }
-async function generateEmbedding(text) {
+function applyModePrefix(text, mode) {
+  if (EMBEDDING_MODEL.toLowerCase().includes("e5")) {
+    return `${mode}: ${text}`;
+  }
+  return text;
+}
+async function generateEmbedding(text, mode = "passage") {
   if (!embeddingPipeline) {
     await initEmbeddings();
   }
-  const truncated = text.substring(0, 2e3);
+  const truncated = applyModePrefix(text.substring(0, 2e3), mode);
   const output = await embeddingPipeline(truncated, {
     pooling: "mean",
     normalize: true
@@ -23404,21 +23478,35 @@ function getRevisions(db, factId) {
   ).all(factId);
 }
 function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85) {
-  const vecResults = db.prepare(`
-    SELECT id, distance
-    FROM vec_facts
-    WHERE embedding MATCH ?
-    ORDER BY distance
-    LIMIT ?
-  `).all(Buffer.from(new Float32Array(embedding).buffer), limit * 2);
+  const canonProject = project ? canonicalizeProject(db, project) : project;
+  const buf = Buffer.from(new Float32Array(embedding).buffer);
+  const candidateFetch = Math.max(limit * 2, 50);
+  const fetch2 = (table) => {
+    try {
+      return db.prepare(`
+        SELECT id, distance FROM ${table}
+        WHERE embedding MATCH ?
+        ORDER BY distance
+        LIMIT ?
+      `).all(buf, candidateFetch);
+    } catch {
+      return [];
+    }
+  };
+  const best = /* @__PURE__ */ new Map();
+  for (const vr of [...fetch2("vec_facts"), ...fetch2("vec_facts_kr")]) {
+    const cur = best.get(vr.id);
+    if (cur === void 0 || vr.distance < cur) best.set(vr.id, vr.distance);
+  }
+  const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b2) => a.distance - b2.distance);
   const results = [];
-  for (const vr of vecResults) {
+  for (const vr of merged) {
     const similarity = 1 - vr.distance * vr.distance / 2;
     if (similarity < threshold) continue;
     const row = db.prepare("SELECT * FROM facts WHERE id = ? AND is_active = 1").get(vr.id);
     if (!row) continue;
     const fact = rowToFact(row);
-    if (project && fact.scope_type === "project" && fact.scope_project !== project) continue;
+    if (canonProject && fact.scope_type === "project" && fact.scope_project !== canonProject) continue;
     results.push({ fact, distance: vr.distance });
     if (results.length >= limit) break;
   }
@@ -23629,7 +23717,7 @@ async function searchConversations(query2, options = {}) {
     const timeParams = filterParams;
     if (mode === "vector" || mode === "both") {
       await initEmbeddings();
-      const queryEmbedding = await generateEmbedding(query2);
+      const queryEmbedding = await generateEmbedding(query2, "query");
       const stmt = db.prepare(`
         SELECT
           e.id,
@@ -23828,7 +23916,7 @@ async function getKnowledgeContext(query2, project, limit = 5) {
   await initEmbeddings();
   const db = initDatabase();
   try {
-    const queryEmbedding = await generateEmbedding(query2);
+    const queryEmbedding = await generateEmbedding(query2, "query");
     const factResults = searchSimilarFacts(db, queryEmbedding, project ?? null, limit, 0.6);
     if (factResults.length === 0) {
       return { facts: [] };
@@ -25358,7 +25446,7 @@ You represent their past engineering decisions, preferences, and patterns.
 - below 0.5: not enough information`;
 async function askAvatar(db, question, project) {
   await initEmbeddings();
-  const questionEmbedding = await generateEmbedding(question);
+  const questionEmbedding = await generateEmbedding(question, "query");
   const scopeProject = project ?? null;
   const vectorResults = searchSimilarFacts(db, questionEmbedding, scopeProject, 10, 0.6);
   if (vectorResults.length === 0) {
@@ -25807,7 +25895,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const results = searchSimilarFacts(db, queryEmbedding, currentProject, params.limit);
         let filtered = results;
         if (params.category) {
@@ -26004,7 +26092,7 @@ Results: ${filtered.length}
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const results = searchSimilarFacts(db, queryEmbedding, currentProject, params.limit, 0.5);
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No matching facts found to trace." }] };
@@ -26164,7 +26252,7 @@ _Source exchanges not available._
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const allResults = searchAllFacts(db, queryEmbedding, params.limit * 3, 0.5);
         const currentProject = params.current_project || process.cwd();
         const crossProjectResults = allResults.filter(
@@ -26212,7 +26300,7 @@ Excluding: ${currentProject}
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const seedFacts = searchSimilarFacts(db, queryEmbedding, params.project ?? null, 3, 0.5);
         if (seedFacts.length === 0) {
           return { content: [{ type: "text", text: `No facts found related to "${params.query}" to start graph exploration.` }] };

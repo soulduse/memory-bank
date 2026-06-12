@@ -21,11 +21,16 @@ const EXTRACTION_SYSTEM_PROMPT = `You are an expert at extracting long-term fact
 [
   {
     "fact": "User uses Riverpod for state management",
+    "fact_kr": "사용자는 상태 관리에 Riverpod을 사용한다",
     "category": "decision",
     "scope_type": "project",
     "confidence": 0.9
   }
 ]
+
+## fact_kr rules
+- Natural Korean translation of "fact"
+- Keep technical terms (API/tool/framework names, file paths, commands) in English
 
 ## category choices
 - decision: architecture/technology decisions
@@ -105,6 +110,7 @@ export async function saveExtractedFacts(
 
   for (const fact of facts) {
     const embedding = await generateEmbedding(fact.fact);
+    const embeddingKr = fact.fact_kr ? await generateEmbedding(fact.fact_kr) : null;
 
     const id = insertFact(db, {
       fact: fact.fact,
@@ -114,6 +120,8 @@ export async function saveExtractedFacts(
       source_exchange_ids: sourceExchangeIds,
       embedding,
       coding_agent: codingAgent,
+      fact_kr: fact.fact_kr ?? null,
+      embedding_kr: embeddingKr,
     });
 
     savedIds.push(id);

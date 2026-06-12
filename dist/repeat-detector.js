@@ -9,7 +9,7 @@ import { initDatabase } from './db.js';
  */
 export async function detectRepeat(prompt, project, limit = 3, threshold = 0.82) {
     await initEmbeddings();
-    const embedding = await generateEmbedding(prompt);
+    const embedding = await generateEmbedding(prompt, 'query');
     const db = initDatabase();
     try {
         // Vector search against past user messages

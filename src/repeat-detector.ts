@@ -27,7 +27,7 @@ export async function detectRepeat(
   threshold: number = 0.82,
 ): Promise<RepeatMatch[]> {
   await initEmbeddings();
-  const embedding = await generateEmbedding(prompt);
+  const embedding = await generateEmbedding(prompt, 'query');
   const db = initDatabase();
 
   try {

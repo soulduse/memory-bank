@@ -45,7 +45,7 @@ export async function searchConversations(query, options = {}) {
         if (mode === 'vector' || mode === 'both') {
             // Vector similarity search
             await initEmbeddings();
-            const queryEmbedding = await generateEmbedding(query);
+            const queryEmbedding = await generateEmbedding(query, 'query');
             const stmt = db.prepare(`
         SELECT
           e.id,
@@ -264,7 +264,7 @@ export async function getKnowledgeContext(query, project, limit = 5) {
     await initEmbeddings();
     const db = initDatabase();
     try {
-        const queryEmbedding = await generateEmbedding(query);
+        const queryEmbedding = await generateEmbedding(query, 'query');
         const factResults = searchSimilarFacts(db, queryEmbedding, project ?? null, limit, 0.6);
         if (factResults.length === 0) {
             return { facts: [] };

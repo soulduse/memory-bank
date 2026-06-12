@@ -58,6 +58,29 @@ async function main() {
 
     // 2. Inject top facts as context (fast, no LLM)
     const db = initDatabase();
+
+    // 2a. Auto-resume vector upgrades: if any rows still carry old-model
+    // embeddings, spawn the resumable re-embed worker (its pid lockfile
+    // prevents concurrent runs, so spawning is safe to attempt every start).
+    try {
+      const { EMBEDDING_VERSION } = await import('../dist/embeddings.js');
+      const pendingFact = db.prepare(
+        'SELECT 1 FROM facts WHERE is_active = 1 AND embedding_version != ? LIMIT 1'
+      ).get(EMBEDDING_VERSION);
+      const pendingEx = db.prepare(
+        'SELECT 1 FROM exchanges WHERE embedding_version != ? LIMIT 1'
+      ).get(EMBEDDING_VERSION);
+      if (pendingFact || pendingEx) {
+        const reembed = spawn(process.execPath, [path.join(here, 'reembed-worker.js')], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env },
+        });
+        reembed.unref();
+      }
+    } catch {
+      // Non-fatal: re-embedding resumes on a later session
+    }
     const topFacts = getTopFacts(db, project, 10);
     if (topFacts.length > 0) {
       console.log('');

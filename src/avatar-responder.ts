@@ -40,7 +40,7 @@ export async function askAvatar(
 ): Promise<AvatarResponse> {
   await initEmbeddings();
 
-  const questionEmbedding = await generateEmbedding(question);
+  const questionEmbedding = await generateEmbedding(question, 'query');
   const scopeProject = project ?? null;
 
   // Step 1: Vector search for top-10 relevant facts

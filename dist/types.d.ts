@@ -72,6 +72,7 @@ export interface FactSearchResult {
 }
 export interface ExtractedFact {
     fact: string;
+    fact_kr?: string;
     category: FactCategory;
     scope_type: FactScopeType;
     confidence: number;

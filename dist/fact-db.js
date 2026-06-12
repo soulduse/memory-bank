@@ -1,11 +1,16 @@
 import { randomUUID } from 'crypto';
+import { canonicalizeProject } from './project-canon.js';
+import { EMBEDDING_VERSION } from './embeddings.js';
 export function insertFact(db, params) {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const scopeProject = params.scope_project
+        ? canonicalizeProject(db, params.scope_project)
+        : params.scope_project;
     db.prepare(`
-    INSERT INTO facts (id, fact, category, scope_type, scope_project, source_exchange_ids, embedding, created_at, updated_at, consolidated_count, is_active, coding_agent)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
-  `).run(id, params.fact, params.category, params.scope_type, params.scope_project, JSON.stringify(params.source_exchange_ids), params.embedding ? Buffer.from(new Float32Array(params.embedding).buffer) : null, now, now, params.coding_agent || 'claude-code');
+    INSERT INTO facts (id, fact, category, scope_type, scope_project, source_exchange_ids, embedding, created_at, updated_at, consolidated_count, is_active, coding_agent, fact_kr, embedding_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)
+  `).run(id, params.fact, params.category, params.scope_type, scopeProject, JSON.stringify(params.source_exchange_ids), params.embedding ? Buffer.from(new Float32Array(params.embedding).buffer) : null, now, now, params.coding_agent || 'claude-code', params.fact_kr ?? null, EMBEDDING_VERSION);
     // Insert into vector index (atomic DELETE+INSERT via transaction)
     if (params.embedding) {
         const upsertVec = db.transaction((vecId, buf) => {
@@ -13,6 +18,14 @@ export function insertFact(db, params) {
             db.prepare('INSERT INTO vec_facts (id, embedding) VALUES (?, ?)').run(vecId, buf);
         });
         upsertVec(id, Buffer.from(new Float32Array(params.embedding).buffer));
+    }
+    // Korean-text vector index (same-language matching for Korean queries)
+    if (params.embedding_kr) {
+        const upsertVecKr = db.transaction((vecId, buf) => {
+            db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(vecId);
+            db.prepare('INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ?)').run(vecId, buf);
+        });
+        upsertVecKr(id, Buffer.from(new Float32Array(params.embedding_kr).buffer));
     }
     return id;
 }
@@ -22,12 +35,13 @@ export function getActiveFacts(db) {
         .map(rowToFact);
 }
 export function getFactsByProject(db, project) {
+    const canon = canonicalizeProject(db, project);
     return db.prepare(`
     SELECT * FROM facts
     WHERE is_active = 1
       AND ((scope_type = 'project' AND scope_project = ?) OR scope_type = 'global')
     ORDER BY consolidated_count DESC
-  `).all(project).map(rowToFact);
+  `).all(canon).map(rowToFact);
 }
 export function updateFact(db, id, params) {
     const now = new Date().toISOString();
@@ -57,9 +71,13 @@ export function updateFact(db, id, params) {
 }
 export function deactivateFact(db, id) {
     db.prepare('UPDATE facts SET is_active = 0, updated_at = ? WHERE id = ?').run(new Date().toISOString(), id);
+    // Deactivated facts must not occupy vector index slots
+    db.prepare('DELETE FROM vec_facts WHERE id = ?').run(id);
+    db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(id);
 }
 export function deleteFact(db, id) {
     db.prepare('DELETE FROM vec_facts WHERE id = ?').run(id);
+    db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(id);
     db.prepare('DELETE FROM fact_revisions WHERE fact_id = ?').run(id);
     db.prepare('DELETE FROM facts WHERE id = ?').run(id);
 }
@@ -75,15 +93,41 @@ export function getRevisions(db, factId) {
     return db.prepare('SELECT * FROM fact_revisions WHERE fact_id = ? ORDER BY created_at DESC').all(factId);
 }
 export function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85) {
-    const vecResults = db.prepare(`
-    SELECT id, distance
-    FROM vec_facts
-    WHERE embedding MATCH ?
-    ORDER BY distance
-    LIMIT ?
-  `).all(Buffer.from(new Float32Array(embedding).buffer), limit * 2);
+    const canonProject = project ? canonicalizeProject(db, project) : project;
+    const buf = Buffer.from(new Float32Array(embedding).buffer);
+    // Search both language indexes: the query language is unknown, and
+    // multilingual models score same-language pairs far higher than
+    // cross-language pairs. Keep the best (smallest) distance per fact id.
+    //
+    // Overfetch well beyond `limit`: the scope filter below runs AFTER the
+    // vector lookup, and in a multi-project DB the global top-N is easily
+    // dominated by other projects' facts — fetching only limit*2 starves the
+    // requested scope of candidates entirely.
+    const candidateFetch = Math.max(limit * 2, 50);
+    const fetch = (table) => {
+        try {
+            return db.prepare(`
+        SELECT id, distance FROM ${table}
+        WHERE embedding MATCH ?
+        ORDER BY distance
+        LIMIT ?
+      `).all(buf, candidateFetch);
+        }
+        catch {
+            return []; // table may not exist on very old DBs
+        }
+    };
+    const best = new Map();
+    for (const vr of [...fetch('vec_facts'), ...fetch('vec_facts_kr')]) {
+        const cur = best.get(vr.id);
+        if (cur === undefined || vr.distance < cur)
+            best.set(vr.id, vr.distance);
+    }
+    const merged = [...best.entries()]
+        .map(([id, distance]) => ({ id, distance }))
+        .sort((a, b) => a.distance - b.distance);
     const results = [];
-    for (const vr of vecResults) {
+    for (const vr of merged) {
         // L2 distance -> cosine similarity approximation
         const similarity = 1 - (vr.distance * vr.distance) / 2;
         if (similarity < threshold)
@@ -93,7 +137,7 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
             continue;
         const fact = rowToFact(row);
         // Scope filter: same project or global only
-        if (project && fact.scope_type === 'project' && fact.scope_project !== project)
+        if (canonProject && fact.scope_type === 'project' && fact.scope_project !== canonProject)
             continue;
         results.push({ fact, distance: vr.distance });
         if (results.length >= limit)
@@ -115,7 +159,8 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
  * global facts otherwise outscore any newly extracted project fact (count=1)
  * forever, so project context would never surface in injection.
  */
-export function getTopFacts(db, project, limit = 10) {
+export function getTopFacts(db, rawProject, limit = 10) {
+    const project = canonicalizeProject(db, rawProject);
     const now = new Date();
     const d7 = new Date(now.getTime() - 7 * 86400000).toISOString();
     const d30 = new Date(now.getTime() - 30 * 86400000).toISOString();
@@ -159,7 +204,7 @@ export function getTopFactsByCount(db, project, limit = 10) {
       AND ((scope_type = 'project' AND scope_project = ?) OR scope_type = 'global')
     ORDER BY consolidated_count DESC
     LIMIT ?
-  `).all(project, limit).map(rowToFact);
+  `).all(canonicalizeProject(db, project), limit).map(rowToFact);
 }
 export function getNewFactsSince(db, project, since) {
     return db.prepare(`
@@ -168,7 +213,7 @@ export function getNewFactsSince(db, project, since) {
       AND created_at > ?
       AND ((scope_type = 'project' AND scope_project = ?) OR scope_type = 'global')
     ORDER BY created_at ASC
-  `).all(since, project).map(rowToFact);
+  `).all(since, canonicalizeProject(db, project)).map(rowToFact);
 }
 /**
  * Search facts across ALL projects (no scope filter).

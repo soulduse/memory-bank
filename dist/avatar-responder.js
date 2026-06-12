@@ -25,7 +25,7 @@ You represent their past engineering decisions, preferences, and patterns.
 - below 0.5: not enough information`;
 export async function askAvatar(db, question, project) {
     await initEmbeddings();
-    const questionEmbedding = await generateEmbedding(question);
+    const questionEmbedding = await generateEmbedding(question, 'query');
     const scopeProject = project ?? null;
     // Step 1: Vector search for top-10 relevant facts
     const vectorResults = searchSimilarFacts(db, questionEmbedding, scopeProject, 10, 0.6);

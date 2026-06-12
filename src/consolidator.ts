@@ -26,7 +26,9 @@ const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relat
 }`;
 
 const MAX_HAIKU_CALLS = 10;
-const SIMILARITY_THRESHOLD = 0.85;
+// e5 passage-passage scale (measured): near-dup 0.99, paraphrase 0.97,
+// related-but-distinct ~0.91, unrelated <=0.86. 0.95 selects dup candidates.
+const SIMILARITY_THRESHOLD = 0.95;
 
 export function buildConsolidationPrompt(existingFact: string, newFact: string): string {
   return `Existing fact: "${existingFact}"\nNew fact: "${newFact}"`;

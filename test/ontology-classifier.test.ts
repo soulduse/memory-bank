@@ -13,6 +13,8 @@ vi.mock('../src/llm.js', () => ({
 vi.mock('../src/embeddings.js', () => ({
   generateEmbedding: vi.fn().mockResolvedValue(new Array(384).fill(0.1)),
   initEmbeddings: vi.fn().mockResolvedValue(undefined),
+  EMBEDDING_VERSION: 2,
+  EMBEDDING_MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
 }));
 
 import { callHaiku, parseJsonResponse } from '../src/llm.js';

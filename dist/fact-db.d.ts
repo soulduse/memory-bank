@@ -8,6 +8,8 @@ interface InsertFactParams {
     source_exchange_ids: string[];
     embedding: number[] | null;
     coding_agent?: string;
+    fact_kr?: string | null;
+    embedding_kr?: number[] | null;
 }
 interface UpdateFactParams {
     fact?: string;
@@ -47,7 +49,7 @@ export declare function searchSimilarFacts(db: Database.Database, embedding: num
  * global facts otherwise outscore any newly extracted project fact (count=1)
  * forever, so project context would never surface in injection.
  */
-export declare function getTopFacts(db: Database.Database, project: string, limit?: number): Fact[];
+export declare function getTopFacts(db: Database.Database, rawProject: string, limit?: number): Fact[];
 /**
  * Legacy: get facts by pure confirmation count (for backward compatibility).
  */

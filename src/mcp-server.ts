@@ -485,7 +485,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, 'query');
         const results = searchSimilarFacts(db, queryEmbedding, currentProject, params.limit);
 
         // Apply category and coding_agent filters
@@ -688,7 +688,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const db = initDatabase();
 
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, 'query');
         const results = searchSimilarFacts(db, queryEmbedding, currentProject, params.limit, 0.5);
 
         if (results.length === 0) {
@@ -829,7 +829,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const db = initDatabase();
 
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, 'query');
         const allResults = searchAllFacts(db, queryEmbedding, params.limit * 3, 0.5);
 
         // Filter out current project facts, keep only OTHER projects
@@ -880,7 +880,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const db = initDatabase();
 
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, 'query');
         const seedFacts = searchSimilarFacts(db, queryEmbedding, params.project ?? null, 3, 0.5);
 
         if (seedFacts.length === 0) {

@@ -85,7 +85,8 @@ export async function detectRelations(db, newFact, topK = 5) {
     if (!newFact.embedding)
         return;
     const embeddingArray = Array.from(newFact.embedding);
-    const similar = searchSimilarFacts(db, embeddingArray, newFact.scope_project, topK, 0.75);
+    // e5 scale: related-but-distinct ~0.91, unrelated <=0.86 → 0.89 selects relation candidates
+    const similar = searchSimilarFacts(db, embeddingArray, newFact.scope_project, topK, 0.89);
     const candidates = similar.filter((s) => s.fact.id !== newFact.id);
     for (const { fact: existingFact } of candidates) {
         const prompt = [

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
 import { getDbPath } from './paths.js';
+import { autoHealScopeProjects } from './project-canon.js';
 export function migrateSchema(db) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
     const columnNames = new Set(columns.map(c => c.name));
@@ -166,6 +167,15 @@ export function initDatabase() {
       embedding FLOAT[384]
     )
   `);
+    // Korean-text vector index: facts are embedded twice (fact / fact_kr) because
+    // multilingual models match same-language pairs far better than cross-language.
+    // Queries search both tables and take the best score per fact id.
+    db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
     // === Ontology Schema ===
     db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_domains (
@@ -196,6 +206,15 @@ export function initDatabase() {
     if (!factColumnNames.has('coding_agent')) {
         db.prepare("ALTER TABLE facts ADD COLUMN coding_agent TEXT DEFAULT 'claude-code'").run();
     }
+    // Embedding model version (1 = all-MiniLM-L6-v2, 2 = multilingual L12-v2).
+    // The re-embed worker upgrades rows where version < current.
+    if (!factColumnNames.has('embedding_version')) {
+        db.prepare('ALTER TABLE facts ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 1').run();
+    }
+    const exchangeColumns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
+    if (!exchangeColumns.some((c) => c.name === 'embedding_version')) {
+        db.prepare('ALTER TABLE exchanges ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 0').run();
+    }
     db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_relations (
       id TEXT PRIMARY KEY,
@@ -211,6 +230,10 @@ export function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
+    // Self-heal slug-format scope_project rows (cheap probe; no-op when clean).
+    // Keeps the canonical path format intact even when other devices sync in
+    // facts written by older code.
+    autoHealScopeProjects(db);
     return db;
 }
 export function insertExchange(db, exchange, embedding, _toolNames) {

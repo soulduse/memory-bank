@@ -16,14 +16,32 @@ describe('multi-concept search', () => {
     }
   });
 
-  it('should have low similarity for unrelated concepts', async () => {
-    const results = await searchMultipleConcepts(['xyzabc123', 'qwerty789'], { limit: 5 });
+  it('should have lower similarity for unrelated concepts than related ones', async () => {
+    const unrelated = await searchMultipleConcepts(['xyzabc123', 'qwerty789'], { limit: 5 });
 
-    expect(Array.isArray(results)).toBe(true);
-    // Might return some results (weak matches)
-    // but average similarity should be very low
-    if (results.length > 0) {
-      expect(results[0].averageSimilarity).toBeLessThan(0.1); // < 10%
+    expect(Array.isArray(unrelated)).toBe(true);
+    // e5 similarity scores are compressed (unrelated pairs still score ~0.4-0.7),
+    // so assert relative ordering against a related query instead of an
+    // absolute near-zero bound (which was calibrated for all-MiniLM-L6-v2).
+    if (unrelated.length > 0) {
+      expect(unrelated[0].averageSimilarity).toBeLessThan(0.8);
+
+      // Relative ordering is only meaningful once stored vectors match the
+      // current model — during background re-embedding the live DB holds
+      // mixed-version vectors and rankings are noise.
+      const { initDatabase } = await import('../src/db.js');
+      const { EMBEDDING_VERSION } = await import('../src/embeddings.js');
+      const db = initDatabase();
+      const pending = db.prepare(
+        'SELECT 1 FROM exchanges WHERE embedding_version != ? LIMIT 1'
+      ).get(EMBEDDING_VERSION);
+      db.close();
+      if (!pending) {
+        const related = await searchMultipleConcepts(['React', 'Router'], { limit: 5 });
+        if (related.length > 0) {
+          expect(unrelated[0].averageSimilarity).toBeLessThan(related[0].averageSimilarity);
+        }
+      }
     }
   });
 
