@@ -23221,6 +23221,52 @@ function autoHealScopeProjects(db) {
   return healed;
 }
 
+// src/embeddings.ts
+import { pipeline } from "@xenova/transformers";
+var DEFAULT_EMBEDDING_MODEL = "Xenova/multilingual-e5-small";
+var EMBEDDING_MODEL = process.env.MEMORY_BANK_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+var KNOWN_MODEL_VERSIONS = {
+  "Xenova/all-MiniLM-L6-v2": 1,
+  "Xenova/paraphrase-multilingual-MiniLM-L12-v2": 2,
+  [DEFAULT_EMBEDDING_MODEL]: 3
+};
+function modelVersion(model) {
+  const known = KNOWN_MODEL_VERSIONS[model];
+  if (known !== void 0) return known;
+  let h = 0;
+  for (let i = 0; i < model.length; i++) h = h * 31 + model.charCodeAt(i) >>> 0;
+  return 1e3 + h % 1e6;
+}
+var EMBEDDING_VERSION = modelVersion(EMBEDDING_MODEL);
+var embeddingPipeline = null;
+async function initEmbeddings() {
+  if (!embeddingPipeline) {
+    console.error(`Loading embedding model ${EMBEDDING_MODEL} (first run may take time)...`);
+    embeddingPipeline = await pipeline(
+      "feature-extraction",
+      EMBEDDING_MODEL
+    );
+    console.error("Embedding model loaded");
+  }
+}
+function applyModePrefix(text, mode) {
+  if (EMBEDDING_MODEL.toLowerCase().includes("e5")) {
+    return `${mode}: ${text}`;
+  }
+  return text;
+}
+async function generateEmbedding(text, mode = "passage") {
+  if (!embeddingPipeline) {
+    await initEmbeddings();
+  }
+  const truncated = applyModePrefix(text.substring(0, 2e3), mode);
+  const output = await embeddingPipeline(truncated, {
+    pooling: "mean",
+    normalize: true
+  });
+  return Array.from(output.data);
+}
+
 // src/db.ts
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
@@ -23435,40 +23481,16 @@ function initDatabase() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_log (
+      session_id TEXT PRIMARY KEY,
+      processed_at TEXT NOT NULL,
+      extracted INTEGER NOT NULL DEFAULT 0,
+      saved INTEGER NOT NULL DEFAULT 0
+    )
+  `);
   autoHealScopeProjects(db);
   return db;
-}
-
-// src/embeddings.ts
-import { pipeline } from "@xenova/transformers";
-var EMBEDDING_MODEL = process.env.MEMORY_BANK_EMBEDDING_MODEL || "Xenova/multilingual-e5-small";
-var embeddingPipeline = null;
-async function initEmbeddings() {
-  if (!embeddingPipeline) {
-    console.error(`Loading embedding model ${EMBEDDING_MODEL} (first run may take time)...`);
-    embeddingPipeline = await pipeline(
-      "feature-extraction",
-      EMBEDDING_MODEL
-    );
-    console.error("Embedding model loaded");
-  }
-}
-function applyModePrefix(text, mode) {
-  if (EMBEDDING_MODEL.toLowerCase().includes("e5")) {
-    return `${mode}: ${text}`;
-  }
-  return text;
-}
-async function generateEmbedding(text, mode = "passage") {
-  if (!embeddingPipeline) {
-    await initEmbeddings();
-  }
-  const truncated = applyModePrefix(text.substring(0, 2e3), mode);
-  const output = await embeddingPipeline(truncated, {
-    pooling: "mean",
-    normalize: true
-  });
-  return Array.from(output.data);
 }
 
 // src/fact-db.ts
@@ -23503,7 +23525,9 @@ function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85)
   for (const vr of merged) {
     const similarity = 1 - vr.distance * vr.distance / 2;
     if (similarity < threshold) continue;
-    const row = db.prepare("SELECT * FROM facts WHERE id = ? AND is_active = 1").get(vr.id);
+    const row = db.prepare(
+      "SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?"
+    ).get(vr.id, EMBEDDING_VERSION);
     if (!row) continue;
     const fact = rowToFact(row);
     if (canonProject && fact.scope_type === "project" && fact.scope_project !== canonProject) continue;
@@ -23734,12 +23758,14 @@ async function searchConversations(query2, options = {}) {
         JOIN exchanges AS e ON vec.id = e.id
         WHERE vec.embedding MATCH ?
           AND k = ?
+          AND e.embedding_version = ?
           ${timeClause}
         ORDER BY vec.distance ASC
       `);
       results = stmt.all(
         Buffer.from(new Float32Array(queryEmbedding).buffer),
         limit,
+        EMBEDDING_VERSION,
         ...timeParams
       );
     }

@@ -43,9 +43,15 @@ function initTestSchema(db: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       consolidated_count INTEGER DEFAULT 1,
       is_active BOOLEAN DEFAULT 1,
-      ontology_category_id TEXT
+      ontology_category_id TEXT,
+      fact_kr TEXT,
+      embedding_version INTEGER NOT NULL DEFAULT 2
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding float[384]
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
       id TEXT PRIMARY KEY,
       embedding float[384]
     );

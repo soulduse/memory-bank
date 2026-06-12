@@ -1,5 +1,5 @@
 import { initDatabase } from './db.js';
-import { initEmbeddings, generateEmbedding } from './embeddings.js';
+import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
 import { getRelatedFacts, listDomains, listCategories } from './ontology-db.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
@@ -92,13 +92,18 @@ export async function searchConversations(
         JOIN exchanges AS e ON vec.id = e.id
         WHERE vec.embedding MATCH ?
           AND k = ?
+          AND e.embedding_version = ?
           ${timeClause}
         ORDER BY vec.distance ASC
       `);
 
+      // embedding_version filter: old-model vectors are incomparable with the
+      // current-model query embedding — exclude rows the re-embed worker has
+      // not upgraded yet (newest sessions are upgraded first).
       results = stmt.all(
         Buffer.from(new Float32Array(queryEmbedding).buffer),
         limit,
+        EMBEDDING_VERSION,
         ...timeParams
       ) as ExchangeRow[];
     }

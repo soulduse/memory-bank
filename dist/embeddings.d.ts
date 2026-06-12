@@ -1,28 +1,5 @@
-/**
- * Multilingual retrieval model (Korean/English/100 langs), 384-dim — same
- * dimension as the original all-MiniLM-L6-v2 so vec tables are unchanged.
- *
- * Model selection (2026-06-12, measured on real-DB Korean/English pairs):
- *   - all-MiniLM-L6-v2: English-only — Korean queries score ~0 vs English facts
- *   - paraphrase-multilingual-MiniLM-L12-v2: top-1 ranking broke on real data
- *     (unrelated Korean pairs up to 0.82 — strong anisotropy)
- *   - multilingual-e5-small: perfect top-1 ranking on the hard set; absolute
- *     scores are compressed (~0.72-0.99) so consumers use either retuned
- *     thresholds (passage↔passage) or probe-baseline normalization (queries).
- *
- * e5 protocol: queries are embedded with a "query: " prefix, stored content
- * with "passage: ". Pass the mode explicitly at call sites.
- *
- * Vectors from different models are NOT comparable; EMBEDDING_VERSION tracks
- * which model produced a stored vector and the re-embed worker upgrades rows.
- */
 export declare const EMBEDDING_MODEL: string;
-/**
- * 1 = all-MiniLM-L6-v2 (English-only)
- * 2 = paraphrase-multilingual-MiniLM-L12-v2 (rejected — anisotropy)
- * 3 = multilingual-e5-small (query/passage prefixes)
- */
-export declare const EMBEDDING_VERSION = 3;
+export declare const EMBEDDING_VERSION: number;
 export type EmbeddingMode = 'query' | 'passage';
 export declare function initEmbeddings(): Promise<void>;
 /**

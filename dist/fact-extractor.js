@@ -112,14 +112,27 @@ export async function saveExtractedFacts(db, facts, project, sourceExchangeIds, 
 }
 export async function runFactExtraction(db, sessionId, project, codingAgent) {
     const facts = await extractFactsFromExchanges(db, sessionId);
-    if (facts.length === 0) {
-        return { extracted: 0, saved: 0 };
+    let saved = 0;
+    if (facts.length > 0) {
+        // Detect coding agent from session's exchanges if not provided
+        const agent = codingAgent || detectAgentFromSession(db, sessionId);
+        const exchangeIds = db.prepare('SELECT id FROM exchanges WHERE session_id = ?').all(sessionId).map((r) => r.id);
+        saved = (await saveExtractedFacts(db, facts, project, exchangeIds, agent)).length;
     }
-    // Detect coding agent from session's exchanges if not provided
-    const agent = codingAgent || detectAgentFromSession(db, sessionId);
-    const exchangeIds = db.prepare('SELECT id FROM exchanges WHERE session_id = ?').all(sessionId).map((r) => r.id);
-    const savedIds = await saveExtractedFacts(db, facts, project, exchangeIds, agent);
-    return { extracted: facts.length, saved: savedIds.length };
+    // Record the session as processed (idempotency marker shared by the
+    // SessionEnd hook and the cross-project backfill worker).
+    try {
+        db.prepare(`
+      INSERT INTO extraction_log (session_id, processed_at, extracted, saved)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET processed_at = excluded.processed_at,
+        extracted = excluded.extracted, saved = excluded.saved
+    `).run(sessionId, new Date().toISOString(), facts.length, saved);
+    }
+    catch {
+        // log table may not exist on very old DBs — extraction result still stands
+    }
+    return { extracted: facts.length, saved };
 }
 /**
  * Detect the coding agent from a session's exchanges.

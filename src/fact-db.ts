@@ -201,7 +201,12 @@ export function searchSimilarFacts(
     const similarity = 1 - (vr.distance * vr.distance) / 2;
     if (similarity < threshold) continue;
 
-    const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1').get(vr.id) as Record<string, unknown> | undefined;
+    // embedding_version filter: during a model migration the vector tables
+    // can still hold old-model rows; comparing them against a current-model
+    // query embedding silently misranks. Skip until the worker upgrades them.
+    const row = db.prepare(
+      'SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?'
+    ).get(vr.id, EMBEDDING_VERSION) as Record<string, unknown> | undefined;
     if (!row) continue;
 
     const fact = rowToFact(row);

@@ -132,7 +132,10 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
         const similarity = 1 - (vr.distance * vr.distance) / 2;
         if (similarity < threshold)
             continue;
-        const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1').get(vr.id);
+        // embedding_version filter: during a model migration the vector tables
+        // can still hold old-model rows; comparing them against a current-model
+        // query embedding silently misranks. Skip until the worker upgrades them.
+        const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?').get(vr.id, EMBEDDING_VERSION);
         if (!row)
             continue;
         const fact = rowToFact(row);

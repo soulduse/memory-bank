@@ -38,15 +38,27 @@ function log(line) {
 }
 
 function acquireLock() {
-  try {
-    const pid = parseInt(fs.readFileSync(LOCK, 'utf8'), 10);
-    if (pid && !Number.isNaN(pid)) {
-      try { process.kill(pid, 0); return false; } // alive → don't run
-      catch { /* stale lock */ }
+  // Atomic exclusive create ('wx') — a read-then-write check is racy when two
+  // SessionStart hooks spawn workers simultaneously.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') return false;
+      try {
+        const pid = parseInt(fs.readFileSync(LOCK, 'utf8'), 10);
+        if (pid && !Number.isNaN(pid)) {
+          try { process.kill(pid, 0); return false; } // alive → don't run
+          catch { /* stale lock */ }
+        }
+        fs.unlinkSync(LOCK); // stale — remove and retry the exclusive create
+      } catch {
+        return false;
+      }
     }
-  } catch { /* no lock */ }
-  fs.writeFileSync(LOCK, String(process.pid));
-  return true;
+  }
+  return false;
 }
 
 function releaseLock() {

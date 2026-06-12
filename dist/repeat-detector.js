@@ -1,4 +1,4 @@
-import { generateEmbedding, initEmbeddings } from './embeddings.js';
+import { generateEmbedding, initEmbeddings, EMBEDDING_VERSION } from './embeddings.js';
 import { initDatabase } from './db.js';
 /**
  * Detect if the current prompt is similar to a past exchange.
@@ -25,11 +25,13 @@ export async function detectRepeat(prompt, project, limit = 3, threshold = 0.82)
             const similarity = 1 - (vr.distance * vr.distance) / 2;
             if (similarity < threshold)
                 continue;
+            // embedding_version filter: skip rows the re-embed worker has not
+            // upgraded yet — old-model vectors are incomparable with this query.
             const row = db.prepare(`
         SELECT id, project, timestamp, user_message, assistant_message,
                archive_path, line_start, line_end
-        FROM exchanges WHERE id = ?
-      `).get(vr.id);
+        FROM exchanges WHERE id = ? AND embedding_version = ?
+      `).get(vr.id, EMBEDDING_VERSION);
             if (!row)
                 continue;
             // Skip if different project (unless no project filter)

@@ -62,6 +62,18 @@ async function main() {
     // 2a. Auto-resume vector upgrades: if any rows still carry old-model
     // embeddings, spawn the resumable re-embed worker (its pid lockfile
     // prevents concurrent runs, so spawning is safe to attempt every start).
+    const spawnDetached = (script) => {
+      try {
+        const child = spawn(process.execPath, [path.join(here, script)], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env },
+        });
+        child.unref();
+      } catch {
+        // Non-fatal: background work resumes on a later session
+      }
+    };
     try {
       const { EMBEDDING_VERSION } = await import('../dist/embeddings.js');
       const pendingFact = db.prepare(
@@ -70,17 +82,31 @@ async function main() {
       const pendingEx = db.prepare(
         'SELECT 1 FROM exchanges WHERE embedding_version != ? LIMIT 1'
       ).get(EMBEDDING_VERSION);
-      if (pendingFact || pendingEx) {
-        const reembed = spawn(process.execPath, [path.join(here, 'reembed-worker.js')], {
-          detached: true,
-          stdio: 'ignore',
-          env: { ...process.env },
-        });
-        reembed.unref();
-      }
+      if (pendingFact || pendingEx) spawnDetached('reembed-worker.js');
     } catch {
       // Non-fatal: re-embedding resumes on a later session
     }
+
+    // 2b. Auto-resume ontology classification backfill (historic facts saved
+    // without classification).
+    try {
+      const pendingOnto = db.prepare(
+        'SELECT 1 FROM facts WHERE is_active = 1 AND ontology_category_id IS NULL LIMIT 1'
+      ).get();
+      if (pendingOnto) spawnDetached('backfill-ontology-worker.js');
+    } catch { /* non-fatal */ }
+
+    // 2c. Auto-resume cross-project extraction backfill (sessions that ended
+    // before the fixed SessionEnd hook existed).
+    try {
+      const pendingExtract = db.prepare(`
+        SELECT 1 FROM exchanges e
+        WHERE e.is_sidechain = 0 AND e.session_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM extraction_log l WHERE l.session_id = e.session_id)
+        LIMIT 1
+      `).get();
+      if (pendingExtract) spawnDetached('backfill-extract-worker.js');
+    } catch { /* non-fatal */ }
     const topFacts = getTopFacts(db, project, 10);
     if (topFacts.length > 0) {
       console.log('');

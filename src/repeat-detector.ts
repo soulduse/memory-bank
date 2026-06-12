@@ -1,4 +1,4 @@
-import { generateEmbedding, initEmbeddings } from './embeddings.js';
+import { generateEmbedding, initEmbeddings, EMBEDDING_VERSION } from './embeddings.js';
 import { initDatabase } from './db.js';
 
 export interface RepeatMatch {
@@ -49,11 +49,13 @@ export async function detectRepeat(
       const similarity = 1 - (vr.distance * vr.distance) / 2;
       if (similarity < threshold) continue;
 
+      // embedding_version filter: skip rows the re-embed worker has not
+      // upgraded yet — old-model vectors are incomparable with this query.
       const row = db.prepare(`
         SELECT id, project, timestamp, user_message, assistant_message,
                archive_path, line_start, line_end
-        FROM exchanges WHERE id = ?
-      `).get(vr.id) as Record<string, unknown> | undefined;
+        FROM exchanges WHERE id = ? AND embedding_version = ?
+      `).get(vr.id, EMBEDDING_VERSION) as Record<string, unknown> | undefined;
 
       if (!row) continue;
 

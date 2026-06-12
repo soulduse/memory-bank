@@ -5,6 +5,7 @@ import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
 import { getDbPath } from './paths.js';
 import { autoHealScopeProjects } from './project-canon.js';
+import { EMBEDDING_VERSION } from './embeddings.js';
 
 export function migrateSchema(db: Database.Database): void {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all() as Array<{ name: string }>;
@@ -261,6 +262,18 @@ export function initDatabase(): Database.Database {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
 
+  // Tracks which sessions have been through fact extraction (SessionEnd hook
+  // or the backfill worker). Makes extraction idempotent and lets the backfill
+  // find unprocessed sessions across ALL projects.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_log (
+      session_id TEXT PRIMARY KEY,
+      processed_at TEXT NOT NULL,
+      extracted INTEGER NOT NULL DEFAULT 0,
+      saved INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
   // Self-heal slug-format scope_project rows (cheap probe; no-op when clean).
   // Keeps the canonical path format intact even when other devices sync in
   // facts written by older code.
@@ -281,8 +294,8 @@ export function insertExchange(
     INSERT OR REPLACE INTO exchanges
     (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
      parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
-     thinking_level, thinking_disabled, thinking_triggers, coding_agent)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     thinking_level, thinking_disabled, thinking_triggers, coding_agent, embedding_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -304,7 +317,11 @@ export function insertExchange(
     exchange.thinkingLevel || null,
     exchange.thinkingDisabled ? 1 : 0,
     exchange.thinkingTriggers || null,
-    exchange.codingAgent || 'claude-code'
+    exchange.codingAgent || 'claude-code',
+    // The embedding parameter was just generated with the current model, so
+    // stamp the current version — search filters on it and the re-embed
+    // worker must not redo freshly indexed rows.
+    EMBEDDING_VERSION
   );
 
   // Insert into vector table (atomic DELETE+INSERT via transaction, since virtual tables don't support REPLACE)

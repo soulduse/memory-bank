@@ -18,15 +18,37 @@ import { pipeline, FeatureExtractionPipeline } from '@xenova/transformers';
  * Vectors from different models are NOT comparable; EMBEDDING_VERSION tracks
  * which model produced a stored vector and the re-embed worker upgrades rows.
  */
+const DEFAULT_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
+
 export const EMBEDDING_MODEL =
-  process.env.MEMORY_BANK_EMBEDDING_MODEL || 'Xenova/multilingual-e5-small';
+  process.env.MEMORY_BANK_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
 
 /**
- * 1 = all-MiniLM-L6-v2 (English-only)
- * 2 = paraphrase-multilingual-MiniLM-L12-v2 (rejected — anisotropy)
- * 3 = multilingual-e5-small (query/passage prefixes)
+ * Curated model → version map:
+ *   1 = all-MiniLM-L6-v2 (English-only)
+ *   2 = paraphrase-multilingual-MiniLM-L12-v2 (rejected — anisotropy)
+ *   3 = multilingual-e5-small (query/passage prefixes)
+ *
+ * The version is DERIVED from the model so a MEMORY_BANK_EMBEDDING_MODEL
+ * override can never poison stored vectors: an unknown model gets its own
+ * deterministic version (1000+), so switching back later re-embeds those
+ * rows instead of silently mixing incompatible vector spaces.
  */
-export const EMBEDDING_VERSION = 3;
+const KNOWN_MODEL_VERSIONS: Record<string, number> = {
+  'Xenova/all-MiniLM-L6-v2': 1,
+  'Xenova/paraphrase-multilingual-MiniLM-L12-v2': 2,
+  [DEFAULT_EMBEDDING_MODEL]: 3,
+};
+
+function modelVersion(model: string): number {
+  const known = KNOWN_MODEL_VERSIONS[model];
+  if (known !== undefined) return known;
+  let h = 0;
+  for (let i = 0; i < model.length; i++) h = (h * 31 + model.charCodeAt(i)) >>> 0;
+  return 1000 + (h % 1000000);
+}
+
+export const EMBEDDING_VERSION = modelVersion(EMBEDDING_MODEL);
 
 export type EmbeddingMode = 'query' | 'passage';
 
