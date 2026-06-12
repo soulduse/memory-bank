@@ -18,7 +18,9 @@ import { getRelatedFacts } from '../dist/ontology-db.js';
 import { detectRepeat, formatRepeatContext } from '../dist/repeat-detector.js';
 
 const TOP_K = 5;
-const SIMILARITY_THRESHOLD = 0.75;
+// 0.45: measured with all-MiniLM-L6-v2 — question↔fact pairs score ~0.55-0.72,
+// unrelated pairs ~0.05-0.1. The previous 0.75 rejected even English paraphrases.
+const SIMILARITY_THRESHOLD = 0.45;
 const MAX_CONTEXT_FACTS = 8;
 
 async function main() {

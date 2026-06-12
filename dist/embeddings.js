@@ -2,9 +2,11 @@ import { pipeline } from '@xenova/transformers';
 let embeddingPipeline = null;
 export async function initEmbeddings() {
     if (!embeddingPipeline) {
-        console.log('Loading embedding model (first run may take time)...');
+        // stderr: stdout of hook scripts is injected into the session as context,
+        // so progress logs must never go to stdout.
+        console.error('Loading embedding model (first run may take time)...');
         embeddingPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-        console.log('Embedding model loaded');
+        console.error('Embedding model loaded');
     }
 }
 export async function generateEmbedding(text) {

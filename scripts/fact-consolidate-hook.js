@@ -1,34 +1,63 @@
 #!/usr/bin/env node
 
 /**
- * SessionStart Hook: Consolidate facts and inject context
+ * SessionStart Hook: Consolidate facts and inject context.
  *
- * Environment:
- *   CWD / PROJECT_DIR - current project path
- *   LAST_CONSOLIDATED_AT - last consolidation time (default: 24h ago)
+ * Claude Code passes hook input as JSON on stdin:
+ *   { "session_id": "...", "cwd": "...", "hook_event_name": "SessionStart", ... }
+ *
+ * Env vars (CWD / PROJECT_DIR / LAST_CONSOLIDATED_AT) remain as fallback
+ * for manual invocation.
+ *
+ * Context injection (top facts, continuity, intent) runs synchronously so its
+ * stdout reaches the session. LLM-based consolidation is offloaded to a
+ * detached worker so SessionStart is never blocked by slow LLM calls.
  */
 
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { initDatabase } from '../dist/db.js';
-import { consolidateFacts } from '../dist/consolidator.js';
 import { getTopFacts } from '../dist/fact-db.js';
 import { getLastSessionContext, formatSessionContinuity } from '../dist/session-continuity.js';
 import { predictIntent, formatIntentContext } from '../dist/intent-predictor.js';
 
+function readStdin(timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) return resolve('');
+    let data = '';
+    const timer = setTimeout(() => resolve(data), timeoutMs);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => { data += chunk; });
+    process.stdin.on('end', () => { clearTimeout(timer); resolve(data); });
+    process.stdin.on('error', () => { clearTimeout(timer); resolve(data); });
+  });
+}
+
 async function main() {
-  const project = process.env.CWD || process.env.PROJECT_DIR || process.cwd();
-  const lastConsolidated = process.env.LAST_CONSOLIDATED_AT
-    || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const raw = await readStdin();
+  let input = {};
+  try { input = JSON.parse(raw); } catch { /* not JSON — fall back to env */ }
+
+  const project = input.cwd || process.env.CWD || process.env.PROJECT_DIR || process.cwd();
 
   try {
-    const db = initDatabase();
-
-    // 1. Consolidate new facts
-    const result = await consolidateFacts(db, project, lastConsolidated);
-    if (result.processed > 0) {
-      console.log(`fact-consolidate: ${result.processed} processed, ${result.merged} merged, ${result.contradictions} contradictions, ${result.evolutions} evolutions`);
+    // 1. Offload LLM-based consolidation to a detached worker (non-blocking)
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const worker = path.join(here, 'fact-consolidate-worker.js');
+    try {
+      const child = spawn(process.execPath, [worker], {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, CWD: project },
+      });
+      child.unref();
+    } catch {
+      // Non-fatal: consolidation is best-effort
     }
 
-    // 2. Inject top facts as context
+    // 2. Inject top facts as context (fast, no LLM)
+    const db = initDatabase();
     const topFacts = getTopFacts(db, project, 10);
     if (topFacts.length > 0) {
       console.log('');
@@ -37,7 +66,6 @@ async function main() {
         console.log(`- [${fact.category}] ${fact.fact} (${fact.consolidated_count}x confirmed)`);
       }
     }
-
     db.close();
 
     // 3. Inject last session context (for continuity)

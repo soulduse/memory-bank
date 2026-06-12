@@ -6884,13 +6884,12 @@ var init_error = __esm({
     AnthropicError = class extends Error {
     };
     APIError = class _APIError extends AnthropicError {
-      constructor(status, error2, message, headers, type) {
+      constructor(status, error2, message, headers) {
         super(`${_APIError.makeMessage(status, error2, message)}`);
         this.status = status;
         this.headers = headers;
         this.requestID = headers?.get("request-id");
         this.error = error2;
-        this.type = type ?? null;
       }
       static makeMessage(status, error2, message) {
         const msg = error2?.message ? typeof error2.message === "string" ? error2.message : JSON.stringify(error2.message) : error2 ? JSON.stringify(error2) : message;
@@ -6910,32 +6909,31 @@ var init_error = __esm({
           return new APIConnectionError({ message, cause: castToError(errorResponse) });
         }
         const error2 = errorResponse;
-        const type = error2?.["error"]?.["type"];
         if (status === 400) {
-          return new BadRequestError(status, error2, message, headers, type);
+          return new BadRequestError(status, error2, message, headers);
         }
         if (status === 401) {
-          return new AuthenticationError(status, error2, message, headers, type);
+          return new AuthenticationError(status, error2, message, headers);
         }
         if (status === 403) {
-          return new PermissionDeniedError(status, error2, message, headers, type);
+          return new PermissionDeniedError(status, error2, message, headers);
         }
         if (status === 404) {
-          return new NotFoundError(status, error2, message, headers, type);
+          return new NotFoundError(status, error2, message, headers);
         }
         if (status === 409) {
-          return new ConflictError(status, error2, message, headers, type);
+          return new ConflictError(status, error2, message, headers);
         }
         if (status === 422) {
-          return new UnprocessableEntityError(status, error2, message, headers, type);
+          return new UnprocessableEntityError(status, error2, message, headers);
         }
         if (status === 429) {
-          return new RateLimitError(status, error2, message, headers, type);
+          return new RateLimitError(status, error2, message, headers);
         }
         if (status >= 500) {
-          return new InternalServerError(status, error2, message, headers, type);
+          return new InternalServerError(status, error2, message, headers);
         }
-        return new _APIError(status, error2, message, headers, type);
+        return new _APIError(status, error2, message, headers);
       }
     };
     APIUserAbortError = class extends APIError {
@@ -7032,7 +7030,7 @@ var init_sleep = __esm({
 var VERSION;
 var init_version = __esm({
   "node_modules/@anthropic-ai/sdk/version.mjs"() {
-    VERSION = "0.82.0";
+    VERSION = "0.78.0";
   }
 });
 
@@ -7263,24 +7261,6 @@ var init_request_options = __esm({
         body: JSON.stringify(body)
       };
     };
-  }
-});
-
-// node_modules/@anthropic-ai/sdk/internal/utils/query.mjs
-function stringifyQuery(query2) {
-  return Object.entries(query2).filter(([_2, value]) => typeof value !== "undefined").map(([key, value]) => {
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
-    }
-    if (value === null) {
-      return `${encodeURIComponent(key)}=`;
-    }
-    throw new AnthropicError(`Cannot stringify type ${typeof value}; Expected string, number, boolean, or null. If you need to pass nested query parameters, you can manually encode them, e.g. { query: { 'foo[key1]': value1, 'foo[key2]': value2 } }, and please open a GitHub issue requesting better support for your use case.`);
-  }).join("&");
-}
-var init_query = __esm({
-  "node_modules/@anthropic-ai/sdk/internal/utils/query.mjs"() {
-    init_error();
   }
 });
 
@@ -7579,9 +7559,7 @@ var init_streaming = __esm({
                 continue;
               }
               if (sse.event === "error") {
-                const body = safeJSON(sse.data) ?? sse.data;
-                const type = body?.error?.type;
-                throw new APIError(void 0, body, void 0, response.headers, type);
+                throw new APIError(void 0, safeJSON(sse.data) ?? sse.data, void 0, response.headers);
               }
             }
             done = true;
@@ -11514,7 +11492,6 @@ var init_client = __esm({
     init_detect_platform();
     init_shims();
     init_request_options();
-    init_query();
     init_version();
     init_error();
     init_pagination();
@@ -11632,7 +11609,15 @@ var init_client = __esm({
        * Basic re-implementation of `qs.stringify` for primitive types.
        */
       stringifyQuery(query2) {
-        return stringifyQuery(query2);
+        return Object.entries(query2).filter(([_2, value]) => typeof value !== "undefined").map(([key, value]) => {
+          if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+            return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+          }
+          if (value === null) {
+            return `${encodeURIComponent(key)}=`;
+          }
+          throw new AnthropicError(`Cannot stringify type ${typeof value}; Expected string, number, boolean, or null. If you need to pass nested query parameters, you can manually encode them, e.g. { query: { 'foo[key1]': value1, 'foo[key2]': value2 } }, and please open a GitHub issue requesting better support for your use case.`);
+        }).join("&");
       }
       getUserAgent() {
         return `${this.constructor.name}/JS ${VERSION}`;
@@ -11647,9 +11632,8 @@ var init_client = __esm({
         const baseURL = !__classPrivateFieldGet(this, _BaseAnthropic_instances, "m", _BaseAnthropic_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
         const url = isAbsoluteURL(path5) ? new URL(path5) : new URL(baseURL + (baseURL.endsWith("/") && path5.startsWith("/") ? path5.slice(1) : path5));
         const defaultQuery = this.defaultQuery();
-        const pathQuery = Object.fromEntries(url.searchParams);
-        if (!isEmptyObj(defaultQuery) || !isEmptyObj(pathQuery)) {
-          query2 = { ...pathQuery, ...defaultQuery, ...query2 };
+        if (!isEmptyObj(defaultQuery)) {
+          query2 = { ...defaultQuery, ...query2 };
         }
         if (typeof query2 === "object" && query2 && !Array.isArray(query2)) {
           url.search = this.stringifyQuery(query2);
@@ -11861,7 +11845,7 @@ var init_client = __esm({
             timeoutMillis = Date.parse(retryAfterHeader) - Date.now();
           }
         }
-        if (timeoutMillis === void 0) {
+        if (!(timeoutMillis && 0 <= timeoutMillis && timeoutMillis < 60 * 1e3)) {
           const maxRetries = options.maxRetries ?? this.maxRetries;
           timeoutMillis = this.calculateDefaultRetryTimeoutMillis(retriesRemaining, maxRetries);
         }
@@ -19880,9 +19864,10 @@ var ProgressTokenSchema = union([string2(), number2().int()]);
 var CursorSchema = string2();
 var TaskCreationParamsSchema = looseObject({
   /**
-   * Requested duration in milliseconds to retain task from creation.
+   * Time in milliseconds to keep task results available after completion.
+   * If null, the task has unlimited lifetime until manually cleaned up.
    */
-  ttl: number2().optional(),
+  ttl: union([number2(), _null3()]).optional(),
   /**
    * Time in milliseconds to wait between task status requests.
    */
@@ -20182,11 +20167,7 @@ var ClientCapabilitiesSchema = object2({
   /**
    * Present if the client supports task creation.
    */
-  tasks: ClientTasksCapabilitySchema.optional(),
-  /**
-   * Extensions that the client supports. Keys are extension identifiers (vendor-prefix/extension-name).
-   */
-  extensions: record(string2(), AssertObjectSchema).optional()
+  tasks: ClientTasksCapabilitySchema.optional()
 });
 var InitializeRequestParamsSchema = BaseRequestParamsSchema.extend({
   /**
@@ -20247,11 +20228,7 @@ var ServerCapabilitiesSchema = object2({
   /**
    * Present if the server supports task creation.
    */
-  tasks: ServerTasksCapabilitySchema.optional(),
-  /**
-   * Extensions that the server supports. Keys are extension identifiers (vendor-prefix/extension-name).
-   */
-  extensions: record(string2(), AssertObjectSchema).optional()
+  tasks: ServerTasksCapabilitySchema.optional()
 });
 var InitializeResultSchema = ResultSchema.extend({
   /**
@@ -20443,12 +20420,6 @@ var ResourceSchema = object2({
    * The MIME type of this resource, if known.
    */
   mimeType: optional(string2()),
-  /**
-   * The size of the raw resource content, in bytes (i.e., before base64 encoding or any tokenization), if known.
-   *
-   * This can be used by Hosts to display file sizes and estimate context window usage.
-   */
-  size: optional(number2()),
   /**
    * Optional annotations for the client.
    */
@@ -21633,10 +21604,6 @@ var Protocol = class {
     this._progressHandlers.clear();
     this._taskProgressTokens.clear();
     this._pendingDebouncedNotifications.clear();
-    for (const info of this._timeoutInfo.values()) {
-      clearTimeout(info.timeoutId);
-    }
-    this._timeoutInfo.clear();
     for (const controller of this._requestHandlerAbortControllers.values()) {
       controller.abort();
     }
@@ -21767,9 +21734,7 @@ var Protocol = class {
         await capturedTransport?.send(errorResponse);
       }
     }).catch((error2) => this._onerror(new Error(`Failed to send response: ${error2}`))).finally(() => {
-      if (this._requestHandlerAbortControllers.get(request.id) === abortController) {
-        this._requestHandlerAbortControllers.delete(request.id);
-      }
+      this._requestHandlerAbortControllers.delete(request.id);
     });
   }
   _onprogress(notification) {
@@ -23412,12 +23377,12 @@ import { pipeline } from "@xenova/transformers";
 var embeddingPipeline = null;
 async function initEmbeddings() {
   if (!embeddingPipeline) {
-    console.log("Loading embedding model (first run may take time)...");
+    console.error("Loading embedding model (first run may take time)...");
     embeddingPipeline = await pipeline(
       "feature-extraction",
       "Xenova/all-MiniLM-L6-v2"
     );
-    console.log("Embedding model loaded");
+    console.error("Embedding model loaded");
   }
 }
 async function generateEmbedding(text) {

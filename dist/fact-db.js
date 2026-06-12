@@ -110,25 +110,44 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
  * Score = (log2(consolidated_count + 1) * 3) + recency_bonus + scope_bonus
  *   recency_bonus: 5 if updated in last 7 days, 3 if last 30 days, 1 if last 90 days, 0 otherwise
  *   scope_bonus: 2 for project-scoped facts, 0 for global
+ *
+ * Project facts are guaranteed up to half of the result slots: heavily-confirmed
+ * global facts otherwise outscore any newly extracted project fact (count=1)
+ * forever, so project context would never surface in injection.
  */
 export function getTopFacts(db, project, limit = 10) {
     const now = new Date();
     const d7 = new Date(now.getTime() - 7 * 86400000).toISOString();
     const d30 = new Date(now.getTime() - 30 * 86400000).toISOString();
     const d90 = new Date(now.getTime() - 90 * 86400000).toISOString();
-    return db.prepare(`
-    SELECT *,
+    const scoreExpr = `
       (
         CASE WHEN consolidated_count > 0 THEN (3.0 * (1.0 + LOG(consolidated_count + 1) / LOG(2))) ELSE 3.0 END
         + CASE WHEN updated_at >= ? THEN 5 WHEN updated_at >= ? THEN 3 WHEN updated_at >= ? THEN 1 ELSE 0 END
         + CASE WHEN scope_type = 'project' AND scope_project = ? THEN 2 ELSE 0 END
-      ) as relevance_score
+      ) as relevance_score`;
+    const projectRows = db.prepare(`
+    SELECT *, ${scoreExpr}
     FROM facts
-    WHERE is_active = 1
-      AND ((scope_type = 'project' AND scope_project = ?) OR scope_type = 'global')
+    WHERE is_active = 1 AND scope_type = 'project' AND scope_project = ?
     ORDER BY relevance_score DESC
     LIMIT ?
-  `).all(d7, d30, d90, project, project, limit).map(rowToFact);
+  `).all(d7, d30, d90, project, project, limit);
+    const globalRows = db.prepare(`
+    SELECT *, ${scoreExpr}
+    FROM facts
+    WHERE is_active = 1 AND scope_type = 'global'
+    ORDER BY relevance_score DESC
+    LIMIT ?
+  `).all(d7, d30, d90, project, limit);
+    const reserved = Math.ceil(limit / 2);
+    const guaranteed = projectRows.slice(0, reserved);
+    const rest = [...projectRows.slice(reserved), ...globalRows]
+        .sort((a, b) => b.relevance_score - a.relevance_score)
+        .slice(0, Math.max(0, limit - guaranteed.length));
+    return [...guaranteed, ...rest]
+        .sort((a, b) => b.relevance_score - a.relevance_score)
+        .map(rowToFact);
 }
 /**
  * Legacy: get facts by pure confirmation count (for backward compatibility).
