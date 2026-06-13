@@ -92,16 +92,29 @@ while IFS= read -r html_file; do
     SCHEMA_CODE=$(printf '%s' "$SCHEMA_RESP" | tail -n1)
     SCHEMA=$(printf '%s' "$SCHEMA_RESP" | sed '$d')
 
-    # 유효한 OpenAPI 스키마(HTTP 200 + swagger/openapi/paths 마커)일 때만 존재 판정.
-    SCHEMA_OK=0
-    if [ "$SCHEMA_CODE" = "200" ] && printf '%s' "$SCHEMA" | grep -qE '"(swagger|openapi)"[[:space:]]*:|"paths"[[:space:]]*:'; then
-      SCHEMA_OK=1
+    # 실패 원인 구분:
+    #  - 401/403: HTML에 박힌 anon key 자체가 무효/만료 → 배포 시 모든 호출 실패가 확정 → 차단(AUTHBAD)
+    #  - 200 + OpenAPI 마커: 유효 스키마 → 함수 존재 판정 가능(SCHEMA_OK)
+    #  - 그 외(네트워크/타임아웃/5xx/마커 없는 200): 일시적/판정 불가 → 보류(SKIP), 거짓 차단 방지
+    SCHEMA_OK=0; AUTHBAD=0
+    case "$SCHEMA_CODE" in
+      200)
+        if printf '%s' "$SCHEMA" | grep -qE '"(swagger|openapi)"[[:space:]]*:|"paths"[[:space:]]*:'; then SCHEMA_OK=1; fi ;;
+      401|403) AUTHBAD=1 ;;
+    esac
+
+    if [ "$AUTHBAD" = "1" ]; then
+      FAILED=1
+      ERRORS+="[API FAIL] ${html_file}: Supabase 인증 실패 (HTTP ${SCHEMA_CODE}) — HTML에 박힌 anon key가 무효/만료. 배포 시 모든 REST/RPC 호출이 실패합니다.\n\n"
+      echo "    x 인증 실패(HTTP ${SCHEMA_CODE}): 무효한 anon key — 배포 차단" >&2
     fi
 
     while IFS= read -r endpoint; do
       func=$(echo "$endpoint" | sed 's|rpc/||')
-      if [ "$SCHEMA_OK" != "1" ]; then
-        echo "    - RPC ${func}: 스키마 조회 실패/무효 (HTTP ${SCHEMA_CODE}, 판정 보류)" >&2
+      if [ "$AUTHBAD" = "1" ]; then
+        :  # 위에서 이미 차단 처리됨
+      elif [ "$SCHEMA_OK" != "1" ]; then
+        echo "    - RPC ${func}: 스키마 조회 불가 (HTTP ${SCHEMA_CODE}, 일시적/판정 보류)" >&2
       elif printf '%s' "$SCHEMA" | grep -q "\"/rpc/${func}\""; then
         echo "    o RPC ${func}: 스키마에 존재 (함수 미실행)" >&2
       else
