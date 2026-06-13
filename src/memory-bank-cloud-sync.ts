@@ -13,9 +13,9 @@ export function syncMemoryBankCloudSpool(host: MemoryBankCloudHost, sessionToken
     try {
       // Pass the spool event id as the stable row id so a retry (e.g. write succeeded
       // but ack failed) upserts the same row instead of creating a duplicate.
-      if (event.kind === 'context') host.putContext(sessionToken, { ...event.payload, id: event.id });
-      if (event.kind === 'exchange') host.ingestExchange(sessionToken, { ...event.payload, id: event.id });
-      if (event.kind === 'fact') host.putFact(sessionToken, { ...event.payload, id: event.id });
+      if (event.kind === 'context') host.putContext(sessionToken, { ...event.payload, idempotencyKey: event.id });
+      if (event.kind === 'exchange') host.ingestExchange(sessionToken, { ...event.payload, idempotencyKey: event.id });
+      if (event.kind === 'fact') host.putFact(sessionToken, { ...event.payload, idempotencyKey: event.id });
       spool.ack(event.id);
       processed += 1;
     } catch (error) {
@@ -41,9 +41,9 @@ export async function syncMemoryBankCloudSpoolAsync(
     try {
       // Pass the spool event id as the stable row id so a retry (e.g. remote write
       // succeeded but ack failed) upserts the same row instead of duplicating it.
-      if (event.kind === 'context') await host.putContext(sessionToken, { ...event.payload, id: event.id });
-      if (event.kind === 'exchange') await host.ingestExchange(sessionToken, { ...event.payload, id: event.id });
-      if (event.kind === 'fact') await host.putFact(sessionToken, { ...event.payload, id: event.id });
+      if (event.kind === 'context') await host.putContext(sessionToken, { ...event.payload, idempotencyKey: event.id });
+      if (event.kind === 'exchange') await host.ingestExchange(sessionToken, { ...event.payload, idempotencyKey: event.id });
+      if (event.kind === 'fact') await host.putFact(sessionToken, { ...event.payload, idempotencyKey: event.id });
       spool.ack(event.id);
       processed += 1;
     } catch (error) {

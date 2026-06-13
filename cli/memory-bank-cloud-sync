@@ -73,12 +73,13 @@ async function main() {
   const spool = new spoolMod.MemoryBankCloudSpool(dir);
 
   if (cmd === 'status') {
-    const pending = spool.listPending();
-    out({ command: 'status', mode: config.mode, spoolDir: dir, spoolFile: spool.filePath, pending: pending.length, kinds: countKinds(pending) });
+    const { events, malformed } = spool.scan();
+    out({ command: 'status', mode: config.mode, spoolDir: dir, spoolFile: spool.filePath, pending: events.length, corrupt: malformed.length, kinds: countKinds(events) });
     return;
   }
 
   if (cmd === 'doctor') {
+    const { events, malformed } = spool.scan();
     const issues = [];
     if (config.mode !== 'supabase') issues.push('config.mode != supabase — set MEMORY_BANK_CLOUD_SUPABASE_URL + token to push to the cloud plane');
     if (!config.supabaseUrl) issues.push('missing SUPABASE_URL / MEMORY_BANK_CLOUD_SUPABASE_URL');
@@ -86,8 +87,17 @@ async function main() {
     if (!process.env.MEMORY_BANK_CLOUD_SESSION_TOKEN && !process.env.MEMORY_BANK_CLOUD_TOKEN) {
       issues.push('no session — set MEMORY_BANK_CLOUD_SESSION_TOKEN or MEMORY_BANK_CLOUD_TOKEN before push');
     }
-    out({ command: 'doctor', mode: config.mode, spoolDir: dir, pending: spool.listPending().length, ok: issues.length === 0, issues });
+    if (malformed.length > 0) {
+      issues.push(`${malformed.length} malformed spool line(s) — run \`memory-bank-cloud-sync quarantine\` to isolate them`);
+    }
+    out({ command: 'doctor', mode: config.mode, spoolDir: dir, pending: events.length, corrupt: malformed.length, ok: issues.length === 0, issues });
     if (issues.length > 0) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'quarantine') {
+    const result = spool.quarantineMalformed();
+    out({ command: 'quarantine', quarantined: result.quarantined, corruptPath: result.corruptPath });
     return;
   }
 
@@ -113,7 +123,7 @@ async function main() {
     return;
   }
 
-  err(`Unknown command: ${cmd}\nUsage: memory-bank-cloud-sync [status|push|retry|doctor]`);
+  err(`Unknown command: ${cmd}\nUsage: memory-bank-cloud-sync [status|push|retry|doctor|quarantine]`);
   process.exit(2);
 }
 

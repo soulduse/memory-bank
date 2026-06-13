@@ -72,8 +72,10 @@ export interface CloudContextEntry {
     updatedAt: string;
 }
 export interface CloudContextInput {
-    /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
-    id?: string;
+    /** Optional idempotency key (e.g. spool event id). The stored row id is derived
+     * deterministically from the writer's tenant/user/scope + this key, so it cannot
+     * target or overwrite a row in another scope. */
+    idempotencyKey?: string;
     scopeType: CloudContextScopeType;
     scopeId?: string;
     title: string;
@@ -114,8 +116,10 @@ export interface CloudExchangeRecord {
     updatedAt: string;
 }
 export interface CloudExchangeInput {
-    /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
-    id?: string;
+    /** Optional idempotency key (e.g. spool event id). The stored row id is derived
+     * deterministically from the writer's tenant/user/scope + this key, so it cannot
+     * target or overwrite a row in another scope. */
+    idempotencyKey?: string;
     scopeType: CloudContextScopeType;
     scopeId?: string;
     sourceId?: string;
@@ -161,8 +165,10 @@ export interface CloudFactRecord {
     updatedAt: string;
 }
 export interface CloudFactInput {
-    /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
-    id?: string;
+    /** Optional idempotency key (e.g. spool event id). The stored row id is derived
+     * deterministically from the writer's tenant/user/scope + this key, so it cannot
+     * target or overwrite a row in another scope. */
+    idempotencyKey?: string;
     scopeType: CloudContextScopeType;
     scopeId?: string;
     category: CloudFactCategory;

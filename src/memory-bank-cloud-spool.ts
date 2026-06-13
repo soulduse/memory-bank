@@ -16,6 +16,7 @@ export class MemoryBankCloudSpool {
     fs.mkdirSync(spoolDir, { recursive: true });
     this.filePath = path.join(spoolDir, 'memory-bank-cloud-spool.jsonl');
     this.ackPath = path.join(spoolDir, 'memory-bank-cloud-acked.jsonl');
+    this.corruptPath = path.join(spoolDir, 'memory-bank-cloud-spool.corrupt.jsonl');
     if (!fs.existsSync(this.filePath)) fs.writeFileSync(this.filePath, '', 'utf8');
     if (!fs.existsSync(this.ackPath)) fs.writeFileSync(this.ackPath, '', 'utf8');
   }
@@ -26,25 +27,48 @@ export class MemoryBankCloudSpool {
     return event;
   }
 
-  listPending(): MemoryBankCloudSpoolEvent[] {
+  readonly corruptPath: string;
+
+  /**
+   * Read the spool, separating valid pending events from malformed lines.
+   * Malformed lines are NOT dropped from disk — they are returned so callers can
+   * report/quarantine them, ensuring one torn line cannot silently strand the queue.
+   */
+  scan(): { events: MemoryBankCloudSpoolEvent[]; malformed: string[] } {
     const acked = this.readAckedIds();
     const events: MemoryBankCloudSpoolEvent[] = [];
-    // Tolerate torn/partial JSONL lines: skip malformed records instead of throwing,
-    // so one corrupt line cannot strand every later pending event.
+    const malformed: string[] = [];
     for (const line of fs.readFileSync(this.filePath, 'utf8').split(/\r?\n/)) {
       if (!line) continue;
       let event: MemoryBankCloudSpoolEvent;
       try {
         event = JSON.parse(line) as MemoryBankCloudSpoolEvent;
       } catch {
-        process.stderr.write('memory-bank-cloud spool: skipping malformed line\n');
+        malformed.push(line);
         continue;
       }
       if (event && typeof event.id === 'string' && !acked.has(event.id)) {
         events.push(event);
       }
     }
-    return events;
+    return { events, malformed };
+  }
+
+  listPending(): MemoryBankCloudSpoolEvent[] {
+    return this.scan().events;
+  }
+
+  /**
+   * Copy malformed lines to a sibling quarantine file for inspection. Non-destructive:
+   * the spool file is left intact (append-only), so nothing is lost; this surfaces
+   * corruption durably instead of silently skipping it.
+   */
+  quarantineMalformed(): { quarantined: number; corruptPath: string } {
+    const { malformed } = this.scan();
+    if (malformed.length > 0) {
+      fs.appendFileSync(this.corruptPath, `${malformed.join('\n')}\n`, 'utf8');
+    }
+    return { quarantined: malformed.length, corruptPath: this.corruptPath };
   }
 
   ack(eventId: string): void {

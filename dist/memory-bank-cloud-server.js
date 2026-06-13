@@ -18047,7 +18047,7 @@ var MemoryBankCloudHost = class {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18098,7 +18098,7 @@ ${entry.tags.join(" ")}`.toLowerCase();
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18169,7 +18169,7 @@ ${exchange.tags.join(" ")}`;
     }
     const now = this.now().toISOString();
     const fact = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18337,7 +18337,7 @@ var AsyncMemoryBankCloudHost = class {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18380,7 +18380,7 @@ ${entry.tags.join(" ")}`.toLowerCase();
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18437,7 +18437,7 @@ ${exchange.tags.join(" ")}`;
     }
     const now = this.now().toISOString();
     const fact = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18510,6 +18510,15 @@ ${fact.tags.join(" ")}`;
 };
 function hashToken(token) {
   return createHash("sha256").update(token).digest("hex");
+}
+function deriveRowId(account, scopeType, scopeId, idempotencyKey) {
+  if (!idempotencyKey) return randomUUID();
+  const digest = createHash("sha1").update([account.tenantId, account.userId, scopeType, scopeId, idempotencyKey].join("\0")).digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = bytes[6] & 15 | 80;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 function visibleScopesFor(account, memberships) {
   const scopes = /* @__PURE__ */ new Map();

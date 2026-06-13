@@ -82,8 +82,10 @@ export interface CloudContextEntry {
 }
 
 export interface CloudContextInput {
-  /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
-  id?: string;
+  /** Optional idempotency key (e.g. spool event id). The stored row id is derived
+   * deterministically from the writer's tenant/user/scope + this key, so it cannot
+   * target or overwrite a row in another scope. */
+  idempotencyKey?: string;
   scopeType: CloudContextScopeType;
   scopeId?: string;
   title: string;
@@ -125,8 +127,10 @@ export interface CloudExchangeRecord {
 }
 
 export interface CloudExchangeInput {
-  /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
-  id?: string;
+  /** Optional idempotency key (e.g. spool event id). The stored row id is derived
+   * deterministically from the writer's tenant/user/scope + this key, so it cannot
+   * target or overwrite a row in another scope. */
+  idempotencyKey?: string;
   scopeType: CloudContextScopeType;
   scopeId?: string;
   sourceId?: string;
@@ -177,8 +181,10 @@ export interface CloudFactRecord {
 }
 
 export interface CloudFactInput {
-  /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
-  id?: string;
+  /** Optional idempotency key (e.g. spool event id). The stored row id is derived
+   * deterministically from the writer's tenant/user/scope + this key, so it cannot
+   * target or overwrite a row in another scope. */
+  idempotencyKey?: string;
   scopeType: CloudContextScopeType;
   scopeId?: string;
   category: CloudFactCategory;
@@ -395,7 +401,7 @@ export class MemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry: CloudContextEntry = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -454,7 +460,7 @@ export class MemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange: CloudExchangeRecord = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -537,7 +543,7 @@ export class MemoryBankCloudHost {
     }
     const now = this.now().toISOString();
     const fact: CloudFactRecord = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -734,7 +740,7 @@ export class AsyncMemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry: CloudContextEntry = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -782,7 +788,7 @@ export class AsyncMemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange: CloudExchangeRecord = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -849,7 +855,7 @@ export class AsyncMemoryBankCloudHost {
     }
     const now = this.now().toISOString();
     const fact: CloudFactRecord = {
-      id: input.id ?? randomUUID(),
+      id: deriveRowId(session.account, input.scopeType, scopeId, input.idempotencyKey),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -938,6 +944,30 @@ export class AsyncMemoryBankCloudHost {
 
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Derive a deterministic row id from the writer's (tenant, user, scope) + an idempotency key.
+ * Same inputs → same id (idempotent retries). Because the id is namespaced by the writer's
+ * own tenant/user/scope, a caller cannot craft a key that maps onto a row id belonging to a
+ * scope they are not authorized to write — preventing cross-scope row hijack/overwrite.
+ * Falls back to a random UUID when no key is supplied.
+ */
+function deriveRowId(
+  account: CloudAccountContext,
+  scopeType: CloudContextScopeType,
+  scopeId: string,
+  idempotencyKey?: string
+): string {
+  if (!idempotencyKey) return randomUUID();
+  const digest = createHash('sha1')
+    .update([account.tenantId, account.userId, scopeType, scopeId, idempotencyKey].join(' '))
+    .digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x50; // UUID version 5
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 export function visibleScopesFor(account: CloudAccountContext, memberships: CloudMembership[]): Array<{ scopeType: CloudContextScopeType; scopeId: string }> {

@@ -147,4 +147,43 @@ describe('memory-bank-cloud issuer-boundary domain invariants', () => {
     const results = host.searchFacts(team.session.sessionToken, { query: 'org-level decision XYZ' });
     expect(results).toHaveLength(0);
   });
+
+  it('does not let an idempotencyKey overwrite/hijack a row in another scope', () => {
+    const host = new MemoryBankCloudHost();
+    const acc = account();
+
+    // Company session writes an org-scoped exchange.
+    const company = loginWith(host, companyIssuer(acc), acc);
+    const orgEx = host.ingestExchange(company.session.sessionToken, {
+      scopeType: 'org',
+      title: 'org doc',
+      content: 'org-only secret body',
+      idempotencyKey: 'k-org',
+    });
+
+    // Team session tries to clobber it by reusing the org row id as its idempotency key.
+    const team = loginWith(host, teamIssuer(acc), acc);
+    const teamEx = host.ingestExchange(team.session.sessionToken, {
+      scopeType: 'team',
+      title: 'team doc',
+      content: 'team body',
+      idempotencyKey: orgEx.id,
+    });
+
+    // Derived id is namespaced → different row, not the victim's.
+    expect(teamEx.id).not.toBe(orgEx.id);
+    // The org row is intact: still org-scoped, original content.
+    const reread = host.readExchange(company.session.sessionToken, orgEx.id);
+    expect(reread.exchange.scopeType).toBe('org');
+    expect(reread.exchange.content).toBe('org-only secret body');
+  });
+
+  it('uses the same derived row id for the same (writer, scope, idempotencyKey) — idempotent', () => {
+    const host = new MemoryBankCloudHost();
+    const acc = account();
+    const company = loginWith(host, companyIssuer(acc), acc);
+    const first = host.putContext(company.session.sessionToken, { scopeType: 'team', title: 't1', body: 'b1', idempotencyKey: 'evt-42' });
+    const second = host.putContext(company.session.sessionToken, { scopeType: 'team', title: 't1', body: 'b1 updated', idempotencyKey: 'evt-42' });
+    expect(second.id).toBe(first.id); // same row, not a duplicate
+  });
 });
