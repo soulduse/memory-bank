@@ -32,10 +32,16 @@ EVIDENCE="$PROJECT_ROOT/.qa-cycle-passed"
 BROWSER_EVIDENCE="$PROJECT_ROOT/.qa-evidence.json"
 
 # --- 코드 변경 여부 확인 ---
-# HEAD~1만 보면 'docs-only 커밋을 마지막에 끼워 우회'가 가능하므로,
-# push될 전체 범위(upstream..HEAD)를 검사한다. upstream이 없으면 HEAD~1로 폴백.
+# HEAD~1만 보면 'docs-only 커밋을 마지막에 끼워 우회'가 가능하므로 push될 전체 범위를 검사한다.
+# 1순위: upstream(@{u})..HEAD. 2순위(upstream 없는 새 브랜치): 원격 기본 브랜치와의 merge-base
+#        부터 HEAD까지 — 새 브랜치의 모든 커밋을 포함해 docs-only 마지막 커밋 우회를 막는다.
 DIFF_BASE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
-[ -z "$DIFF_BASE" ] && DIFF_BASE="HEAD~1"
+if [ -z "$DIFF_BASE" ]; then
+  DEFAULT_REMOTE=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)
+  [ -z "$DEFAULT_REMOTE" ] && DEFAULT_REMOTE="origin/main"
+  DIFF_BASE=$(git merge-base "$DEFAULT_REMOTE" HEAD 2>/dev/null)
+fi
+[ -z "$DIFF_BASE" ] && DIFF_BASE="HEAD~1"  # 최후 폴백(원격 없는 순수 로컬 repo)
 CODE_CHANGES=$(git diff --name-only "${DIFF_BASE}...HEAD" 2>/dev/null | grep -E '\.(ts|tsx|vue|js|jsx|dart|py|kt|java|rs|go|rb|css|scss|html)$' | head -1)
 UI_CHANGES=$(git diff --name-only "${DIFF_BASE}...HEAD" 2>/dev/null | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$' | head -1)
 

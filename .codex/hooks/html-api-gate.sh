@@ -77,13 +77,29 @@ while IFS= read -r html_file; do
     done <<< "$REST_URLS"
   fi
 
-  # RPC 함수: POST 호출은 함수 본문을 실제로 실행하므로 부작용(데이터 삭제/변경 등)을
-  # 일으킬 수 있다. 게이트에서 자동 호출하면 프로덕션 데이터를 변경할 위험이 있으므로
-  # 호출하지 않고 탐지만 한다 (read-only 보장). 검증이 필요하면 안전한 인자로 수동 테스트.
+  # RPC 함수: POST는 함수 본문을 실제로 실행해 부작용(데이터 변경)을 일으킬 수 있으므로 금지.
+  # 대신 GET으로 '존재 여부만' 확인한다 (read-only).
+  #   PostgREST: 없는 함수=404 / VOLATILE 함수=405(미실행) / STABLE·IMMUTABLE=200(read-only)
+  #   → GET은 부작용 있는 VOLATILE 함수를 실행하지 않으므로 데이터 변경 위험 없음.
+  #   404일 때만 FAIL(broken/renamed RPC 검출). 인자 누락 등 400류는 판정 보류(스킵).
   if [ -n "$RPC_CALLS" ]; then
     while IFS= read -r endpoint; do
       func=$(echo "$endpoint" | sed 's|rpc/||')
-      echo "    - RPC ${func}: 부작용 위험으로 자동 호출 생략 (수동 검증 권장)" >&2
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        "${SB_URL}/rest/v1/rpc/${func}" \
+        -H "apikey: ${ANON_KEY}" \
+        -H "Authorization: Bearer ${ANON_KEY}" \
+        --max-time 10 2>/dev/null)
+      case "$HTTP_CODE" in
+        200|405)
+          echo "    o RPC ${func}: 존재 확인 (HTTP ${HTTP_CODE}, 미변경)" >&2 ;;
+        404)
+          FAILED=1
+          ERRORS+="[API FAIL] ${html_file}: RPC ${func}() 없음 → HTTP 404 (broken/renamed)\n\n"
+          echo "    x RPC ${func}: HTTP 404 (함수 없음)" >&2 ;;
+        *)
+          echo "    - RPC ${func}: HTTP ${HTTP_CODE} (판정 보류, 스킵)" >&2 ;;
+      esac
     done <<< "$RPC_CALLS"
   fi
 
