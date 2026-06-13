@@ -26,11 +26,17 @@ for tok in $CLEAN; do
   esac
 done
 
-# (2) broad add (. / -A / --all / -u / *) — 파일명이 command에 없어도
-#     워킹트리에서 실제로 스테이징될 민감 파일을 검사 (git add . 우회 차단).
-if echo "$CMD" | grep -qE '\badd\b[^|;&]*([[:space:]](\.|-A|--all|-u|\*)([[:space:]]|/|$))'; then
-  # -f/--force 면 .gitignore된 파일도 강제 스테이징되므로 ignored 포함 전체 스캔.
-  if echo "$CMD" | grep -qE '(^|[[:space:]])(-[A-Za-z]*f[A-Za-z]*|--force)([[:space:]]|=|$)'; then
+# (2) 정적으로 스테이징 대상을 알 수 없는 add 형태는 워킹트리를 직접 스캔한다.
+#     명령 텍스트에 파일명이 없어도(broad add `.`/`-A`/`-u`/`*`, 또는 파일에서 경로를 읽는
+#     `--pathspec-from-file`, 또는 ignored 강제 `-f`) 실제 스테이징될 민감 파일을 잡아낸다.
+BROAD=0; INCLUDE_IGNORED=0
+echo "$CMD" | grep -qE '\badd\b[^|;&]*([[:space:]](\.|-A|--all|-u|\*)([[:space:]]|/|$))' && BROAD=1
+echo "$CMD" | grep -qE '(^|[[:space:]])(-[A-Za-z]*f[A-Za-z]*|--force)([[:space:]]|=|$)' && { BROAD=1; INCLUDE_IGNORED=1; }
+echo "$CMD" | grep -qE '\-\-pathspec-from-file' && { BROAD=1; INCLUDE_IGNORED=1; }
+
+if [ "$BROAD" = 1 ]; then
+  # -f/--force 또는 pathspec-from-file: .gitignore된 파일도 스테이징될 수 있으므로 ignored 포함.
+  if [ "$INCLUDE_IGNORED" = 1 ]; then
     LSARGS="-o -m"                    # --exclude-standard 없음 → ignored 파일까지 포함
   else
     LSARGS="-o -m --exclude-standard" # 기본 무시 규칙 적용분만
