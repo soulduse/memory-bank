@@ -8,9 +8,14 @@ if [ "$CLAUDE_AUTO_VALIDATE" != "true" ]; then
   exit 0
 fi
 
-# git index.lock 자동 제거 (반복 마찰 방지)
+# stale git index.lock만 정리 (활성 git 프로세스 없고 120초 이상 경과한 경우)
+# 무조건 삭제는 동시 git 작업의 동시성 가드를 제거해 인덱스 손상을 유발하므로 금지.
 if [ -f ".git/index.lock" ]; then
-  rm -f .git/index.lock 2>/dev/null
+  LOCK_MTIME=$(stat -f %m ".git/index.lock" 2>/dev/null || stat -c %Y ".git/index.lock" 2>/dev/null || echo 0)
+  LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
+  if [ "$LOCK_AGE" -gt 120 ] && ! pgrep -x git >/dev/null 2>&1; then
+    rm -f .git/index.lock 2>/dev/null
+  fi
 fi
 
 # jq 없으면 python3 폴백

@@ -3,10 +3,13 @@
 # PreToolUse[Bash]: npm install / pip install 실행 시 취약점 검사
 # 설치 명령 감지 시에만 동작
 
-COMMAND=""
-if echo "$CLAUDE_TOOL_USE_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('command',''))" 2>/dev/null | read -r cmd; then
-  COMMAND="$cmd"
-fi
+# Claude Code hook 입력은 stdin JSON으로 전달됨 (환경변수 아님).
+# tool_input.command 경로에서 명령 추출. 파이프라인 subshell 할당은 값이 유실되므로 명령치환 사용.
+INPUT=$(cat)
+COMMAND=$(printf '%s' "$INPUT" | python3 -c "import sys,json
+try: d=json.load(sys.stdin)
+except Exception: d={}
+print(d.get('tool_input',{}).get('command',''))" 2>/dev/null)
 
 [ -z "$COMMAND" ] && exit 0
 

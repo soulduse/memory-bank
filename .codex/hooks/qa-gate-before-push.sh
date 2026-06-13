@@ -32,8 +32,12 @@ EVIDENCE="$PROJECT_ROOT/.qa-cycle-passed"
 BROWSER_EVIDENCE="$PROJECT_ROOT/.qa-evidence.json"
 
 # --- 코드 변경 여부 확인 ---
-CODE_CHANGES=$(git diff --name-only HEAD~1 2>/dev/null | grep -E '\.(ts|tsx|vue|js|jsx|dart|py|kt|java|rs|go|rb|css|scss|html)$' | head -1)
-UI_CHANGES=$(git diff --name-only HEAD~1 2>/dev/null | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$' | head -1)
+# HEAD~1만 보면 'docs-only 커밋을 마지막에 끼워 우회'가 가능하므로,
+# push될 전체 범위(upstream..HEAD)를 검사한다. upstream이 없으면 HEAD~1로 폴백.
+DIFF_BASE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+[ -z "$DIFF_BASE" ] && DIFF_BASE="HEAD~1"
+CODE_CHANGES=$(git diff --name-only "${DIFF_BASE}...HEAD" 2>/dev/null | grep -E '\.(ts|tsx|vue|js|jsx|dart|py|kt|java|rs|go|rb|css|scss|html)$' | head -1)
+UI_CHANGES=$(git diff --name-only "${DIFF_BASE}...HEAD" 2>/dev/null | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$' | head -1)
 
 # 코드 변경이 없어도 qa-test-plan.md가 있으면 TC 메타 필수 (2026-04-06 HARD 승격)
 # "코드 변경 없음"을 이유로 QA 전체 스킵 절대 금지

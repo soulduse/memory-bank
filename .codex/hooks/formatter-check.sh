@@ -4,10 +4,13 @@
 # 실제 prettier/eslint가 설치된 프로젝트에서만 동작
 
 # 변경된 파일 경로 추출
-FILE_PATH=""
-if echo "$CLAUDE_TOOL_USE_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('file_path',''))" 2>/dev/null | read -r fp; then
-  FILE_PATH="$fp"
-fi
+# Claude Code hook 입력은 stdin JSON으로 전달됨 (환경변수 아님).
+# tool_input.file_path 경로에서 추출. 파이프라인 subshell 할당은 값이 유실되므로 명령치환 사용.
+INPUT=$(cat)
+FILE_PATH=$(printf '%s' "$INPUT" | python3 -c "import sys,json
+try: d=json.load(sys.stdin)
+except Exception: d={}
+print(d.get('tool_input',{}).get('file_path',''))" 2>/dev/null)
 
 [ -z "$FILE_PATH" ] && exit 0
 

@@ -77,27 +77,13 @@ while IFS= read -r html_file; do
     done <<< "$REST_URLS"
   fi
 
-  # RPC 함수 호출 테스트
+  # RPC 함수: POST 호출은 함수 본문을 실제로 실행하므로 부작용(데이터 삭제/변경 등)을
+  # 일으킬 수 있다. 게이트에서 자동 호출하면 프로덕션 데이터를 변경할 위험이 있으므로
+  # 호출하지 않고 탐지만 한다 (read-only 보장). 검증이 필요하면 안전한 인자로 수동 테스트.
   if [ -n "$RPC_CALLS" ]; then
     while IFS= read -r endpoint; do
       func=$(echo "$endpoint" | sed 's|rpc/||')
-      HTTP_CODE=$(curl -s -o /tmp/html-gate-resp.txt -w "%{http_code}" \
-        "${SB_URL}/rest/v1/rpc/${func}" \
-        -X POST \
-        -H "apikey: ${ANON_KEY}" \
-        -H "Authorization: Bearer ${ANON_KEY}" \
-        -H "Content-Type: application/json" \
-        -d '{}' \
-        --max-time 10 2>/dev/null)
-
-      if [ "$HTTP_CODE" = "200" ]; then
-        echo "    o RPC ${func}: ${HTTP_CODE} OK" >&2
-      else
-        FAILED=1
-        RESP=$(cat /tmp/html-gate-resp.txt 2>/dev/null | head -c 200)
-        ERRORS+="[API FAIL] ${html_file}: RPC ${func}() → HTTP ${HTTP_CODE}\n  ${RESP}\n\n"
-        echo "    x RPC ${func}: HTTP ${HTTP_CODE} FAIL" >&2
-      fi
+      echo "    - RPC ${func}: 부작용 위험으로 자동 호출 생략 (수동 검증 권장)" >&2
     done <<< "$RPC_CALLS"
   fi
 
