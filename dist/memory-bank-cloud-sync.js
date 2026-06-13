@@ -3,12 +3,14 @@ export function syncMemoryBankCloudSpool(host, sessionToken, spool) {
     let processed = 0;
     for (const event of spool.listPending()) {
         try {
+            // Pass the spool event id as the stable row id so a retry (e.g. write succeeded
+            // but ack failed) upserts the same row instead of creating a duplicate.
             if (event.kind === 'context')
-                host.putContext(sessionToken, event.payload);
+                host.putContext(sessionToken, { ...event.payload, id: event.id });
             if (event.kind === 'exchange')
-                host.ingestExchange(sessionToken, event.payload);
+                host.ingestExchange(sessionToken, { ...event.payload, id: event.id });
             if (event.kind === 'fact')
-                host.putFact(sessionToken, event.payload);
+                host.putFact(sessionToken, { ...event.payload, id: event.id });
             spool.ack(event.id);
             processed += 1;
         }
@@ -28,12 +30,14 @@ export async function syncMemoryBankCloudSpoolAsync(host, sessionToken, spool) {
     let processed = 0;
     for (const event of spool.listPending()) {
         try {
+            // Pass the spool event id as the stable row id so a retry (e.g. remote write
+            // succeeded but ack failed) upserts the same row instead of duplicating it.
             if (event.kind === 'context')
-                await host.putContext(sessionToken, event.payload);
+                await host.putContext(sessionToken, { ...event.payload, id: event.id });
             if (event.kind === 'exchange')
-                await host.ingestExchange(sessionToken, event.payload);
+                await host.ingestExchange(sessionToken, { ...event.payload, id: event.id });
             if (event.kind === 'fact')
-                await host.putFact(sessionToken, event.payload);
+                await host.putFact(sessionToken, { ...event.payload, id: event.id });
             spool.ack(event.id);
             processed += 1;
         }

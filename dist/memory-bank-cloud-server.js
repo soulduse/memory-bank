@@ -18047,7 +18047,7 @@ var MemoryBankCloudHost = class {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18098,7 +18098,7 @@ ${entry.tags.join(" ")}`.toLowerCase();
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18169,7 +18169,7 @@ ${exchange.tags.join(" ")}`;
     }
     const now = this.now().toISOString();
     const fact = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18337,7 +18337,7 @@ var AsyncMemoryBankCloudHost = class {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18380,7 +18380,7 @@ ${entry.tags.join(" ")}`.toLowerCase();
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -18437,7 +18437,7 @@ ${exchange.tags.join(" ")}`;
     }
     const now = this.now().toISOString();
     const fact = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,

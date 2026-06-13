@@ -133,7 +133,7 @@ export class MemoryBankCloudHost {
         this.assertCanWriteScope(session, input.scopeType, scopeId);
         const now = this.now().toISOString();
         const entry = {
-            id: randomUUID(),
+            id: input.id ?? randomUUID(),
             tenantId: session.account.tenantId,
             scopeType: input.scopeType,
             scopeId,
@@ -188,7 +188,7 @@ export class MemoryBankCloudHost {
         this.assertCanWriteScope(session, input.scopeType, scopeId);
         const createdAt = input.createdAt ?? this.now().toISOString();
         const exchange = {
-            id: randomUUID(),
+            id: input.id ?? randomUUID(),
             tenantId: session.account.tenantId,
             scopeType: input.scopeType,
             scopeId,
@@ -266,7 +266,7 @@ export class MemoryBankCloudHost {
         }
         const now = this.now().toISOString();
         const fact = {
-            id: randomUUID(),
+            id: input.id ?? randomUUID(),
             tenantId: session.account.tenantId,
             scopeType: input.scopeType,
             scopeId,
@@ -442,7 +442,7 @@ export class AsyncMemoryBankCloudHost {
         this.assertCanWriteScope(session, input.scopeType, scopeId);
         const now = this.now().toISOString();
         const entry = {
-            id: randomUUID(),
+            id: input.id ?? randomUUID(),
             tenantId: session.account.tenantId,
             scopeType: input.scopeType,
             scopeId,
@@ -489,7 +489,7 @@ export class AsyncMemoryBankCloudHost {
         this.assertCanWriteScope(session, input.scopeType, scopeId);
         const createdAt = input.createdAt ?? this.now().toISOString();
         const exchange = {
-            id: randomUUID(),
+            id: input.id ?? randomUUID(),
             tenantId: session.account.tenantId,
             scopeType: input.scopeType,
             scopeId,
@@ -553,7 +553,7 @@ export class AsyncMemoryBankCloudHost {
         }
         const now = this.now().toISOString();
         const fact = {
-            id: randomUUID(),
+            id: input.id ?? randomUUID(),
             tenantId: session.account.tenantId,
             scopeType: input.scopeType,
             scopeId,

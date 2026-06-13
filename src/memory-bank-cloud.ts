@@ -82,6 +82,8 @@ export interface CloudContextEntry {
 }
 
 export interface CloudContextInput {
+  /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
+  id?: string;
   scopeType: CloudContextScopeType;
   scopeId?: string;
   title: string;
@@ -123,6 +125,8 @@ export interface CloudExchangeRecord {
 }
 
 export interface CloudExchangeInput {
+  /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
+  id?: string;
   scopeType: CloudContextScopeType;
   scopeId?: string;
   sourceId?: string;
@@ -173,6 +177,8 @@ export interface CloudFactRecord {
 }
 
 export interface CloudFactInput {
+  /** Optional stable row id for idempotent retries (e.g. spool event id). Defaults to a random UUID. */
+  id?: string;
   scopeType: CloudContextScopeType;
   scopeId?: string;
   category: CloudFactCategory;
@@ -389,7 +395,7 @@ export class MemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry: CloudContextEntry = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -448,7 +454,7 @@ export class MemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange: CloudExchangeRecord = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -531,7 +537,7 @@ export class MemoryBankCloudHost {
     }
     const now = this.now().toISOString();
     const fact: CloudFactRecord = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -728,7 +734,7 @@ export class AsyncMemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const now = this.now().toISOString();
     const entry: CloudContextEntry = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -776,7 +782,7 @@ export class AsyncMemoryBankCloudHost {
     this.assertCanWriteScope(session, input.scopeType, scopeId);
     const createdAt = input.createdAt ?? this.now().toISOString();
     const exchange: CloudExchangeRecord = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,
@@ -843,7 +849,7 @@ export class AsyncMemoryBankCloudHost {
     }
     const now = this.now().toISOString();
     const fact: CloudFactRecord = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       tenantId: session.account.tenantId,
       scopeType: input.scopeType,
       scopeId,

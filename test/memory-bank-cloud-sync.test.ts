@@ -53,4 +53,47 @@ describe('memory-bank-cloud sync, spool, and context resource', () => {
     expect(await syncMemoryBankCloudSpoolAsync(cloud, session.sessionToken, spool)).toEqual({ processed: 0, failed: [] });
     expect(await cloud.searchExchanges(session.sessionToken, { query: 'becomes searchable' })).toHaveLength(1);
   });
+
+  it('does not duplicate rows when a write succeeds but ack fails, then retries (crash-window idempotency)', async () => {
+    const cloud = new AsyncMemoryBankCloudHost({ store: new InMemoryMemoryBankCloudStore(), now: () => new Date('2026-05-10T00:00:00.000Z'), tokenFactory: () => 'idem-token' });
+    const ctx = account();
+    const issued = await cloud.issueLoginToken({ issuer: issuerFor(ctx), account: ctx });
+    const session = await cloud.loginWithToken(issued.token);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-bank-cloud-spool-idem-'));
+    const spool = new MemoryBankCloudSpool(dir);
+    spool.enqueue('context', { scopeType: 'team', title: 'Idem context', body: 'Written once even across retries.' });
+
+    // Simulate process death after the remote write but before ack: first ack throws.
+    const originalAck = spool.ack.bind(spool);
+    let throwOnce = true;
+    (spool as unknown as { ack: (id: string) => void }).ack = (id: string) => {
+      if (throwOnce) {
+        throwOnce = false;
+        throw new Error('simulated ack failure');
+      }
+      return originalAck(id);
+    };
+
+    const first = await syncMemoryBankCloudSpoolAsync(cloud, session.sessionToken, spool);
+    expect(first.processed).toBe(0);
+    expect(first.failed).toHaveLength(1); // write happened, ack failed → event still pending
+    const second = await syncMemoryBankCloudSpoolAsync(cloud, session.sessionToken, spool);
+    expect(second.processed).toBe(1);
+
+    // Despite two writes, the stable event-id keyed row means exactly one entry exists.
+    const bundle = await cloud.getContextBundle(session.sessionToken, { query: 'Written once' });
+    expect(bundle.entries).toHaveLength(1);
+  });
+
+  it('skips malformed spool lines instead of throwing (one torn line cannot strand the queue)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-bank-cloud-spool-torn-'));
+    const file = path.join(dir, 'memory-bank-cloud-spool.jsonl');
+    const valid1 = JSON.stringify({ id: 'evt-1', kind: 'context', createdAt: '2026-05-10T00:00:00.000Z', payload: { scopeType: 'team', title: 'A', body: 'a' } });
+    const valid2 = JSON.stringify({ id: 'evt-2', kind: 'fact', createdAt: '2026-05-10T00:00:00.000Z', payload: { scopeType: 'team', category: 'knowledge', fact: 'b' } });
+    fs.writeFileSync(file, `${valid1}\n{bad json\n${valid2}\n`, 'utf8');
+
+    const spool = new MemoryBankCloudSpool(dir);
+    const pending = spool.listPending();
+    expect(pending.map((e) => e.id)).toEqual(['evt-1', 'evt-2']);
+  });
 });

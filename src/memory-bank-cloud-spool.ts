@@ -28,11 +28,23 @@ export class MemoryBankCloudSpool {
 
   listPending(): MemoryBankCloudSpoolEvent[] {
     const acked = this.readAckedIds();
-    return fs.readFileSync(this.filePath, 'utf8')
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as MemoryBankCloudSpoolEvent)
-      .filter((event) => !acked.has(event.id));
+    const events: MemoryBankCloudSpoolEvent[] = [];
+    // Tolerate torn/partial JSONL lines: skip malformed records instead of throwing,
+    // so one corrupt line cannot strand every later pending event.
+    for (const line of fs.readFileSync(this.filePath, 'utf8').split(/\r?\n/)) {
+      if (!line) continue;
+      let event: MemoryBankCloudSpoolEvent;
+      try {
+        event = JSON.parse(line) as MemoryBankCloudSpoolEvent;
+      } catch {
+        process.stderr.write('memory-bank-cloud spool: skipping malformed line\n');
+        continue;
+      }
+      if (event && typeof event.id === 'string' && !acked.has(event.id)) {
+        events.push(event);
+      }
+    }
+    return events;
   }
 
   ack(eventId: string): void {
