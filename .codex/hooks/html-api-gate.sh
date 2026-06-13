@@ -83,14 +83,25 @@ while IFS= read -r html_file; do
   #   스키마에 "/rpc/${func}" 경로가 있으면 존재, 없으면 FAIL(broken/renamed).
   #   스키마 조회 실패(권한/네트워크)는 판정 보류(스킵) — 거짓 FAIL 방지.
   if [ -n "$RPC_CALLS" ]; then
-    SCHEMA=$(curl -s "${SB_URL}/rest/v1/" \
+    # HTTP 상태까지 함께 받는다. 401/403/404/5xx/네트워크 오류는 본문이 비어있지 않아도
+    # 유효한 스키마가 아니므로 'broken'으로 오판하면 안 된다(거짓 차단 방지).
+    SCHEMA_RESP=$(curl -s -w $'\n%{http_code}' "${SB_URL}/rest/v1/" \
       -H "apikey: ${ANON_KEY}" \
       -H "Authorization: Bearer ${ANON_KEY}" \
       --max-time 10 2>/dev/null)
+    SCHEMA_CODE=$(printf '%s' "$SCHEMA_RESP" | tail -n1)
+    SCHEMA=$(printf '%s' "$SCHEMA_RESP" | sed '$d')
+
+    # 유효한 OpenAPI 스키마(HTTP 200 + swagger/openapi/paths 마커)일 때만 존재 판정.
+    SCHEMA_OK=0
+    if [ "$SCHEMA_CODE" = "200" ] && printf '%s' "$SCHEMA" | grep -qE '"(swagger|openapi)"[[:space:]]*:|"paths"[[:space:]]*:'; then
+      SCHEMA_OK=1
+    fi
+
     while IFS= read -r endpoint; do
       func=$(echo "$endpoint" | sed 's|rpc/||')
-      if [ -z "$SCHEMA" ]; then
-        echo "    - RPC ${func}: 스키마 조회 실패 (판정 보류)" >&2
+      if [ "$SCHEMA_OK" != "1" ]; then
+        echo "    - RPC ${func}: 스키마 조회 실패/무효 (HTTP ${SCHEMA_CODE}, 판정 보류)" >&2
       elif printf '%s' "$SCHEMA" | grep -q "\"/rpc/${func}\""; then
         echo "    o RPC ${func}: 스키마에 존재 (함수 미실행)" >&2
       else
