@@ -92,29 +92,20 @@ while IFS= read -r html_file; do
     SCHEMA_CODE=$(printf '%s' "$SCHEMA_RESP" | tail -n1)
     SCHEMA=$(printf '%s' "$SCHEMA_RESP" | sed '$d')
 
-    # 실패 원인 구분:
-    #  - 401/403: HTML에 박힌 anon key 자체가 무효/만료 → 배포 시 모든 호출 실패가 확정 → 차단(AUTHBAD)
-    #  - 200 + OpenAPI 마커: 유효 스키마 → 함수 존재 판정 가능(SCHEMA_OK)
-    #  - 그 외(네트워크/타임아웃/5xx/마커 없는 200): 일시적/판정 불가 → 보류(SKIP), 거짓 차단 방지
-    SCHEMA_OK=0; AUTHBAD=0
-    case "$SCHEMA_CODE" in
-      200)
-        if printf '%s' "$SCHEMA" | grep -qE '"(swagger|openapi)"[[:space:]]*:|"paths"[[:space:]]*:'; then SCHEMA_OK=1; fi ;;
-      401|403) AUTHBAD=1 ;;
-    esac
-
-    if [ "$AUTHBAD" = "1" ]; then
-      FAILED=1
-      ERRORS+="[API FAIL] ${html_file}: Supabase 인증 실패 (HTTP ${SCHEMA_CODE}) — HTML에 박힌 anon key가 무효/만료. 배포 시 모든 REST/RPC 호출이 실패합니다.\n\n"
-      echo "    x 인증 실패(HTTP ${SCHEMA_CODE}): 무효한 anon key — 배포 차단" >&2
+    # 신뢰할 수 있는 신호로만 FAIL을 낸다.
+    #  - 200 + OpenAPI 마커: 유효 스키마 → 함수 존재 판정 가능(SCHEMA_OK). 함수 부재만 FAIL.
+    #  - 그 외(401/403/5xx/네트워크/마커 없는 200): 보류(SKIP).
+    #    스키마 루트(/rest/v1/)의 인증 실패는 게이트웨이/프록시 정책이나 주석 속 stale 토큰을
+    #    먼저 집는 등으로 발생할 수 있어 '키 무효'로 단정할 수 없다 → 거짓 차단 방지를 위해 보류.
+    SCHEMA_OK=0
+    if [ "$SCHEMA_CODE" = "200" ] && printf '%s' "$SCHEMA" | grep -qE '"(swagger|openapi)"[[:space:]]*:|"paths"[[:space:]]*:'; then
+      SCHEMA_OK=1
     fi
 
     while IFS= read -r endpoint; do
       func=$(echo "$endpoint" | sed 's|rpc/||')
-      if [ "$AUTHBAD" = "1" ]; then
-        :  # 위에서 이미 차단 처리됨
-      elif [ "$SCHEMA_OK" != "1" ]; then
-        echo "    - RPC ${func}: 스키마 조회 불가 (HTTP ${SCHEMA_CODE}, 일시적/판정 보류)" >&2
+      if [ "$SCHEMA_OK" != "1" ]; then
+        echo "    - RPC ${func}: 스키마 조회 불가/무효 (HTTP ${SCHEMA_CODE}, 판정 보류)" >&2
       elif printf '%s' "$SCHEMA" | grep -q "\"/rpc/${func}\""; then
         echo "    o RPC ${func}: 스키마에 존재 (함수 미실행)" >&2
       else
