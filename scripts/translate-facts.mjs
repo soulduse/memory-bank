@@ -37,7 +37,9 @@ if (untranslated.length === 0) {
 
 // Batch translate (chunks of 20), processed with a concurrency pool for speed.
 const BATCH = 20;
-const CONCURRENCY = parseInt(process.env.TRANSLATE_CONCURRENCY || '5', 10);
+// Clamp to a sane positive range: 0/NaN/negative would create no workers (silent no-op),
+// and an unbounded value would launch too many concurrent query() calls (rate-limit/SDK risk).
+const CONCURRENCY = Math.min(Math.max(Number.parseInt(process.env.TRANSLATE_CONCURRENCY || '5', 10) || 5, 1), 20);
 const updateStmt = db.prepare('UPDATE facts SET fact_kr = ? WHERE id = ?');
 
 const batches = [];
