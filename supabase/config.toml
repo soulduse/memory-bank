@@ -1,0 +1,8 @@
+# Supabase config for memory-bank-cloud (private MCP cloud plane)
+# The remote project ref is set at deploy time via:
+#   supabase link --project-ref <ref>
+# (ref is stored in supabase/.temp, not committed)
+project_id = "memory-bank-cloud"
+
+[db]
+major_version = 17

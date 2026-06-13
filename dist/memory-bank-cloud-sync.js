@@ -18,3 +18,28 @@ export function syncMemoryBankCloudSpool(host, sessionToken, spool) {
     }
     return { processed, failed };
 }
+/**
+ * Async variant for remote (Supabase-backed) hosts. Idempotent: acked events are
+ * skipped by the spool, so repeated runs do not duplicate rows. A failed event is
+ * left unacked so a later retry can reprocess it.
+ */
+export async function syncMemoryBankCloudSpoolAsync(host, sessionToken, spool) {
+    const failed = [];
+    let processed = 0;
+    for (const event of spool.listPending()) {
+        try {
+            if (event.kind === 'context')
+                await host.putContext(sessionToken, event.payload);
+            if (event.kind === 'exchange')
+                await host.ingestExchange(sessionToken, event.payload);
+            if (event.kind === 'fact')
+                await host.putFact(sessionToken, event.payload);
+            spool.ack(event.id);
+            processed += 1;
+        }
+        catch (error) {
+            failed.push({ event, error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+    return { processed, failed };
+}
