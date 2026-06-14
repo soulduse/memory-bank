@@ -23377,6 +23377,9 @@ function initDatabase() {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
   `);
+  const ftsExisted = db.prepare(
+    `SELECT 1 FROM sqlite_master WHERE type='table' AND name='exchanges_fts'`
+  ).get() !== void 0;
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
       user_message, assistant_message,
@@ -23384,6 +23387,11 @@ function initDatabase() {
       tokenize='porter unicode61'
     )
   `);
+  db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  if (!ftsExisted) {
+    const exchangesHaveRows = db.prepare("SELECT 1 FROM exchanges LIMIT 1").get() !== void 0;
+    db.prepare(`INSERT OR REPLACE INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`).run(exchangesHaveRows ? "0" : "1");
+  }
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
       INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
@@ -23819,8 +23827,8 @@ async function searchConversations(query2, options = {}) {
       let usedFts = false;
       if (ftsExpr) {
         try {
-          const ftsHasRows = db.prepare("SELECT rowid FROM exchanges_fts LIMIT 1").get() !== void 0;
-          if (ftsHasRows) {
+          const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get();
+          if (built?.value === "1") {
             const ftsStmt = db.prepare(`
               SELECT ${cols}, 0 as distance
               FROM exchanges_fts AS fts

@@ -140,13 +140,13 @@ export async function searchConversations(
       let usedFts = false;
       if (ftsExpr) {
         try {
-          // Readiness probe: on a fresh upgrade db.ts creates an EMPTY
-          // exchanges_fts (the existing rows are indexed by the one-time
-          // scripts/backfill-fts.mjs). Until that runs, FTS MATCH would return
-          // nothing and silently hide all historical exchanges — so if the index
-          // has no rows while exchanges do, fall back to LIKE instead of FTS.
-          const ftsHasRows = db.prepare('SELECT rowid FROM exchanges_fts LIMIT 1').get() !== undefined;
-          if (ftsHasRows) {
+          // Readiness flag (set in db.ts / backfill-fts.mjs). On a fresh upgrade
+          // the external-content FTS index is EMPTY until backfill-fts.mjs runs;
+          // a row-probe would false-positive (it reads the content table), so we
+          // use an explicit '1' flag and fall back to LIKE until it is set — never
+          // silently hiding historical text matches.
+          const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get() as { value: string } | undefined;
+          if (built?.value === '1') {
             const ftsStmt = db.prepare(`
               SELECT ${cols}, 0 as distance
               FROM exchanges_fts AS fts

@@ -15,6 +15,9 @@ try {
   const t0 = Date.now();
   // 'rebuild' is the FTS5 command to (re)build an external-content index.
   db.exec(`INSERT INTO exchanges_fts(exchanges_fts) VALUES('rebuild')`);
+  // Mark the index ready so search.ts uses FTS instead of the LIKE fallback.
+  db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.prepare(`INSERT OR REPLACE INTO fts_meta(key, value) VALUES('exchanges_fts_built', '1')`).run();
   const rows = db.prepare('SELECT count(*) c FROM exchanges').get().c;
   // Sanity probe: a MATCH should now return quickly.
   const probe = db.prepare(

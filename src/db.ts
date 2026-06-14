@@ -152,6 +152,9 @@ export function initDatabase(): Database.Database {
   // so re-indexed exchanges stay consistent). The one-time backfill of existing
   // rows is done by scripts/backfill-fts.mjs (`'rebuild'`), NOT here — keeping
   // initDatabase() cheap since it runs on every MCP/hook invocation.
+  const ftsExisted = db.prepare(
+    `SELECT 1 FROM sqlite_master WHERE type='table' AND name='exchanges_fts'`
+  ).get() !== undefined;
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
       user_message, assistant_message,
@@ -159,6 +162,20 @@ export function initDatabase(): Database.Database {
       tokenize='porter unicode61'
     )
   `);
+  // Readiness flag (deterministic, not probed). For an external-content FTS5
+  // table the index is EMPTY right after creation even though the content table
+  // (exchanges) already has rows — so `SELECT rowid FROM exchanges_fts` would
+  // falsely look "ready". Track readiness explicitly instead: a freshly-created
+  // table over an empty exchanges set is ready (triggers index every future
+  // insert); over a non-empty set it stays NOT ready until
+  // scripts/backfill-fts.mjs rebuilds the index. search.ts reads this flag and
+  // falls back to LIKE until it is '1'.
+  db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  if (!ftsExisted) {
+    const exchangesHaveRows = db.prepare('SELECT 1 FROM exchanges LIMIT 1').get() !== undefined;
+    db.prepare(`INSERT OR REPLACE INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`)
+      .run(exchangesHaveRows ? '0' : '1');
+  }
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
       INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
