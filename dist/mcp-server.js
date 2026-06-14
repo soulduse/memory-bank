@@ -23388,7 +23388,7 @@ function initDatabase() {
   const hasFtsFlag = db.prepare(`SELECT 1 FROM fts_meta WHERE key='exchanges_fts_built'`).get() !== void 0;
   if (!hasFtsFlag) {
     const exchangesHaveRows = db.prepare("SELECT 1 FROM exchanges LIMIT 1").get() !== void 0;
-    db.prepare(`INSERT INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`).run(exchangesHaveRows ? "0" : "1");
+    db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`).run(exchangesHaveRows ? "0" : "1");
   }
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN

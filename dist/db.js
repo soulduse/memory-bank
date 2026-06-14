@@ -158,7 +158,12 @@ export function initDatabase() {
     const hasFtsFlag = db.prepare(`SELECT 1 FROM fts_meta WHERE key='exchanges_fts_built'`).get() !== undefined;
     if (!hasFtsFlag) {
         const exchangesHaveRows = db.prepare('SELECT 1 FROM exchanges LIMIT 1').get() !== undefined;
-        db.prepare(`INSERT INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`)
+        // INSERT OR IGNORE (not plain INSERT): initDatabase() runs in every MCP/hook
+        // process, so two callers can both observe a missing flag and race to insert.
+        // OR IGNORE makes the first writer win and the rest no-op instead of crashing
+        // on SQLITE_CONSTRAINT_PRIMARYKEY. The value is deterministic for the DB state,
+        // so a lost race is harmless.
+        db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`)
             .run(exchangesHaveRows ? '0' : '1');
     }
     db.exec(`
