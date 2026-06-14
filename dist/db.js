@@ -121,6 +121,42 @@ export function initDatabase() {
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
   `);
+    // === Full-text search index (FTS5) for exchanges ===
+    // External-content FTS5: stores only the inverted index (not a second copy of
+    // the text), reading the source columns from `exchanges` via rowid. Replaces
+    // the O(rows) `LIKE '%q%'` full scan (measured p50 3.2s / p95 14.5s on 239K
+    // rows) with a BM25-ranked index lookup. Triggers keep it in sync on every
+    // insert/update/delete (INSERT OR REPLACE fires AFTER DELETE then AFTER INSERT,
+    // so re-indexed exchanges stay consistent). The one-time backfill of existing
+    // rows is done by scripts/backfill-fts.mjs (`'rebuild'`), NOT here — keeping
+    // initDatabase() cheap since it runs on every MCP/hook invocation.
+    db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='porter unicode61'
+    )
+  `);
+    db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
+  `);
+    db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+    END
+  `);
+    db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au AFTER UPDATE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
+  `);
     // === Facts Schema ===
     db.exec(`
     CREATE TABLE IF NOT EXISTS facts (
@@ -173,6 +209,18 @@ export function initDatabase() {
     // Queries search both tables and take the best score per fact id.
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
+    // Category embedding index: lets the ontology classifier retrieve the top-K
+    // most-similar existing categories for a fact instead of dumping ALL
+    // categories into the LLM prompt (measured 1,612 categories ≈ 95K tokens per
+    // classify call). Embeddings (category name + description, 'passage' mode) are
+    // written on createCategory; existing rows are backfilled by
+    // scripts/backfill-category-embeddings.mjs.
+    db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
       embedding FLOAT[384]
     )

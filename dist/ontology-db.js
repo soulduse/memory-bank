@@ -42,6 +42,56 @@ export function getCategoryByName(db, name, domainId) {
         .prepare(`SELECT * FROM ontology_categories WHERE name = ? COLLATE NOCASE`)
         .get(name) ?? null);
 }
+// === Category embeddings (candidate retrieval for the classifier) ===
+/**
+ * Store/replace a category's embedding in vec_categories (atomic DELETE+INSERT,
+ * since vec0 virtual tables don't support REPLACE). The embedding is generated
+ * by the caller from "name: description" in 'passage' mode.
+ */
+export function upsertCategoryEmbedding(db, categoryId, embedding) {
+    const buf = Buffer.from(new Float32Array(embedding).buffer);
+    const tx = db.transaction(() => {
+        db.prepare('DELETE FROM vec_categories WHERE id = ?').run(categoryId);
+        db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)').run(categoryId, buf);
+    });
+    tx();
+}
+export function deleteCategoryEmbedding(db, categoryId) {
+    try {
+        db.prepare('DELETE FROM vec_categories WHERE id = ?').run(categoryId);
+    }
+    catch { /* table may not exist on very old DBs */ }
+}
+/**
+ * Return the top-K most similar existing categories to a fact embedding, so the
+ * classifier can present a short candidate list to the LLM instead of all
+ * categories. Each result includes the owning domain name for a compact prompt.
+ * Returns [] if the index is empty (caller falls back to the full list).
+ */
+export function searchSimilarCategories(db, embedding, k = 20) {
+    const buf = Buffer.from(new Float32Array(embedding).buffer);
+    let hits;
+    try {
+        hits = db.prepare(`
+      SELECT id, distance FROM vec_categories
+      WHERE embedding MATCH ? ORDER BY distance LIMIT ?
+    `).all(buf, k);
+    }
+    catch {
+        return []; // index absent → caller uses the full category list
+    }
+    const results = [];
+    const catStmt = db.prepare('SELECT * FROM ontology_categories WHERE id = ?');
+    const domStmt = db.prepare('SELECT name FROM ontology_domains WHERE id = ?');
+    for (const h of hits) {
+        const category = catStmt.get(h.id);
+        if (!category)
+            continue; // stale vector row (category was merged/deleted)
+        const dom = domStmt.get(category.domain_id);
+        results.push({ category, domainName: dom?.name ?? '?', distance: h.distance });
+    }
+    return results;
+}
 // === Fact Classification ===
 export function classifyFact(db, factId, categoryId) {
     db.prepare(`UPDATE facts SET ontology_category_id = ?, updated_at = ? WHERE id = ?`).run(categoryId, new Date().toISOString(), factId);

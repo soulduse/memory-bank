@@ -23377,6 +23377,33 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
   `);
   db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='porter unicode61'
+    )
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au AFTER UPDATE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
+  `);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS facts (
       id TEXT PRIMARY KEY,
       fact TEXT NOT NULL,
@@ -23423,6 +23450,12 @@ function initDatabase() {
   `);
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
       embedding FLOAT[384]
     )
@@ -23769,11 +23802,9 @@ async function searchConversations(query2, options = {}) {
         ...timeParams
       );
     }
-    if (mode === "text" || mode === "both") {
-      const escapedQuery = query2.replace(/%/g, "\\%").replace(/_/g, "\\_");
-      const likePattern = `%${escapedQuery}%`;
-      const textStmt = db.prepare(`
-        SELECT
+    const needText = mode === "text" || mode === "both" && results.length < limit;
+    if (needText) {
+      const cols = `
           e.id,
           e.project,
           e.timestamp,
@@ -23782,15 +23813,40 @@ async function searchConversations(query2, options = {}) {
           e.archive_path,
           e.line_start,
           e.line_end,
-          e.coding_agent,
-          0 as distance
-        FROM exchanges AS e
-        WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
-          ${timeClause}
-        ORDER BY e.timestamp DESC
-        LIMIT ?
-      `);
-      const textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit);
+          e.coding_agent`;
+      let textResults = [];
+      const ftsExpr = query2.split(/\s+/).map((t) => t.replace(/"/g, "").trim()).filter(Boolean).map((t) => `"${t}"`).join(" ");
+      let usedFts = false;
+      if (ftsExpr) {
+        try {
+          const ftsStmt = db.prepare(`
+            SELECT ${cols}, 0 as distance
+            FROM exchanges_fts AS fts
+            JOIN exchanges AS e ON e.rowid = fts.rowid
+            WHERE exchanges_fts MATCH ?
+              ${timeClause}
+            ORDER BY rank
+            LIMIT ?
+          `);
+          textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+          usedFts = true;
+        } catch {
+          usedFts = false;
+        }
+      }
+      if (!usedFts) {
+        const escapedQuery = query2.replace(/%/g, "\\%").replace(/_/g, "\\_");
+        const likePattern = `%${escapedQuery}%`;
+        const textStmt = db.prepare(`
+          SELECT ${cols}, 0 as distance
+          FROM exchanges AS e
+          WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
+            ${timeClause}
+          ORDER BY e.timestamp DESC
+          LIMIT ?
+        `);
+        textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit);
+      }
       if (mode === "both") {
         const seenIds = new Set(results.map((r) => r.id));
         for (const textResult of textResults) {

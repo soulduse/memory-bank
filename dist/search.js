@@ -71,13 +71,11 @@ export async function searchConversations(query, options = {}) {
             // not upgraded yet (newest sessions are upgraded first).
             results = stmt.all(Buffer.from(new Float32Array(queryEmbedding).buffer), limit, EMBEDDING_VERSION, ...timeParams);
         }
-        if (mode === 'text' || mode === 'both') {
-            // Escape LIKE metacharacters
-            const escapedQuery = query.replace(/%/g, '\\%').replace(/_/g, '\\_');
-            const likePattern = `%${escapedQuery}%`;
-            // Text search
-            const textStmt = db.prepare(`
-        SELECT
+        // Early-exit: in 'both' mode, skip the text scan once vector search already
+        // filled the limit — the text pass only adds value when vector under-returns.
+        const needText = mode === 'text' || (mode === 'both' && results.length < limit);
+        if (needText) {
+            const cols = `
           e.id,
           e.project,
           e.timestamp,
@@ -86,15 +84,51 @@ export async function searchConversations(query, options = {}) {
           e.archive_path,
           e.line_start,
           e.line_end,
-          e.coding_agent,
-          0 as distance
-        FROM exchanges AS e
-        WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
-          ${timeClause}
-        ORDER BY e.timestamp DESC
-        LIMIT ?
-      `);
-            const textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit);
+          e.coding_agent`;
+            let textResults = [];
+            // FTS5 (BM25-ranked) — replaces the O(rows) LIKE full scan. Build a safe
+            // MATCH expression by quoting each whitespace token (neutralizes FTS5
+            // operators like -, *, OR, ", :). Falls back to LIKE if the FTS table is
+            // absent (older DB) or the query has no usable tokens.
+            const ftsExpr = query
+                .split(/\s+/)
+                .map((t) => t.replace(/"/g, '').trim())
+                .filter(Boolean)
+                .map((t) => `"${t}"`)
+                .join(' ');
+            let usedFts = false;
+            if (ftsExpr) {
+                try {
+                    const ftsStmt = db.prepare(`
+            SELECT ${cols}, 0 as distance
+            FROM exchanges_fts AS fts
+            JOIN exchanges AS e ON e.rowid = fts.rowid
+            WHERE exchanges_fts MATCH ?
+              ${timeClause}
+            ORDER BY rank
+            LIMIT ?
+          `);
+                    textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+                    usedFts = true;
+                }
+                catch {
+                    usedFts = false; // FTS table missing → LIKE fallback below
+                }
+            }
+            if (!usedFts) {
+                // Escape LIKE metacharacters
+                const escapedQuery = query.replace(/%/g, '\\%').replace(/_/g, '\\_');
+                const likePattern = `%${escapedQuery}%`;
+                const textStmt = db.prepare(`
+          SELECT ${cols}, 0 as distance
+          FROM exchanges AS e
+          WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
+            ${timeClause}
+          ORDER BY e.timestamp DESC
+          LIMIT ?
+        `);
+                textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit);
+            }
             if (mode === 'both') {
                 // Merge and deduplicate by ID
                 const seenIds = new Set(results.map(r => r.id));
