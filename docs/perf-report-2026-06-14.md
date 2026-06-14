@@ -126,3 +126,12 @@ node bench-perf.mjs   # read-only, 프로덕션 DB 미변경
 ### 남은 수렴(백그라운드)
 - P0 재임베딩 239K건은 watchdog cron이 0까지 자동 수렴(완료 시 텔레그램 알림 + cron 자동 종료). 완료 전까지 대화 검색은 FTS(수ms)로 정상 동작.
 - 카테고리 추가 축소(1,550→더↓)는 sim 0.91에서 일부 오병합 관측되어 보류 — 향후 sprawl은 새 candidate-retrieval classifier가 구조적으로 차단.
+
+---
+
+## P0 완료 (2026-06-15 01:49 KST) — 대화 벡터검색 부활
+
+- **전체 exchanges 323,218건 모두 embedding_version=3 도달** (non-v3 = 0). reembed-worker가 newest-first·resumable로 전량 업그레이드 완료.
+- **벡터검색 부활 검증**: `searchConversations(mode:"vector")` → 결과 5건 반환, top similarity 0.5537 (이전: 버전 불일치로 0건 死). 대화 의미검색이 정상 동작.
+- 시작 시점(239,037건 전량 v0/v1) 대비, 세션 중 sync가 추가 import한 분(총 323,218)까지 포함해 100% v3 정합.
+- 이로써 P0(대화 벡터검색 복구) + P1(FTS5·classify 후보선별) + P2(카테고리 병합·detectRelations 축소) 우선순위 개선 전부 완료.
