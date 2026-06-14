@@ -23306,6 +23306,7 @@ function initDatabase() {
   sqliteVec.load(db);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
+  db.pragma("recursive_triggers = ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS exchanges (
       id TEXT PRIMARY KEY,
@@ -23802,8 +23803,7 @@ async function searchConversations(query2, options = {}) {
         ...timeParams
       );
     }
-    const needText = mode === "text" || mode === "both" && results.length < limit;
-    if (needText) {
+    if (mode === "text" || mode === "both") {
       const cols = `
           e.id,
           e.project,
@@ -23819,17 +23819,20 @@ async function searchConversations(query2, options = {}) {
       let usedFts = false;
       if (ftsExpr) {
         try {
-          const ftsStmt = db.prepare(`
-            SELECT ${cols}, 0 as distance
-            FROM exchanges_fts AS fts
-            JOIN exchanges AS e ON e.rowid = fts.rowid
-            WHERE exchanges_fts MATCH ?
-              ${timeClause}
-            ORDER BY rank
-            LIMIT ?
-          `);
-          textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
-          usedFts = true;
+          const ftsHasRows = db.prepare("SELECT rowid FROM exchanges_fts LIMIT 1").get() !== void 0;
+          if (ftsHasRows) {
+            const ftsStmt = db.prepare(`
+              SELECT ${cols}, 0 as distance
+              FROM exchanges_fts AS fts
+              JOIN exchanges AS e ON e.rowid = fts.rowid
+              WHERE exchanges_fts MATCH ?
+                ${timeClause}
+              ORDER BY rank
+              LIMIT ?
+            `);
+            textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+            usedFts = true;
+          }
         } catch {
           usedFts = false;
         }

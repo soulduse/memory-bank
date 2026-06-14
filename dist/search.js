@@ -71,10 +71,11 @@ export async function searchConversations(query, options = {}) {
             // not upgraded yet (newest sessions are upgraded first).
             results = stmt.all(Buffer.from(new Float32Array(queryEmbedding).buffer), limit, EMBEDDING_VERSION, ...timeParams);
         }
-        // Early-exit: in 'both' mode, skip the text scan once vector search already
-        // filled the limit — the text pass only adds value when vector under-returns.
-        const needText = mode === 'text' || (mode === 'both' && results.length < limit);
-        if (needText) {
+        // In 'both' mode always run the text pass and merge: vector (semantic) and
+        // text (literal/keyword) are complementary, so skipping text when vector is
+        // full would drop exact matches that vector ranks lower. The text pass is now
+        // cheap (FTS5), so there is no reason to skip it.
+        if (mode === 'text' || mode === 'both') {
             const cols = `
           e.id,
           e.project,
@@ -99,20 +100,28 @@ export async function searchConversations(query, options = {}) {
             let usedFts = false;
             if (ftsExpr) {
                 try {
-                    const ftsStmt = db.prepare(`
-            SELECT ${cols}, 0 as distance
-            FROM exchanges_fts AS fts
-            JOIN exchanges AS e ON e.rowid = fts.rowid
-            WHERE exchanges_fts MATCH ?
-              ${timeClause}
-            ORDER BY rank
-            LIMIT ?
-          `);
-                    textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
-                    usedFts = true;
+                    // Readiness probe: on a fresh upgrade db.ts creates an EMPTY
+                    // exchanges_fts (the existing rows are indexed by the one-time
+                    // scripts/backfill-fts.mjs). Until that runs, FTS MATCH would return
+                    // nothing and silently hide all historical exchanges — so if the index
+                    // has no rows while exchanges do, fall back to LIKE instead of FTS.
+                    const ftsHasRows = db.prepare('SELECT rowid FROM exchanges_fts LIMIT 1').get() !== undefined;
+                    if (ftsHasRows) {
+                        const ftsStmt = db.prepare(`
+              SELECT ${cols}, 0 as distance
+              FROM exchanges_fts AS fts
+              JOIN exchanges AS e ON e.rowid = fts.rowid
+              WHERE exchanges_fts MATCH ?
+                ${timeClause}
+              ORDER BY rank
+              LIMIT ?
+            `);
+                        textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+                        usedFts = true;
+                    }
                 }
                 catch {
-                    usedFts = false; // FTS table missing → LIKE fallback below
+                    usedFts = false; // FTS table missing/unsupported → LIKE fallback below
                 }
             }
             if (!usedFts) {

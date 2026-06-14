@@ -31,10 +31,22 @@ const db = initDatabase();
 try {
   await initEmbeddings();
 
-  // active fact count per category
+  // Durable audit log so a merge can be traced/rolled back (source→target +
+  // facts moved). Without this the destructive delete leaves no recovery path.
+  db.exec(`CREATE TABLE IF NOT EXISTS category_merge_log (
+    merged_at TEXT NOT NULL,
+    source_id TEXT NOT NULL, source_name TEXT,
+    target_id TEXT NOT NULL, target_name TEXT,
+    domain TEXT, similarity REAL, facts_reassigned INTEGER
+  )`);
+
+  // TOTAL fact count per category (active AND inactive). Counting only active
+  // facts would mis-classify a category with 1 active + N inactive facts as a
+  // "singleton" and destructively merge it. A true singleton has <= MAX_FACTS
+  // total facts.
   const counts = new Map();
   for (const r of db.prepare(
-    'SELECT ontology_category_id id, count(*) n FROM facts WHERE is_active=1 AND ontology_category_id IS NOT NULL GROUP BY ontology_category_id'
+    'SELECT ontology_category_id id, count(*) n FROM facts WHERE ontology_category_id IS NOT NULL GROUP BY ontology_category_id'
   ).all()) counts.set(r.id, r.n);
 
   const cats = db.prepare('SELECT id, domain_id, name, description FROM ontology_categories').all();
@@ -65,6 +77,10 @@ try {
         const res = db.prepare('UPDATE facts SET ontology_category_id = ?, updated_at = ? WHERE ontology_category_id = ?')
           .run(target.category.id, new Date().toISOString(), src.id);
         reassigned += res.changes;
+        db.prepare(`INSERT INTO category_merge_log (merged_at, source_id, source_name, target_id, target_name, domain, similarity, facts_reassigned)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          new Date().toISOString(), src.id, src.name, target.category.id, target.category.name,
+          target.domainName, simOf(target.distance), res.changes);
         db.prepare('DELETE FROM ontology_categories WHERE id = ?').run(src.id);
         deleteCategoryEmbedding(db, src.id);
       });

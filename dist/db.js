@@ -46,6 +46,12 @@ export function initDatabase() {
     // Enable WAL mode for better concurrency
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
+    // Required so the exchanges_fts AFTER DELETE trigger fires when an exchange is
+    // re-indexed via `INSERT OR REPLACE` (the REPLACE-induced delete does NOT fire
+    // delete triggers unless recursive_triggers is on — verified: without it a
+    // re-indexed exchange leaves a stale FTS row). Keeps the external-content FTS
+    // index consistent with the source table on every write path.
+    db.pragma('recursive_triggers = ON');
     // Create exchanges table
     db.exec(`
     CREATE TABLE IF NOT EXISTS exchanges (
