@@ -495,7 +495,10 @@ export function insertExchange(
       }
     }
   });
-  insertAll();
+  // .immediate(): acquire the write lock at BEGIN, before any read — a
+  // deferred BEGIN would let the int8 migration swap commit between our reads
+  // and the lock upgrade (stale-dtype write / SQLITE_BUSY_SNAPSHOT).
+  insertAll.immediate();
 }
 
 export function getAllExchanges(db: Database.Database): Array<{ id: string; archivePath: string }> {

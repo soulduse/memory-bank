@@ -174,7 +174,10 @@ async function reembedExchanges(db) {
         db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(row.id);
         db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`).run(row.id, buf);
       });
-      tx();
+      // .immediate(): BEGIN IMMEDIATE — the write lock is acquired BEFORE the
+      // dtype read (a deferred BEGIN would read first and let the migration
+      // swap commit before our lock upgrade → stale-dtype write / busy-snapshot).
+      tx.immediate();
       done++;
     }
     log(`exchanges: ${done}/${Math.min(total, MAX_EXCHANGES)}`);
