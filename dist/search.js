@@ -1,9 +1,31 @@
-import { initDatabase } from './db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { getDbPath } from './paths.js';
 import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
 import { getRelatedFacts, listDomains, listCategories } from './ontology-db.js';
 import fs from 'fs';
 import readline from 'readline';
+// Module-level cached connection for the search read path. searchConversations
+// runs inside long-lived MCP server processes where re-running initDatabase()'s
+// full DDL/migration pass and re-opening the file on EVERY search call is pure
+// overhead (~3-4ms/call). Keyed by resolved DB path so test overrides
+// (TEST_DB_PATH / MEMORY_BANK_DB_PATH) switching mid-process get a fresh handle.
+// Short-lived CLI processes release the handle at exit.
+let cachedSearchDb = null;
+let cachedSearchDbPath = null;
+function getSearchDb() {
+    const p = getDbPath();
+    if (cachedSearchDb && cachedSearchDbPath === p && cachedSearchDb.open) {
+        return cachedSearchDb;
+    }
+    try {
+        cachedSearchDb?.close();
+    }
+    catch { /* already closed */ }
+    cachedSearchDb = initDatabase();
+    cachedSearchDbPath = p;
+    return cachedSearchDb;
+}
 function validateISODate(dateStr, paramName) {
     const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!isoDateRegex.test(dateStr)) {
@@ -22,9 +44,9 @@ export async function searchConversations(query, options = {}) {
         validateISODate(after, '--after');
     if (before)
         validateISODate(before, '--before');
-    const db = initDatabase();
+    const db = getSearchDb();
     let results = [];
-    try {
+    {
         // Build filter clauses with parameterized queries
         const filterParts = [];
         const filterParams = [];
@@ -46,6 +68,9 @@ export async function searchConversations(query, options = {}) {
             // Vector similarity search
             await initEmbeddings();
             const queryEmbedding = await generateEmbedding(query, 'query');
+            // dtype-aware: int8 tables need vec_int8()-wrapped quantized query blobs,
+            // and their distances come back ×127-scaled (normalized below).
+            const vecDtype = getVecDtype(db);
             const stmt = db.prepare(`
         SELECT
           e.id,
@@ -60,7 +85,7 @@ export async function searchConversations(query, options = {}) {
           vec.distance
         FROM vec_exchanges AS vec
         JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ?
+        WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
           AND k = ?
           AND e.embedding_version = ?
           ${timeClause}
@@ -69,7 +94,9 @@ export async function searchConversations(query, options = {}) {
             // embedding_version filter: old-model vectors are incomparable with the
             // current-model query embedding — exclude rows the re-embed worker has
             // not upgraded yet (newest sessions are upgraded first).
-            results = stmt.all(Buffer.from(new Float32Array(queryEmbedding).buffer), limit, EMBEDDING_VERSION, ...timeParams);
+            results = stmt.all(embeddingToVecBlob(queryEmbedding, vecDtype), limit, EMBEDDING_VERSION, ...timeParams);
+            for (const r of results)
+                r.distance = normalizeVecDistance(r.distance, vecDtype);
         }
         // In 'both' mode always run the text pass and merge: vector (semantic) and
         // text (literal/keyword) are complementary, so skipping text when vector is
@@ -152,9 +179,8 @@ export async function searchConversations(query, options = {}) {
             }
         }
     }
-    finally {
-        db.close();
-    }
+    // NOTE: no db.close() — the cached connection is reused across calls (see
+    // getSearchDb). CLI processes release it at exit; the MCP server keeps it.
     return results.map((row) => {
         const exchange = {
             id: row.id,

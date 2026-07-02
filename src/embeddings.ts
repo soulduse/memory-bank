@@ -75,12 +75,30 @@ function applyModePrefix(text: string, mode: EmbeddingMode): string {
   return text;
 }
 
+// Small LRU memo for query embeddings. One MCP search embeds the SAME query
+// text twice (searchConversations + getKnowledgeContext), each costing a full
+// model inference (~35ms measured) — the memo collapses that to one. Also
+// covers a user re-running the same query. 'query' mode only: passage-mode
+// callers embed unique content (indexing), where a memo is pure overhead.
+const QUERY_EMBED_MEMO_MAX = 32;
+const queryEmbedMemo = new Map<string, number[]>();
+
 /**
  * @param mode 'passage' for stored/indexed content (facts, exchanges),
  *             'query' for search queries. Defaults to 'passage' because most
  *             call sites embed content; search paths must pass 'query'.
  */
 export async function generateEmbedding(text: string, mode: EmbeddingMode = 'passage'): Promise<number[]> {
+  if (mode === 'query') {
+    const hit = queryEmbedMemo.get(text);
+    if (hit) {
+      // refresh LRU position
+      queryEmbedMemo.delete(text);
+      queryEmbedMemo.set(text, hit);
+      return hit.slice();
+    }
+  }
+
   if (!embeddingPipeline) {
     await initEmbeddings();
   }
@@ -93,7 +111,14 @@ export async function generateEmbedding(text: string, mode: EmbeddingMode = 'pas
     normalize: true
   });
 
-  return Array.from(output.data);
+  const embedding = Array.from(output.data) as number[];
+  if (mode === 'query') {
+    queryEmbedMemo.set(text, embedding.slice());
+    if (queryEmbedMemo.size > QUERY_EMBED_MEMO_MAX) {
+      queryEmbedMemo.delete(queryEmbedMemo.keys().next().value as string);
+    }
+  }
+  return embedding;
 }
 
 export async function generateExchangeEmbedding(

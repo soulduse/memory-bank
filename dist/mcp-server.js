@@ -23255,7 +23255,17 @@ function applyModePrefix(text, mode) {
   }
   return text;
 }
+var QUERY_EMBED_MEMO_MAX = 32;
+var queryEmbedMemo = /* @__PURE__ */ new Map();
 async function generateEmbedding(text, mode = "passage") {
+  if (mode === "query") {
+    const hit = queryEmbedMemo.get(text);
+    if (hit) {
+      queryEmbedMemo.delete(text);
+      queryEmbedMemo.set(text, hit);
+      return hit.slice();
+    }
+  }
   if (!embeddingPipeline) {
     await initEmbeddings();
   }
@@ -23264,10 +23274,42 @@ async function generateEmbedding(text, mode = "passage") {
     pooling: "mean",
     normalize: true
   });
-  return Array.from(output.data);
+  const embedding = Array.from(output.data);
+  if (mode === "query") {
+    queryEmbedMemo.set(text, embedding.slice());
+    if (queryEmbedMemo.size > QUERY_EMBED_MEMO_MAX) {
+      queryEmbedMemo.delete(queryEmbedMemo.keys().next().value);
+    }
+  }
+  return embedding;
 }
 
 // src/db.ts
+var VEC_INT8_SCALE = 127;
+function getVecDtype(db) {
+  try {
+    const row = db.prepare(`SELECT value FROM fts_meta WHERE key='vec_exchanges_dtype'`).get();
+    return row?.value === "int8" ? "int8" : "float32";
+  } catch {
+    return "float32";
+  }
+}
+function embeddingToVecBlob(embedding, dtype) {
+  if (dtype === "int8") {
+    const q2 = new Int8Array(embedding.length);
+    for (let i = 0; i < embedding.length; i++) {
+      q2[i] = Math.max(-127, Math.min(127, Math.round(embedding[i] * VEC_INT8_SCALE)));
+    }
+    return Buffer.from(q2.buffer);
+  }
+  return Buffer.from(new Float32Array(embedding).buffer);
+}
+function vecParamSql(dtype) {
+  return dtype === "int8" ? "vec_int8(?)" : "?";
+}
+function normalizeVecDistance(distance, dtype) {
+  return dtype === "int8" ? distance / VEC_INT8_SCALE : distance;
+}
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
   const columnNames = new Set(columns.map((c) => c.name));
@@ -23343,10 +23385,19 @@ function initDatabase() {
       FOREIGN KEY (exchange_id) REFERENCES exchanges(id)
     )
   `);
+  db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  let vecDtype = db.prepare(`SELECT value FROM fts_meta WHERE key='vec_exchanges_dtype'`).get()?.value;
+  if (!vecDtype) {
+    const vecExists = db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
+    ).get() !== void 0;
+    vecDtype = vecExists ? "float32" : "int8";
+    db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('vec_exchanges_dtype', ?)`).run(vecDtype);
+  }
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding ${vecDtype === "int8" ? "int8" : "FLOAT"}[384]
     )
   `);
   migrateSchema(db);
@@ -23746,6 +23797,21 @@ function rowToRelation(row) {
 // src/search.ts
 import fs3 from "fs";
 import readline from "readline";
+var cachedSearchDb = null;
+var cachedSearchDbPath = null;
+function getSearchDb() {
+  const p = getDbPath();
+  if (cachedSearchDb && cachedSearchDbPath === p && cachedSearchDb.open) {
+    return cachedSearchDb;
+  }
+  try {
+    cachedSearchDb?.close();
+  } catch {
+  }
+  cachedSearchDb = initDatabase();
+  cachedSearchDbPath = p;
+  return cachedSearchDb;
+}
 function validateISODate(dateStr, paramName) {
   const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!isoDateRegex.test(dateStr)) {
@@ -23760,9 +23826,9 @@ async function searchConversations(query2, options = {}) {
   const { limit = 10, mode = "both", after, before, coding_agent } = options;
   if (after) validateISODate(after, "--after");
   if (before) validateISODate(before, "--before");
-  const db = initDatabase();
+  const db = getSearchDb();
   let results = [];
-  try {
+  {
     const filterParts = [];
     const filterParams = [];
     if (after) {
@@ -23782,6 +23848,7 @@ async function searchConversations(query2, options = {}) {
     if (mode === "vector" || mode === "both") {
       await initEmbeddings();
       const queryEmbedding = await generateEmbedding(query2, "query");
+      const vecDtype = getVecDtype(db);
       const stmt = db.prepare(`
         SELECT
           e.id,
@@ -23796,18 +23863,19 @@ async function searchConversations(query2, options = {}) {
           vec.distance
         FROM vec_exchanges AS vec
         JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ?
+        WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
           AND k = ?
           AND e.embedding_version = ?
           ${timeClause}
         ORDER BY vec.distance ASC
       `);
       results = stmt.all(
-        Buffer.from(new Float32Array(queryEmbedding).buffer),
+        embeddingToVecBlob(queryEmbedding, vecDtype),
         limit,
         EMBEDDING_VERSION,
         ...timeParams
       );
+      for (const r of results) r.distance = normalizeVecDistance(r.distance, vecDtype);
     }
     if (mode === "text" || mode === "both") {
       const cols = `
@@ -23867,8 +23935,6 @@ async function searchConversations(query2, options = {}) {
         results = textResults;
       }
     }
-  } finally {
-    db.close();
   }
   return results.map((row) => {
     const exchange = {
