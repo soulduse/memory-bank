@@ -23255,7 +23255,17 @@ function applyModePrefix(text, mode) {
   }
   return text;
 }
+var QUERY_EMBED_MEMO_MAX = 32;
+var queryEmbedMemo = /* @__PURE__ */ new Map();
 async function generateEmbedding(text, mode = "passage") {
+  if (mode === "query") {
+    const hit = queryEmbedMemo.get(text);
+    if (hit) {
+      queryEmbedMemo.delete(text);
+      queryEmbedMemo.set(text, hit);
+      return hit.slice();
+    }
+  }
   if (!embeddingPipeline) {
     await initEmbeddings();
   }
@@ -23264,7 +23274,14 @@ async function generateEmbedding(text, mode = "passage") {
     pooling: "mean",
     normalize: true
   });
-  return Array.from(output.data);
+  const embedding = Array.from(output.data);
+  if (mode === "query") {
+    queryEmbedMemo.set(text, embedding.slice());
+    if (queryEmbedMemo.size > QUERY_EMBED_MEMO_MAX) {
+      queryEmbedMemo.delete(queryEmbedMemo.keys().next().value);
+    }
+  }
+  return embedding;
 }
 
 // src/db.ts
