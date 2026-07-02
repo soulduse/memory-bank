@@ -207,11 +207,17 @@ export async function searchConversations(
         .filter(Boolean);
       const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(' ');
       const MAX_FTS_TOKENS = 6;
+      const MAX_OR_TOKENS = 10; // hard bound on posting-list unions (latency)
       let orTokens = ftsTokens;
       if (orTokens.length > MAX_FTS_TOKENS) {
-        orTokens = [...new Set(orTokens)]
-          .sort((a, b) => b.length - a.length)
-          .slice(0, MAX_FTS_TOKENS);
+        const uniq = [...new Set(orTokens)];
+        // Longest tokens are rarer (cheaper unions, better BM25 selectivity) —
+        // but short identifier-like tokens (id7, R8, C4, QA) are often the
+        // real discriminators, so digit-bearing tokens and short ALL-CAPS
+        // acronyms are always kept alongside the longest ones.
+        const identifiers = uniq.filter((t) => /\d/.test(t) || /^[A-Z]{2,4}$/.test(t));
+        const longest = uniq.sort((a, b) => b.length - a.length).slice(0, MAX_FTS_TOKENS);
+        orTokens = [...new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
       }
       const ftsOrExpr = orTokens.map((t) => `"${t}"`).join(' OR ');
 
@@ -234,30 +240,33 @@ export async function searchConversations(
               ORDER BY rank
               LIMIT ?
             `);
-            // Half the limit for the supplementary text pass in 'both' mode:
-            // exact-text matches rank at the very top of BM25, so a short list
-            // keeps the recall win while halving row fetch + summary reads.
-            const ftsLimit = mode === 'both' ? Math.max(3, Math.ceil(limit / 2)) : limit;
+            // Contract: the text pass returns AT MOST `limit` rows in every
+            // mode, all-token (AND/exact) matches always first — identical
+            // fetch depth to the original all-AND implementation.
             if (ftsTokens.length <= MAX_FTS_TOKENS) {
               // Short query: AND first (precision — identical to original
               // behavior), OR fallback only when AND matches nothing.
-              textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit) as ExchangeRow[];
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit) as ExchangeRow[];
               if (textResults.length === 0 && ftsOrExpr !== ftsExpr) {
-                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit) as ExchangeRow[];
+                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit) as ExchangeRow[];
               }
             } else {
-              // Long query: AND pass first, then OR supplement (two cheap
-              // passes beat one combined "(AND) OR (OR)" query — measured
-              // ~20% faster). AND results stay FIRST: an exact all-token
-              // match can never be hidden by any-token hits, even when its
-              // discriminating tokens are short ones the OR cap drops. The
-              // OR pass rescues the ~84% of long queries AND cannot match.
-              textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit) as ExchangeRow[];
-              const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit) as ExchangeRow[];
-              const seenText = new Set(textResults.map((r) => r.id));
-              for (const r of orResults) {
-                if (!seenText.has(r.id) && textResults.length < ftsLimit * 2) {
-                  textResults.push(r);
+              // Long query: AND pass first (full limit — exact matches are
+              // never capped below the caller's limit), then OR supplement
+              // filling only the REMAINING slots. Two cheap passes beat one
+              // combined "(AND) OR (OR)" query (measured ~20% faster). AND
+              // results stay FIRST: an exact all-token match can never be
+              // hidden by any-token hits, even when its discriminating tokens
+              // are short ones the OR cap drops. The OR pass rescues the ~84%
+              // of long queries AND cannot match.
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit) as ExchangeRow[];
+              if (textResults.length < limit) {
+                const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit) as ExchangeRow[];
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
+                  }
                 }
               }
             }

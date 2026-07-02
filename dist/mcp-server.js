@@ -23904,9 +23904,13 @@ async function searchConversations(query2, options = {}) {
       const ftsTokens = query2.split(/\s+/).map((t) => t.replace(/"/g, "").trim()).filter(Boolean);
       const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(" ");
       const MAX_FTS_TOKENS = 6;
+      const MAX_OR_TOKENS = 10;
       let orTokens = ftsTokens;
       if (orTokens.length > MAX_FTS_TOKENS) {
-        orTokens = [...new Set(orTokens)].sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
+        const uniq = [...new Set(orTokens)];
+        const identifiers = uniq.filter((t) => /\d/.test(t) || /^[A-Z]{2,4}$/.test(t));
+        const longest = uniq.sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
+        orTokens = [.../* @__PURE__ */ new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
       }
       const ftsOrExpr = orTokens.map((t) => `"${t}"`).join(" OR ");
       let usedFts = false;
@@ -23923,19 +23927,20 @@ async function searchConversations(query2, options = {}) {
               ORDER BY rank
               LIMIT ?
             `);
-            const ftsLimit = mode === "both" ? Math.max(3, Math.ceil(limit / 2)) : limit;
             if (ftsTokens.length <= MAX_FTS_TOKENS) {
-              textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit);
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
               if (textResults.length === 0 && ftsOrExpr !== ftsExpr) {
-                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit);
+                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit);
               }
             } else {
-              textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit);
-              const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit);
-              const seenText = new Set(textResults.map((r) => r.id));
-              for (const r of orResults) {
-                if (!seenText.has(r.id) && textResults.length < ftsLimit * 2) {
-                  textResults.push(r);
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+              if (textResults.length < limit) {
+                const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit);
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
+                  }
                 }
               }
             }
