@@ -23287,12 +23287,11 @@ async function generateEmbedding(text, mode = "passage") {
 // src/db.ts
 var VEC_INT8_SCALE = 127;
 function getVecDtype(db) {
-  try {
-    const row = db.prepare(`SELECT value FROM fts_meta WHERE key='vec_exchanges_dtype'`).get();
-    return row?.value === "int8" ? "int8" : "float32";
-  } catch {
-    return "float32";
-  }
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
+  ).get();
+  if (!row?.sql) return "int8";
+  return /int8\s*\[/i.test(row.sql) ? "int8" : "float32";
 }
 function embeddingToVecBlob(embedding, dtype) {
   if (dtype === "int8") {
@@ -23385,19 +23384,10 @@ function initDatabase() {
       FOREIGN KEY (exchange_id) REFERENCES exchanges(id)
     )
   `);
-  db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
-  let vecDtype = db.prepare(`SELECT value FROM fts_meta WHERE key='vec_exchanges_dtype'`).get()?.value;
-  if (!vecDtype) {
-    const vecExists = db.prepare(
-      `SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
-    ).get() !== void 0;
-    vecDtype = vecExists ? "float32" : "int8";
-    db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('vec_exchanges_dtype', ?)`).run(vecDtype);
-  }
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding ${vecDtype === "int8" ? "int8" : "FLOAT"}[384]
+      embedding int8[384]
     )
   `);
   migrateSchema(db);
@@ -23799,9 +23789,19 @@ import fs3 from "fs";
 import readline from "readline";
 var cachedSearchDb = null;
 var cachedSearchDbPath = null;
+var cachedSearchDbIdent = null;
+function fileIdent(p) {
+  try {
+    const st = fs3.statSync(p);
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
 function getSearchDb() {
   const p = getDbPath();
-  if (cachedSearchDb && cachedSearchDbPath === p && cachedSearchDb.open) {
+  const ident = fileIdent(p);
+  if (cachedSearchDb && cachedSearchDb.open && cachedSearchDbPath === p && ident !== null && cachedSearchDbIdent === ident) {
     return cachedSearchDb;
   }
   try {
@@ -23810,6 +23810,7 @@ function getSearchDb() {
   }
   cachedSearchDb = initDatabase();
   cachedSearchDbPath = p;
+  cachedSearchDbIdent = fileIdent(p);
   return cachedSearchDb;
 }
 function validateISODate(dateStr, paramName) {

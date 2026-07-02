@@ -8,14 +8,30 @@ import readline from 'readline';
 // Module-level cached connection for the search read path. searchConversations
 // runs inside long-lived MCP server processes where re-running initDatabase()'s
 // full DDL/migration pass and re-opening the file on EVERY search call is pure
-// overhead (~3-4ms/call). Keyed by resolved DB path so test overrides
-// (TEST_DB_PATH / MEMORY_BANK_DB_PATH) switching mid-process get a fresh handle.
-// Short-lived CLI processes release the handle at exit.
+// overhead (~3-4ms/call). Keyed by resolved DB path AND file identity
+// (dev:inode) — a path-only key would keep serving a stale handle after the
+// DB file is unlinked/recreated (rebuild/restore), returning deleted rows and
+// missing new ones. Test overrides (TEST_DB_PATH / MEMORY_BANK_DB_PATH)
+// switching mid-process also get a fresh handle. Short-lived CLI processes
+// release the handle at exit.
 let cachedSearchDb = null;
 let cachedSearchDbPath = null;
+let cachedSearchDbIdent = null;
+function fileIdent(p) {
+    try {
+        const st = fs.statSync(p);
+        return `${st.dev}:${st.ino}`;
+    }
+    catch {
+        return null; // file missing — force reopen (initDatabase recreates it)
+    }
+}
 function getSearchDb() {
     const p = getDbPath();
-    if (cachedSearchDb && cachedSearchDbPath === p && cachedSearchDb.open) {
+    const ident = fileIdent(p);
+    if (cachedSearchDb && cachedSearchDb.open &&
+        cachedSearchDbPath === p &&
+        ident !== null && cachedSearchDbIdent === ident) {
         return cachedSearchDb;
     }
     try {
@@ -24,6 +40,7 @@ function getSearchDb() {
     catch { /* already closed */ }
     cachedSearchDb = initDatabase();
     cachedSearchDbPath = p;
+    cachedSearchDbIdent = fileIdent(p);
     return cachedSearchDb;
 }
 function validateISODate(dateStr, paramName) {

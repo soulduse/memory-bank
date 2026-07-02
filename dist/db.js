@@ -6,16 +6,20 @@ import { getDbPath } from './paths.js';
 import { autoHealScopeProjects } from './project-canon.js';
 import { EMBEDDING_VERSION } from './embeddings.js';
 export const VEC_INT8_SCALE = 127;
-/** Authoritative vector dtype for vec_exchanges (fts_meta flag, default float32). */
+/**
+ * Authoritative vector dtype for vec_exchanges.
+ *
+ * Derived from the ACTUAL table schema in sqlite_master — not a metadata flag.
+ * A flag can diverge from the real schema (missing/corrupt flag on an int8
+ * table would silently send float32 params against int8 storage); parsing the
+ * declared column type cannot. Absent table ⇒ 'int8' (that is what
+ * initDatabase creates for fresh DBs).
+ */
 export function getVecDtype(db) {
-    try {
-        const row = db.prepare(`SELECT value FROM fts_meta WHERE key='vec_exchanges_dtype'`)
-            .get();
-        return row?.value === 'int8' ? 'int8' : 'float32';
-    }
-    catch {
-        return 'float32'; // pre-fts_meta DB
-    }
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`).get();
+    if (!row?.sql)
+        return 'int8';
+    return /int8\s*\[/i.test(row.sql) ? 'int8' : 'float32';
 }
 /** Convert a float embedding to the blob matching the table dtype. */
 export function embeddingToVecBlob(embedding, dtype) {
@@ -127,23 +131,13 @@ export function initDatabase() {
     // no recall@10 loss (measured on a 50K-exchange benchmark: 73.6MB→18.4MB,
     // p50 19.1ms→8.7ms, recall identical). Fresh DBs are created int8; existing
     // float32 DBs keep float32 until scripts/migrate-vec-int8.mjs converts them.
-    // The authoritative dtype lives in fts_meta('vec_exchanges_dtype') — reads/
-    // writes MUST consult it (getVecDtype) because float32 and int8 blobs are
-    // not interchangeable.
-    db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
-    let vecDtype = db.prepare(`SELECT value FROM fts_meta WHERE key='vec_exchanges_dtype'`)
-        .get()?.value;
-    if (!vecDtype) {
-        const vecExists = db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`).get() !== undefined;
-        // Legacy DB with an existing float32 table stays float32; fresh DBs start int8.
-        vecDtype = vecExists ? 'float32' : 'int8';
-        db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('vec_exchanges_dtype', ?)`)
-            .run(vecDtype);
-    }
+    // The authoritative dtype is the ACTUAL schema in sqlite_master (getVecDtype)
+    // — float32 and int8 blobs are not interchangeable, and deriving from the
+    // real schema (not a flag) makes flag/schema divergence impossible.
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding ${vecDtype === 'int8' ? 'int8' : 'FLOAT'}[384]
+      embedding int8[384]
     )
   `);
     // Run migrations first
