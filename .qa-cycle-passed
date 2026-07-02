@@ -1,9 +1,0 @@
-PASS|433233f|2026-07-02T09:46:53Z
-CRITICAL: 6/8 PASS (CRIT-008 plan상 expected-FAIL[UI hard gate 블로커], CRIT-003 230/231 — api-config 타임아웃은 baseline에서도 동일 실패하는 사전존재 flaky)
-HIGH: 5/6 PASS (HIGH-006 plan상 blocked[브라우저 E2E 하니스 부재])
-MEDIUM: 4/4 PASS
-LOW: 0/0 PASS
-TC_HASH: autoresearch-jul02-search-optimization
-근거: npm run build PASS / tsc --noEmit PASS / vitest 230-231 passed (실패는 사전존재 flaky, baseline 재현 확인) /
-hard-process-contract validator 28 checks 0 failures / bench recall@10 0.930 유지, p50 -33%, 신규DB -50% /
-int8 마이그레이션 50K rows count-verify + post-verify 통과

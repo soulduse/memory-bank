@@ -12,3 +12,4 @@ supabase/.temp/
 .autoresearch/*
 !.autoresearch/results.tsv
 !.autoresearch/results-may-dashboard.tsv
+.qa-cycle-passed
