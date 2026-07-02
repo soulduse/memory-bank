@@ -47,31 +47,55 @@ const check = (name, ok) => { console.log((ok?'✅':'❌'), name); ok?pass++:fai
   check('파일 교체 후 신규행 검색됨', r2new.length === 1);
 }
 
-// === Fix1 (CRITICAL): 마이그레이션 중 유입된 행의 벡터 보존 ===
+// === Fix1 (CRITICAL) + R2-HIGH: 마이그레이션 레이스 (삽입/삭제/업데이트) 보존 ===
 {
   const p = path.join(tmp, 'migr.sqlite');
   const raw = new Database(p); sqliteVec.load(raw);
   raw.exec('CREATE VIRTUAL TABLE vec_exchanges USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[384])');
-  raw.exec('CREATE TABLE fts_meta (key TEXT PRIMARY KEY, value TEXT)');
-  const ins = raw.prepare('INSERT INTO vec_exchanges(id, embedding) VALUES (?, ?)');
+  raw.exec(`CREATE TABLE exchanges (id TEXT PRIMARY KEY, last_indexed INTEGER)`);
+  const insV = raw.prepare('INSERT INTO vec_exchanges(id, embedding) VALUES (?, ?)');
+  const insE = raw.prepare('INSERT INTO exchanges(id, last_indexed) VALUES (?, ?)');
   const femb = (v) => Buffer.from(new Float32Array(Array(384).fill(v)).buffer);
-  for (let i = 0; i < 10; i++) ins.run('row'+i, femb(0.01*i));
+  const past = Date.now() - 3600_000;
+  for (let i = 0; i < 10; i++) { insV.run('row'+i, femb(0.01*(i+1))); insE.run('row'+i, past); }
   raw.close();
-  // 실제 스크립트 실행 + 스크래치 빌드와 스왑 사이에 '동시 쓰기' 주입
-  const inject = `INSERT INTO vec_exchanges(id, embedding) SELECT 'raced-row', embedding FROM vec_exchanges LIMIT 1; DELETE FROM vec_exchanges WHERE id='row3';`;
-  const out = execFileSync('node', [REPO + '/scripts/migrate-vec-int8.mjs', '--db', p], {
-    env: { ...process.env, MIGRATE_TEST_INJECT_SQL: inject }, encoding: 'utf-8'
+
+  const { migrateVecInt8 } = await import(REPO + '/scripts/migrate-vec-int8.mjs');
+  const res = await migrateVecInt8(p, {
+    log: () => {},
+    onBeforeSwap: (db) => {
+      // 스크래치 빌드와 스왑 사이의 레이스 시뮬레이션 (실코드 경로):
+      // 삽입 + 삭제 + 같은 id 벡터 업데이트(재인덱스: last_indexed 갱신)
+      db.prepare('INSERT INTO vec_exchanges(id, embedding) VALUES (?, ?)').run('raced-new', femb(0.5));
+      db.prepare('INSERT INTO exchanges(id, last_indexed) VALUES (?, ?)').run('raced-new', Date.now());
+      db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run('row3');
+      db.prepare('DELETE FROM exchanges WHERE id = ?').run('row3');
+      db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run('row0');
+      db.prepare('INSERT INTO vec_exchanges(id, embedding) VALUES (?, ?)').run('row0', femb(0.5));
+      db.prepare('UPDATE exchanges SET last_indexed = ? WHERE id = ?').run(Date.now(), 'row0');
+    },
   });
   const v = new Database(p); sqliteVec.load(v);
   const ids = v.prepare('SELECT id FROM vec_exchanges').all().map(r=>r.id);
   const sql = v.prepare(`SELECT sql FROM sqlite_master WHERE name='vec_exchanges'`).get().sql;
-  check('마이그레이션 성공 (int8 스키마)', /int8\s*\[/i.test(sql));
-  check('레이스 유입 행 보존 (raced-row)', ids.includes('raced-row'));
+  check('마이그레이션 성공 (int8 스키마)', res.migrated && /int8\s*\[/i.test(sql));
+  check('레이스 유입 행 보존 (raced-new)', ids.includes('raced-new'));
   check('레이스 삭제 행 제거 반영 (row3 없음)', !ids.includes('row3'));
   check('행 수 정합 (10 -1 +1 = 10)', ids.length === 10);
-  console.log(out.split('\n').filter(l=>l.includes('delta')).join('\n'));
+  // 업데이트 반영: row0 벡터가 새 값(0.5*127=64)으로 재양자화됐는지
+  const row0 = v.prepare('SELECT embedding FROM vec_exchanges WHERE id = ?').get('row0');
+  const i8 = new Int8Array(row0.embedding.buffer, row0.embedding.byteOffset, 384);
+  check('레이스 벡터 업데이트 재양자화 (row0=64, 구값 1 아님)', i8[0] === 64);
   v.close();
 }
+
+// === R2-CRITICAL: env 기반 SQL 주입 훅 제거 확인 ===
+{
+  const src = fs.readFileSync(REPO + '/scripts/migrate-vec-int8.mjs', 'utf-8');
+  check('MIGRATE_TEST_INJECT_SQL env 백도어 없음', !src.includes('MIGRATE_TEST_INJECT_SQL'));
+  check('env 경유 임의 SQL exec 없음', !/process\.env\.[A-Z_]+\s*\)?\s*;?\s*$/m.test(src.split('\n').filter(l=>l.includes('db.exec(process.env')).join('')) && !src.includes('db.exec(process.env'));
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

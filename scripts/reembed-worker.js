@@ -150,8 +150,11 @@ async function reembedExchanges(db) {
       const vecDtype = getVecDtype(db);
       const buf = embeddingToVecBlob(emb, vecDtype);
       const tx = db.transaction(() => {
-        db.prepare('UPDATE exchanges SET embedding = NULL, embedding_version = ? WHERE id = ?')
-          .run(EMBEDDING_VERSION, row.id);
+        // last_indexed bump: vector writers MUST stamp it — the int8 migration's
+        // delta reconciliation uses last_indexed to catch same-id vector updates
+        // that happened during its scratch build (id-diff alone misses them).
+        db.prepare('UPDATE exchanges SET embedding = NULL, embedding_version = ?, last_indexed = ? WHERE id = ?')
+          .run(EMBEDDING_VERSION, Date.now(), row.id);
         db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(row.id);
         db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`).run(row.id, buf);
       });
