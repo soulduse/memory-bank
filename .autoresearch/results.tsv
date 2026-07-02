@@ -1,1 +1,3 @@
 iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
+6	4fd6799	db.ts+search.ts+repeat-detector.ts	135.17	0.930	25.63	1144	keep	int8 양자화 (dual-dtype, recall 동일, KNN 2배, 신규DB -50%)
+7	012f5d1	embeddings.ts	143.57*	0.930	21.60*	1144	keep	query 임베딩 LRU 메모 (*p50은 2-pass 메모적중 아티팩트 — 실가치는 MCP 이중임베딩 제거, hit 0.00ms)
