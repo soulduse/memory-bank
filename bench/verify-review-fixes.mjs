@@ -96,6 +96,33 @@ const check = (name, ok) => { console.log((ok?'✅':'❌'), name); ok?pass++:fai
   check('env 경유 임의 SQL exec 없음', !/process\.env\.[A-Z_]+\s*\)?\s*;?\s*$/m.test(src.split('\n').filter(l=>l.includes('db.exec(process.env')).join('')) && !src.includes('db.exec(process.env'));
 }
 
+// === R3-CRITICAL: insertExchange 원자성 (부분 상태 관측 불가) ===
+{
+  const p3 = path.join(tmp, 'atomic.sqlite');
+  process.env.MEMORY_BANK_DB_PATH = p3;
+  const { initDatabase, insertExchange } = await import(REPO + '/dist/db.js');
+  const db = initDatabase();
+  const emb = Array(384).fill(0.1);
+  const mk = (id) => ({ id, project:'t', timestamp:new Date().toISOString(), userMessage:'u', assistantMessage:'a', archivePath:'/tmp/x.jsonl', lineStart:1, lineEnd:2 });
+  // vec 쓰기를 강제로 실패시킴 (vec 테이블 제거) → exchanges 행도 남으면 안 됨
+  db.exec('DROP TABLE vec_exchanges');
+  let threw = false;
+  try { insertExchange(db, mk('atomic1'), emb); } catch { threw = true; }
+  const exRow = db.prepare("SELECT 1 FROM exchanges WHERE id='atomic1'").get();
+  check('vec 실패 시 예외 발생 (silent 아님)', threw);
+  check('vec 실패 시 exchanges 행도 롤백 (부분 상태 없음)', exRow === undefined);
+  db.close();
+}
+
+// === R3-HIGH: reembed-worker가 마이그레이션 진행 중 양보 ===
+{
+  const src = fs.readFileSync(REPO + '/scripts/reembed-worker.js', 'utf-8');
+  check('reembed: migrate 락 확인(migrationActive) 존재', src.includes('migrationActive') && src.includes('migrate-vec-int8.lock'));
+  check('reembed: dtype 읽기가 트랜잭션 내부', /db\.transaction\(\(\) => \{\s*\n\s*const vecDtype = getVecDtype/.test(src));
+  const msrc = fs.readFileSync(REPO + '/scripts/migrate-vec-int8.mjs', 'utf-8');
+  check('migration: reembed 락 생존 확인 후 거부', msrc.includes('REEMBED_LOCK') && msrc.includes('pidAlive(REEMBED_LOCK)'));
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

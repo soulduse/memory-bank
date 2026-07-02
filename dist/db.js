@@ -370,36 +370,45 @@ export function initDatabase() {
 }
 export function insertExchange(db, exchange, embedding, _toolNames) {
     const now = Date.now();
-    const stmt = db.prepare(`
-    INSERT OR REPLACE INTO exchanges
-    (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
-     parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
-     thinking_level, thinking_disabled, thinking_triggers, coding_agent, embedding_version)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-    stmt.run(exchange.id, exchange.project, exchange.timestamp, exchange.userMessage, exchange.assistantMessage, exchange.archivePath, exchange.lineStart, exchange.lineEnd, now, exchange.parentUuid || null, exchange.isSidechain ? 1 : 0, exchange.sessionId || null, exchange.cwd || null, exchange.gitBranch || null, exchange.claudeVersion || null, exchange.thinkingLevel || null, exchange.thinkingDisabled ? 1 : 0, exchange.thinkingTriggers || null, exchange.codingAgent || 'claude-code', 
-    // The embedding parameter was just generated with the current model, so
-    // stamp the current version — search filters on it and the re-embed
-    // worker must not redo freshly indexed rows.
-    EMBEDDING_VERSION);
-    // Insert into vector table (atomic DELETE+INSERT via transaction, since virtual tables don't support REPLACE)
-    const vecDtype = getVecDtype(db);
-    const upsertVecExchange = db.transaction((vecId, buf) => {
-        db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(vecId);
-        db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`).run(vecId, buf);
-    });
-    upsertVecExchange(exchange.id, embeddingToVecBlob(embedding, vecDtype));
-    // Insert tool calls if present
-    if (exchange.toolCalls && exchange.toolCalls.length > 0) {
-        const toolStmt = db.prepare(`
-      INSERT OR REPLACE INTO tool_calls
-      (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-        for (const toolCall of exchange.toolCalls) {
-            toolStmt.run(toolCall.id, toolCall.exchangeId, toolCall.toolName, toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null, toolCall.toolResult || null, toolCall.isError ? 1 : 0, toolCall.timestamp);
+    // ONE transaction for exchanges + vec + tool_calls, with the dtype read
+    // INSIDE it. Two invariants depend on this:
+    //  1. No partial state: an exchanges row without its vector must never be
+    //     observable (the int8 migration snapshots/verifies by comparing the
+    //     two tables — a row committed between separate transactions would be
+    //     missed by its delta pass and lose its vector permanently).
+    //  2. dtype consistency: the migration swaps the vec table dtype under
+    //     BEGIN IMMEDIATE; reading dtype inside our own write transaction
+    //     serializes against the swap, so we can never quantize for a schema
+    //     that changed between the read and the write.
+    const insertAll = db.transaction(() => {
+        db.prepare(`
+      INSERT OR REPLACE INTO exchanges
+      (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
+       parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
+       thinking_level, thinking_disabled, thinking_triggers, coding_agent, embedding_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(exchange.id, exchange.project, exchange.timestamp, exchange.userMessage, exchange.assistantMessage, exchange.archivePath, exchange.lineStart, exchange.lineEnd, now, exchange.parentUuid || null, exchange.isSidechain ? 1 : 0, exchange.sessionId || null, exchange.cwd || null, exchange.gitBranch || null, exchange.claudeVersion || null, exchange.thinkingLevel || null, exchange.thinkingDisabled ? 1 : 0, exchange.thinkingTriggers || null, exchange.codingAgent || 'claude-code', 
+        // The embedding parameter was just generated with the current model, so
+        // stamp the current version — search filters on it and the re-embed
+        // worker must not redo freshly indexed rows.
+        EMBEDDING_VERSION);
+        // Vector upsert: DELETE+INSERT since virtual tables don't support REPLACE.
+        const vecDtype = getVecDtype(db);
+        db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(exchange.id);
+        db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`)
+            .run(exchange.id, embeddingToVecBlob(embedding, vecDtype));
+        if (exchange.toolCalls && exchange.toolCalls.length > 0) {
+            const toolStmt = db.prepare(`
+        INSERT OR REPLACE INTO tool_calls
+        (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+            for (const toolCall of exchange.toolCalls) {
+                toolStmt.run(toolCall.id, toolCall.exchangeId, toolCall.toolName, toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null, toolCall.toolResult || null, toolCall.isError ? 1 : 0, toolCall.timestamp);
+            }
         }
-    }
+    });
+    insertAll();
 }
 export function getAllExchanges(db) {
     const stmt = db.prepare(`SELECT id, archive_path as archivePath FROM exchanges`);

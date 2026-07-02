@@ -23849,34 +23849,45 @@ async function searchConversations(query2, options = {}) {
     if (mode === "vector" || mode === "both") {
       await initEmbeddings();
       const queryEmbedding = await generateEmbedding(query2, "query");
-      const vecDtype = getVecDtype(db);
-      const stmt = db.prepare(`
-        SELECT
-          e.id,
-          e.project,
-          e.timestamp,
-          e.user_message,
-          e.assistant_message,
-          e.archive_path,
-          e.line_start,
-          e.line_end,
-          e.coding_agent,
-          vec.distance
-        FROM vec_exchanges AS vec
-        JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
-          AND k = ?
-          AND e.embedding_version = ?
-          ${timeClause}
-        ORDER BY vec.distance ASC
-      `);
-      results = stmt.all(
-        embeddingToVecBlob(queryEmbedding, vecDtype),
-        limit,
-        EMBEDDING_VERSION,
-        ...timeParams
-      );
-      for (const r of results) r.distance = normalizeVecDistance(r.distance, vecDtype);
+      const vecQuery = (vecDtype2) => {
+        const stmt = db.prepare(`
+          SELECT
+            e.id,
+            e.project,
+            e.timestamp,
+            e.user_message,
+            e.assistant_message,
+            e.archive_path,
+            e.line_start,
+            e.line_end,
+            e.coding_agent,
+            vec.distance
+          FROM vec_exchanges AS vec
+          JOIN exchanges AS e ON vec.id = e.id
+          WHERE vec.embedding MATCH ${vecParamSql(vecDtype2)}
+            AND k = ?
+            AND e.embedding_version = ?
+            ${timeClause}
+          ORDER BY vec.distance ASC
+        `);
+        const rows = stmt.all(
+          embeddingToVecBlob(queryEmbedding, vecDtype2),
+          limit,
+          EMBEDDING_VERSION,
+          ...timeParams
+        );
+        for (const r of rows) r.distance = normalizeVecDistance(r.distance, vecDtype2);
+        return rows;
+      };
+      let vecDtype = getVecDtype(db);
+      try {
+        results = vecQuery(vecDtype);
+      } catch (e) {
+        const fresh = getVecDtype(db);
+        if (fresh === vecDtype) throw e;
+        vecDtype = fresh;
+        results = vecQuery(vecDtype);
+      }
     }
     if (mode === "text" || mode === "both") {
       const cols = `

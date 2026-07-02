@@ -87,33 +87,49 @@ export async function searchConversations(query, options = {}) {
             const queryEmbedding = await generateEmbedding(query, 'query');
             // dtype-aware: int8 tables need vec_int8()-wrapped quantized query blobs,
             // and their distances come back ×127-scaled (normalized below).
-            const vecDtype = getVecDtype(db);
-            const stmt = db.prepare(`
-        SELECT
-          e.id,
-          e.project,
-          e.timestamp,
-          e.user_message,
-          e.assistant_message,
-          e.archive_path,
-          e.line_start,
-          e.line_end,
-          e.coding_agent,
-          vec.distance
-        FROM vec_exchanges AS vec
-        JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
-          AND k = ?
-          AND e.embedding_version = ?
-          ${timeClause}
-        ORDER BY vec.distance ASC
-      `);
-            // embedding_version filter: old-model vectors are incomparable with the
-            // current-model query embedding — exclude rows the re-embed worker has
-            // not upgraded yet (newest sessions are upgraded first).
-            results = stmt.all(embeddingToVecBlob(queryEmbedding, vecDtype), limit, EMBEDDING_VERSION, ...timeParams);
-            for (const r of results)
-                r.distance = normalizeVecDistance(r.distance, vecDtype);
+            const vecQuery = (vecDtype) => {
+                const stmt = db.prepare(`
+          SELECT
+            e.id,
+            e.project,
+            e.timestamp,
+            e.user_message,
+            e.assistant_message,
+            e.archive_path,
+            e.line_start,
+            e.line_end,
+            e.coding_agent,
+            vec.distance
+          FROM vec_exchanges AS vec
+          JOIN exchanges AS e ON vec.id = e.id
+          WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
+            AND k = ?
+            AND e.embedding_version = ?
+            ${timeClause}
+          ORDER BY vec.distance ASC
+        `);
+                // embedding_version filter: old-model vectors are incomparable with the
+                // current-model query embedding — exclude rows the re-embed worker has
+                // not upgraded yet (newest sessions are upgraded first).
+                const rows = stmt.all(embeddingToVecBlob(queryEmbedding, vecDtype), limit, EMBEDDING_VERSION, ...timeParams);
+                for (const r of rows)
+                    r.distance = normalizeVecDistance(r.distance, vecDtype);
+                return rows;
+            };
+            let vecDtype = getVecDtype(db);
+            try {
+                results = vecQuery(vecDtype);
+            }
+            catch (e) {
+                // The int8 migration may have swapped the table dtype between our
+                // dtype read and the query (read path is not serialized by the swap
+                // lock). Retry once with a fresh dtype; rethrow anything else.
+                const fresh = getVecDtype(db);
+                if (fresh === vecDtype)
+                    throw e;
+                vecDtype = fresh;
+                results = vecQuery(vecDtype);
+            }
         }
         // In 'both' mode always run the text pass and merge: vector (semantic) and
         // text (literal/keyword) are complementary, so skipping text when vector is
