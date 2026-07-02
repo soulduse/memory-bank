@@ -43,6 +43,19 @@ const EXTRACTION_SYSTEM_PROMPT = `You are an expert at extracting long-term fact
 const BATCH_SIZE = 5; // configurable-ok
 const MAX_FACTS_PER_SESSION = 20; // configurable-ok
 const CONFIDENCE_THRESHOLD = 0.7; // configurable-ok
+// Self-referential repos whose conversations must NOT be extracted (e.g.
+// memory-bank's own monitoring/cron sessions — extracting them creates noise
+// facts and an endless feedback loop). Comma-separated cwd paths, env-overridable.
+const EXCLUDE_PROJECTS = (process.env.BACKFILL_EXCLUDE_PROJECTS ||
+    '/Users/jung-wankim/Project/Claude/memory-bank')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+function isExcludedProject(project) {
+    if (!project)
+        return false;
+    return EXCLUDE_PROJECTS.some((p) => project === p || project.startsWith(p));
+}
 export function buildExtractionPrompt(exchanges) {
     return exchanges.map((ex, i) => {
         const userSnippet = ex.user_message.slice(0, 1000);
@@ -111,6 +124,20 @@ export async function saveExtractedFacts(db, facts, project, sourceExchangeIds, 
     return savedIds;
 }
 export async function runFactExtraction(db, sessionId, project, codingAgent) {
+    // Skip self-referential repos (memory-bank's own monitoring sessions) — mark
+    // as processed with zero facts so they are never re-attempted, no LLM calls.
+    if (isExcludedProject(project)) {
+        try {
+            db.prepare(`
+        INSERT INTO extraction_log (session_id, processed_at, extracted, saved)
+        VALUES (?, ?, 0, 0)
+        ON CONFLICT(session_id) DO UPDATE SET processed_at = excluded.processed_at,
+          extracted = 0, saved = 0
+      `).run(sessionId, new Date().toISOString());
+        }
+        catch { /* log table may not exist on very old DBs */ }
+        return { extracted: 0, saved: 0 };
+    }
     const facts = await extractFactsFromExchanges(db, sessionId);
     let saved = 0;
     if (facts.length > 0) {

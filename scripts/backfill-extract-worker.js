@@ -26,6 +26,24 @@ const maxArg = process.argv.indexOf('--max');
 const MAX_SESSIONS = maxArg > -1 ? parseInt(process.argv[maxArg + 1], 10) : Infinity;
 const CONCURRENCY = parseInt(process.env.BACKFILL_CONCURRENCY || '4', 10);
 
+// Exclude self-referential repo conversations (memory-bank's own monitoring /
+// cron sessions). These are ~98% 1-exchange noise that the backfill itself
+// generates, so including them is a feedback loop that never converges.
+// Comma-separated cwd paths; env-overridable.
+const EXCLUDE_PROJECTS = (
+  process.env.BACKFILL_EXCLUDE_PROJECTS ||
+  '/Users/jung-wankim/Project/Claude/memory-bank'
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Minimum exchanges per session to be worth extracting. 1-exchange sessions are
+// overwhelmingly automated-worker/monitoring noise (bs-auto-issue, cron checks)
+// that yield no durable facts and never converge. Default 2; set to 1 to include
+// single-turn sessions.
+const MIN_EXCHANGES = parseInt(process.env.BACKFILL_MIN_EXCHANGES || '2', 10);
+
 const LOCK = path.join(getIndexDir(), 'backfill-extract.lock');
 const LOG = path.join(getIndexDir(), 'backfill-extract.log');
 
@@ -102,15 +120,26 @@ function seedFromExistingFacts(db) {
 function pendingSessions(db, limit) {
   // Content-rich sessions first (more exchanges → more extractable facts),
   // then recency. 1-exchange sessions are processed last.
+  // Excluded projects (e.g. memory-bank's own monitoring sessions) are dropped
+  // entirely to break the self-referential feedback loop.
+  const exTerms = EXCLUDE_PROJECTS;
+  const exClause = exTerms.length
+    ? `AND e.session_id NOT IN (
+         SELECT DISTINCT x.session_id FROM exchanges x
+         WHERE ${exTerms.map(() => 'x.cwd = ?').join(' OR ')}
+       )`
+    : '';
   return db.prepare(`
     SELECT e.session_id AS sid, MAX(e.timestamp) AS ts, COUNT(*) AS n
     FROM exchanges e
     WHERE e.is_sidechain = 0 AND e.session_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM extraction_log l WHERE l.session_id = e.session_id)
+      ${exClause}
     GROUP BY e.session_id
-    ORDER BY (n >= 2) DESC, ts DESC
+    HAVING COUNT(*) >= ${MIN_EXCHANGES}
+    ORDER BY ts DESC
     LIMIT ?
-  `).all(Number.isFinite(limit) ? limit : 1000000);
+  `).all(...exTerms, Number.isFinite(limit) ? limit : 1000000);
 }
 
 /** Simple concurrency pool — LLM latency dominates, DB writes are sync-safe. */
