@@ -1,5 +1,5 @@
 import { generateEmbedding, initEmbeddings, EMBEDDING_VERSION } from './embeddings.js';
-import { initDatabase } from './db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
 
 export interface RepeatMatch {
   exchangeId: string;
@@ -31,22 +31,25 @@ export async function detectRepeat(
   const db = initDatabase();
 
   try {
-    // Vector search against past user messages
+    // Vector search against past user messages (dtype-aware: int8 tables need
+    // quantized query blobs and return ×127-scaled distances)
+    const vecDtype = getVecDtype(db);
     const vecResults = db.prepare(`
       SELECT id, distance
       FROM vec_exchanges
-      WHERE embedding MATCH ?
+      WHERE embedding MATCH ${vecParamSql(vecDtype)}
       ORDER BY distance
       LIMIT ?
     `).all(
-      Buffer.from(new Float32Array(embedding).buffer),
+      embeddingToVecBlob(embedding, vecDtype),
       limit * 3,
     ) as Array<{ id: string; distance: number }>;
 
     const matches: RepeatMatch[] = [];
 
     for (const vr of vecResults) {
-      const similarity = 1 - (vr.distance * vr.distance) / 2;
+      const d = normalizeVecDistance(vr.distance, vecDtype);
+      const similarity = 1 - (d * d) / 2;
       if (similarity < threshold) continue;
 
       // embedding_version filter: skip rows the re-embed worker has not

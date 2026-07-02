@@ -1,4 +1,4 @@
-import { initDatabase } from './db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
 import { getDbPath } from './paths.js';
 import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
@@ -98,6 +98,9 @@ export async function searchConversations(
       await initEmbeddings();
       const queryEmbedding = await generateEmbedding(query, 'query');
 
+      // dtype-aware: int8 tables need vec_int8()-wrapped quantized query blobs,
+      // and their distances come back ×127-scaled (normalized below).
+      const vecDtype = getVecDtype(db);
       const stmt = db.prepare(`
         SELECT
           e.id,
@@ -112,7 +115,7 @@ export async function searchConversations(
           vec.distance
         FROM vec_exchanges AS vec
         JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ?
+        WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
           AND k = ?
           AND e.embedding_version = ?
           ${timeClause}
@@ -123,11 +126,12 @@ export async function searchConversations(
       // current-model query embedding — exclude rows the re-embed worker has
       // not upgraded yet (newest sessions are upgraded first).
       results = stmt.all(
-        Buffer.from(new Float32Array(queryEmbedding).buffer),
+        embeddingToVecBlob(queryEmbedding, vecDtype),
         limit,
         EMBEDDING_VERSION,
         ...timeParams
       ) as ExchangeRow[];
+      for (const r of results) r.distance = normalizeVecDistance(r.distance, vecDtype);
     }
 
     // In 'both' mode always run the text pass and merge: vector (semantic) and

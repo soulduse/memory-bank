@@ -19,7 +19,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { initDatabase } from '../dist/db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql } from '../dist/db.js';
 import { generateEmbedding, generateExchangeEmbedding, initEmbeddings, EMBEDDING_VERSION, EMBEDDING_MODEL } from '../dist/embeddings.js';
 import { getIndexDir } from '../dist/paths.js';
 
@@ -145,12 +145,15 @@ async function reembedExchanges(db) {
     for (const row of batch) {
       const toolNames = toolStmt.all(row.id).map((t) => t.tool_name);
       const emb = await generateExchangeEmbedding(row.user_message, row.assistant_message, toolNames);
-      const buf = Buffer.from(new Float32Array(emb).buffer);
+      // dtype-aware vec write; exchanges.embedding is legacy dead weight (no
+      // reader in src/) — NULL it instead of duplicating ~1.5KB per row.
+      const vecDtype = getVecDtype(db);
+      const buf = embeddingToVecBlob(emb, vecDtype);
       const tx = db.transaction(() => {
-        db.prepare('UPDATE exchanges SET embedding = ?, embedding_version = ? WHERE id = ?')
-          .run(buf, EMBEDDING_VERSION, row.id);
+        db.prepare('UPDATE exchanges SET embedding = NULL, embedding_version = ? WHERE id = ?')
+          .run(EMBEDDING_VERSION, row.id);
         db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(row.id);
-        db.prepare('INSERT INTO vec_exchanges (id, embedding) VALUES (?, ?)').run(row.id, buf);
+        db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`).run(row.id, buf);
       });
       tx();
       done++;
