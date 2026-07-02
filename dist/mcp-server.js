@@ -23901,7 +23901,14 @@ async function searchConversations(query2, options = {}) {
           e.line_end,
           e.coding_agent`;
       let textResults = [];
-      const ftsExpr = query2.split(/\s+/).map((t) => t.replace(/"/g, "").trim()).filter(Boolean).map((t) => `"${t}"`).join(" ");
+      const ftsTokens = query2.split(/\s+/).map((t) => t.replace(/"/g, "").trim()).filter(Boolean);
+      const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(" ");
+      const MAX_FTS_TOKENS = 6;
+      let orTokens = ftsTokens;
+      if (orTokens.length > MAX_FTS_TOKENS) {
+        orTokens = [...new Set(orTokens)].sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
+      }
+      const ftsOrExpr = orTokens.map((t) => `"${t}"`).join(" OR ");
       let usedFts = false;
       if (ftsExpr) {
         try {
@@ -23916,7 +23923,22 @@ async function searchConversations(query2, options = {}) {
               ORDER BY rank
               LIMIT ?
             `);
-            textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+            const ftsLimit = mode === "both" ? Math.max(3, Math.ceil(limit / 2)) : limit;
+            if (ftsTokens.length <= MAX_FTS_TOKENS) {
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit);
+              if (textResults.length === 0 && ftsOrExpr !== ftsExpr) {
+                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit);
+              }
+            } else {
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit);
+              const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit);
+              const seenText = new Set(textResults.map((r) => r.id));
+              for (const r of orResults) {
+                if (!seenText.has(r.id) && textResults.length < ftsLimit * 2) {
+                  textResults.push(r);
+                }
+              }
+            }
             usedFts = true;
           }
         } catch {

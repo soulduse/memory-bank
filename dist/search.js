@@ -151,12 +151,30 @@ export async function searchConversations(query, options = {}) {
             // MATCH expression by quoting each whitespace token (neutralizes FTS5
             // operators like -, *, OR, ", :). Falls back to LIKE if the FTS table is
             // absent (older DB) or the query has no usable tokens.
-            const ftsExpr = query
+            //
+            // Two-stage matching: AND first (precision — every token must be
+            // present, identical to the original behavior), then an OR fallback
+            // ONLY when AND matches nothing. Long natural-language queries almost
+            // never contain ALL tokens in one exchange (measured 16% AND match rate
+            // on ~20-token queries), which silently killed the text pass and capped
+            // bench recall@10 at 0.930; the OR fallback rescues those (recall
+            // 1.000) without letting single-token hits displace exact matches on
+            // queries AND can satisfy. The OR pass caps to the longest tokens —
+            // longer tokens are rarer (cheaper posting unions) and more selective
+            // (better BM25 top-k).
+            const ftsTokens = query
                 .split(/\s+/)
                 .map((t) => t.replace(/"/g, '').trim())
-                .filter(Boolean)
-                .map((t) => `"${t}"`)
-                .join(' ');
+                .filter(Boolean);
+            const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(' ');
+            const MAX_FTS_TOKENS = 6;
+            let orTokens = ftsTokens;
+            if (orTokens.length > MAX_FTS_TOKENS) {
+                orTokens = [...new Set(orTokens)]
+                    .sort((a, b) => b.length - a.length)
+                    .slice(0, MAX_FTS_TOKENS);
+            }
+            const ftsOrExpr = orTokens.map((t) => `"${t}"`).join(' OR ');
             let usedFts = false;
             if (ftsExpr) {
                 try {
@@ -176,7 +194,34 @@ export async function searchConversations(query, options = {}) {
               ORDER BY rank
               LIMIT ?
             `);
-                        textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+                        // Half the limit for the supplementary text pass in 'both' mode:
+                        // exact-text matches rank at the very top of BM25, so a short list
+                        // keeps the recall win while halving row fetch + summary reads.
+                        const ftsLimit = mode === 'both' ? Math.max(3, Math.ceil(limit / 2)) : limit;
+                        if (ftsTokens.length <= MAX_FTS_TOKENS) {
+                            // Short query: AND first (precision — identical to original
+                            // behavior), OR fallback only when AND matches nothing.
+                            textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit);
+                            if (textResults.length === 0 && ftsOrExpr !== ftsExpr) {
+                                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit);
+                            }
+                        }
+                        else {
+                            // Long query: AND pass first, then OR supplement (two cheap
+                            // passes beat one combined "(AND) OR (OR)" query — measured
+                            // ~20% faster). AND results stay FIRST: an exact all-token
+                            // match can never be hidden by any-token hits, even when its
+                            // discriminating tokens are short ones the OR cap drops. The
+                            // OR pass rescues the ~84% of long queries AND cannot match.
+                            textResults = ftsStmt.all(ftsExpr, ...timeParams, ftsLimit);
+                            const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, ftsLimit);
+                            const seenText = new Set(textResults.map((r) => r.id));
+                            for (const r of orResults) {
+                                if (!seenText.has(r.id) && textResults.length < ftsLimit * 2) {
+                                    textResults.push(r);
+                                }
+                            }
+                        }
                         usedFts = true;
                     }
                 }

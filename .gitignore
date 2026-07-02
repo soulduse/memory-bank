@@ -9,4 +9,6 @@ tmp/
 .env
 .claude/settings.local.json
 supabase/.temp/
-.autoresearch/*.sqlite*
+.autoresearch/*
+!.autoresearch/results.tsv
+!.autoresearch/results-may-dashboard.tsv
