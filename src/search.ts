@@ -1,10 +1,32 @@
 import { initDatabase } from './db.js';
+import { getDbPath } from './paths.js';
 import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
 import { getRelatedFacts, listDomains, listCategories } from './ontology-db.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
+import type DatabaseType from 'better-sqlite3';
 import fs from 'fs';
 import readline from 'readline';
+
+// Module-level cached connection for the search read path. searchConversations
+// runs inside long-lived MCP server processes where re-running initDatabase()'s
+// full DDL/migration pass and re-opening the file on EVERY search call is pure
+// overhead (~3-4ms/call). Keyed by resolved DB path so test overrides
+// (TEST_DB_PATH / MEMORY_BANK_DB_PATH) switching mid-process get a fresh handle.
+// Short-lived CLI processes release the handle at exit.
+let cachedSearchDb: DatabaseType.Database | null = null;
+let cachedSearchDbPath: string | null = null;
+
+function getSearchDb(): DatabaseType.Database {
+  const p = getDbPath();
+  if (cachedSearchDb && cachedSearchDbPath === p && cachedSearchDb.open) {
+    return cachedSearchDb;
+  }
+  try { cachedSearchDb?.close(); } catch { /* already closed */ }
+  cachedSearchDb = initDatabase();
+  cachedSearchDbPath = p;
+  return cachedSearchDb;
+}
 
 export interface SearchOptions {
   limit?: number;
@@ -49,10 +71,10 @@ export async function searchConversations(
   if (after) validateISODate(after, '--after');
   if (before) validateISODate(before, '--before');
 
-  const db = initDatabase();
+  const db = getSearchDb();
   let results: ExchangeRow[] = [];
 
-  try {
+  {
     // Build filter clauses with parameterized queries
     const filterParts: string[] = [];
     const filterParams: string[] = [];
@@ -191,9 +213,9 @@ export async function searchConversations(
         results = textResults;
       }
     }
-  } finally {
-    db.close();
   }
+  // NOTE: no db.close() — the cached connection is reused across calls (see
+  // getSearchDb). CLI processes release it at exit; the MCP server keeps it.
 
   return results.map((row) => {
     const exchange: ConversationExchange = {

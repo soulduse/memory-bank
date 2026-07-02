@@ -23746,6 +23746,21 @@ function rowToRelation(row) {
 // src/search.ts
 import fs3 from "fs";
 import readline from "readline";
+var cachedSearchDb = null;
+var cachedSearchDbPath = null;
+function getSearchDb() {
+  const p = getDbPath();
+  if (cachedSearchDb && cachedSearchDbPath === p && cachedSearchDb.open) {
+    return cachedSearchDb;
+  }
+  try {
+    cachedSearchDb?.close();
+  } catch {
+  }
+  cachedSearchDb = initDatabase();
+  cachedSearchDbPath = p;
+  return cachedSearchDb;
+}
 function validateISODate(dateStr, paramName) {
   const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!isoDateRegex.test(dateStr)) {
@@ -23760,9 +23775,9 @@ async function searchConversations(query2, options = {}) {
   const { limit = 10, mode = "both", after, before, coding_agent } = options;
   if (after) validateISODate(after, "--after");
   if (before) validateISODate(before, "--before");
-  const db = initDatabase();
+  const db = getSearchDb();
   let results = [];
-  try {
+  {
     const filterParts = [];
     const filterParams = [];
     if (after) {
@@ -23867,8 +23882,6 @@ async function searchConversations(query2, options = {}) {
         results = textResults;
       }
     }
-  } finally {
-    db.close();
   }
   return results.map((row) => {
     const exchange = {
