@@ -225,32 +225,15 @@ export async function searchConversations(
         const longest = uniq.sort((a, b) => b.length - a.length).slice(0, MAX_FTS_TOKENS);
         orTokens = [...new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
       }
-      // OR expression is built LAZILY with a document-frequency gate: ORing a
-      // very common token ("memory", "push") forces BM25 to score every one
-      // of its hundreds of thousands of matches (measured 35s on 456K rows).
-      // Tokens matching more than DF_CEILING docs are dropped from the OR set
-      // — they carry no selectivity anyway; the AND pass and the vector pass
-      // still cover them. Count probes are posting-length scans (no scoring),
-      // a few ms each, and only run when the OR pass is actually needed.
-      const DF_CEILING = 20000;
-      const buildOrExpr = (): string => {
-        let kept = orTokens;
-        try {
-          const dfStmt = db.prepare(
-            `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
-          );
-          const withDf = orTokens.map((t) => ({
-            t,
-            df: (dfStmt.get(`"${t}"`) as { c: number }).c,
-          }));
-          kept = withDf.filter((x) => x.df <= DF_CEILING).map((x) => x.t);
-          // All tokens too common → keep the 2 rarest so OR still runs cheaply.
-          if (kept.length === 0) {
-            kept = withDf.sort((a, b) => a.df - b.df).slice(0, 2).map((x) => x.t);
-          }
-        } catch { /* df probe failed → use unfiltered tokens */ }
-        return kept.map((t) => `"${t}"`).join(' OR ');
-      };
+      // Rarest-token AND ladder (replaces a flat OR fallback): a flat OR over
+      // capped tokens either drags in very common terms (BM25 over 100K+
+      // matches — 35s measured) or, rank-degraded to newest-first, loses the
+      // target in mid-sized match sets. Instead: probe each candidate token's
+      // document frequency (posting-length count, ms each), sort rarest
+      // first, then try AND of the 4→3→2→1 rarest tokens and return the first
+      // non-empty result. The source document contains every query token, so
+      // it is in every ladder rung's match set; the first non-empty rung is
+      // the most selective one — small enough to BM25-rank meaningfully.
 
       let usedFts = false;
       if (ftsExpr) {
@@ -262,47 +245,163 @@ export async function searchConversations(
           // silently hiding historical text matches.
           const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get() as { value: string } | undefined;
           if (built?.value === '1') {
-            const ftsStmt = db.prepare(`
-              SELECT ${cols}, 0 as distance
-              FROM exchanges_fts AS fts
-              JOIN exchanges AS e ON e.rowid = fts.rowid
-              WHERE exchanges_fts MATCH ?
-                ${timeClause}
-              ORDER BY rank
-              LIMIT ?
-            `);
+            // Unfiltered queries: sort + LIMIT happen INSIDE a subquery on
+            // the FTS table and only the k winners are joined to `exchanges`
+            // — joining before the sort materializes the FULL conversation
+            // text of every match (a common-word query matched 17.8K rows ≈
+            // 350MB pulled to keep 10; measured 34s).
+            // Filtered queries (after/before/coding_agent): the filter MUST
+            // apply BEFORE the limit or valid old/filtered hits vanish (an
+            // inner-limit over-fetch was reproduced hiding a valid old row
+            // behind 250 newer matches) — so they use the join-then-sort
+            // form; filters shrink the materialized set instead.
+            const mkFtsStmt = timeClause
+              ? (orderBy: string) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM exchanges_fts AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  WHERE exchanges_fts MATCH ?
+                    ${timeClause}
+                  ORDER BY ${orderBy.replace('rowid', 'fts.rowid')}
+                  LIMIT ?
+                `)
+              : (orderBy: string) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM (
+                    SELECT rowid FROM exchanges_fts
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY ${orderBy}
+                    LIMIT ?
+                  ) AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  LIMIT ?
+                `);
+            const rankedStmt = mkFtsStmt('rank');
+            const recentStmt = mkFtsStmt('rowid DESC');
+            // BM25 (ORDER BY rank) scores EVERY matching document, and under
+            // detail=column with external content each bm25() call RE-READS
+            // AND RE-TOKENIZES the source text (term frequencies are not in
+            // the index) — measured ~1.9ms/doc, 33s over a 17.8K-match
+            // common-word query. Under detail=full the frequencies are in the
+            // index and ranking is orders of magnitude cheaper. Guard: count
+            // matches first (posting iteration, no scoring — 12ms on 17.8K)
+            // and only rank within a budget scaled to the actual detail mode;
+            // over budget → newest-first (the vector pass provides semantic
+            // ranking).
+            const ftsSchema = (db.prepare(
+              `SELECT sql FROM sqlite_master WHERE name='exchanges_fts'`
+            ).get() as { sql: string } | undefined)?.sql ?? '';
+            const RANK_BUDGET = /detail\s*=\s*column/i.test(ftsSchema) ? 200 : 20000;
+            const countStmt = db.prepare(
+              `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
+            );
+            const ftsStmt = {
+              all: (expr: string, ...rest: unknown[]): unknown[] => {
+                const n = (countStmt.get(expr) as { c: number }).c;
+                if (n === 0) return [];
+                const lim = rest[rest.length - 1] as number;
+                const params = rest.slice(0, -1); // timeParams
+                const stmt = n <= RANK_BUDGET ? rankedStmt : recentStmt;
+                // filtered form: (expr, ...timeParams, limit)
+                // unfiltered subquery form: (expr, innerLimit, outerLimit)
+                if (timeClause) return stmt.all(expr, ...params, lim);
+                const rows = stmt.all(expr, lim, lim);
+                // Self-heal on index desync: every legit FTS rowid joins to an
+                // exchanges row (triggers keep them in sync), so a shortfall
+                // vs the counted matches means the inner LIMIT picked stale/
+                // orphan rowids that the join then dropped. Retry once with
+                // join-before-limit, which is correct even with orphans.
+                if (rows.length < Math.min(n, lim)) {
+                  const healStmt = db.prepare(`
+                    SELECT ${cols}, 0 as distance
+                    FROM exchanges_fts AS fts
+                    JOIN exchanges AS e ON e.rowid = fts.rowid
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY fts.rowid DESC
+                    LIMIT ?
+                  `);
+                  return healStmt.all(expr, lim);
+                }
+                return rows;
+              },
+            };
+            // Rarest-token AND ladder (see comment above orTokens): walk AND
+            // of the 4→3→2→1 rarest candidate tokens and ACCUMULATE rungs
+            // (dedup) until `lim` rows — most-selective hits first, but a
+            // single rare distractor cannot suppress hits that match the
+            // other query terms (lower rungs still contribute). df=0 tokens
+            // are dropped (they match nothing).
+            const orFallbackRows = (lim: number): ExchangeRow[] => {
+              let rare: string[] = [];
+              try {
+                rare = [...new Set(orTokens)]
+                  .map((t) => ({ t, df: (countStmt.get(`"${t}"`) as { c: number }).c }))
+                  .filter((x) => x.df > 0)
+                  .sort((a, b) => a.df - b.df)
+                  .map((x) => x.t);
+              } catch { return []; }
+              // Rungs: AND-of-rarest prefixes (most selective first), then
+              // every token individually in df order — so hits matching only
+              // the OTHER query terms still surface after the rare ones.
+              const rungs: string[] = [];
+              for (let k = Math.min(4, rare.length); k >= 2; k--) {
+                rungs.push(rare.slice(0, k).map((t) => `"${t}"`).join(' '));
+              }
+              for (const t of rare) rungs.push(`"${t}"`);
+              // Two-pass fill with a per-rung quota: pass 1 lets each rung
+              // take at most half the slots so one populous rung (many docs
+              // matching one rare token) cannot crowd out hits that match the
+              // OTHER query terms; pass 2 refills any remaining slots from
+              // rung leftovers in selectivity order.
+              const perRung: ExchangeRow[][] = [];
+              for (const expr of rungs) {
+                if (expr === ftsExpr) continue; // identical to the AND pass
+                perRung.push(ftsStmt.all(expr, ...timeParams, lim) as ExchangeRow[]);
+                const distinct = new Set(perRung.flat().map((r) => r.id));
+                if (distinct.size >= lim * 2) break; // enough material
+              }
+              const acc: ExchangeRow[] = [];
+              const seen = new Set<string>();
+              const quota = Math.max(1, Math.ceil(lim / 2));
+              for (const rows of perRung) {
+                let took = 0;
+                for (const r of rows) {
+                  if (took >= quota || acc.length >= lim) break;
+                  if (!seen.has(r.id)) { seen.add(r.id); acc.push(r); took++; }
+                }
+              }
+              for (const rows of perRung) {
+                for (const r of rows) {
+                  if (acc.length >= lim) break;
+                  if (!seen.has(r.id)) { seen.add(r.id); acc.push(r); }
+                }
+              }
+              return acc;
+            };
             // Contract: the text pass returns AT MOST `limit` rows in every
             // mode, all-token (AND/exact) matches always first — identical
             // fetch depth to the original all-AND implementation.
             if (ftsTokens.length <= MAX_FTS_TOKENS) {
               // Short query: AND first (precision — identical to original
-              // behavior), OR fallback only when AND matches nothing.
+              // behavior), ladder fallback only when AND matches nothing.
               textResults = ftsStmt.all(ftsExpr, ...timeParams, limit) as ExchangeRow[];
               if (textResults.length === 0 && ftsTokens.length > 1) {
-                const orExpr = buildOrExpr();
-                if (orExpr && orExpr !== ftsExpr) {
-                  textResults = ftsStmt.all(orExpr, ...timeParams, limit) as ExchangeRow[];
-                }
+                textResults = orFallbackRows(limit);
               }
             } else {
               // Long query: AND pass first (full limit — exact matches are
-              // never capped below the caller's limit), then OR supplement
-              // filling only the REMAINING slots. Two cheap passes beat one
-              // combined "(AND) OR (OR)" query (measured ~20% faster). AND
-              // results stay FIRST: an exact all-token match can never be
-              // hidden by any-token hits, even when its discriminating tokens
-              // are short ones the OR cap drops. The OR pass rescues the ~84%
-              // of long queries AND cannot match.
+              // never capped below the caller's limit), then the ladder
+              // supplement fills only the REMAINING slots. AND results stay
+              // FIRST: an exact all-token match can never be hidden by
+              // partial-token hits. The ladder rescues the ~84% of long
+              // queries the full AND cannot match.
               textResults = ftsStmt.all(ftsExpr, ...timeParams, limit) as ExchangeRow[];
               if (textResults.length < limit) {
-                const orExpr = buildOrExpr();
-                if (orExpr) {
-                  const orResults = ftsStmt.all(orExpr, ...timeParams, limit) as ExchangeRow[];
-                  const seenText = new Set(textResults.map((r) => r.id));
-                  for (const r of orResults) {
-                    if (!seenText.has(r.id) && textResults.length < limit) {
-                      textResults.push(r);
-                    }
+                const orResults = orFallbackRows(limit);
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
                   }
                 }
               }

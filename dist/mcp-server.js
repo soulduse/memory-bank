@@ -23913,58 +23913,119 @@ async function searchConversations(query2, options = {}) {
         const longest = uniq.sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
         orTokens = [.../* @__PURE__ */ new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
       }
-      const DF_CEILING = 2e4;
-      const buildOrExpr = () => {
-        let kept = orTokens;
-        try {
-          const dfStmt = db.prepare(
-            `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
-          );
-          const withDf = orTokens.map((t) => ({
-            t,
-            df: dfStmt.get(`"${t}"`).c
-          }));
-          kept = withDf.filter((x2) => x2.df <= DF_CEILING).map((x2) => x2.t);
-          if (kept.length === 0) {
-            kept = withDf.sort((a, b2) => a.df - b2.df).slice(0, 2).map((x2) => x2.t);
-          }
-        } catch {
-        }
-        return kept.map((t) => `"${t}"`).join(" OR ");
-      };
       let usedFts = false;
       if (ftsExpr) {
         try {
           const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get();
           if (built?.value === "1") {
-            const ftsStmt = db.prepare(`
-              SELECT ${cols}, 0 as distance
-              FROM exchanges_fts AS fts
-              JOIN exchanges AS e ON e.rowid = fts.rowid
-              WHERE exchanges_fts MATCH ?
-                ${timeClause}
-              ORDER BY rank
-              LIMIT ?
-            `);
+            const mkFtsStmt = timeClause ? (orderBy) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM exchanges_fts AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  WHERE exchanges_fts MATCH ?
+                    ${timeClause}
+                  ORDER BY ${orderBy.replace("rowid", "fts.rowid")}
+                  LIMIT ?
+                `) : (orderBy) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM (
+                    SELECT rowid FROM exchanges_fts
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY ${orderBy}
+                    LIMIT ?
+                  ) AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  LIMIT ?
+                `);
+            const rankedStmt = mkFtsStmt("rank");
+            const recentStmt = mkFtsStmt("rowid DESC");
+            const ftsSchema = db.prepare(
+              `SELECT sql FROM sqlite_master WHERE name='exchanges_fts'`
+            ).get()?.sql ?? "";
+            const RANK_BUDGET = /detail\s*=\s*column/i.test(ftsSchema) ? 200 : 2e4;
+            const countStmt = db.prepare(
+              `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
+            );
+            const ftsStmt = {
+              all: (expr, ...rest) => {
+                const n = countStmt.get(expr).c;
+                if (n === 0) return [];
+                const lim = rest[rest.length - 1];
+                const params = rest.slice(0, -1);
+                const stmt = n <= RANK_BUDGET ? rankedStmt : recentStmt;
+                if (timeClause) return stmt.all(expr, ...params, lim);
+                const rows = stmt.all(expr, lim, lim);
+                if (rows.length < Math.min(n, lim)) {
+                  const healStmt = db.prepare(`
+                    SELECT ${cols}, 0 as distance
+                    FROM exchanges_fts AS fts
+                    JOIN exchanges AS e ON e.rowid = fts.rowid
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY fts.rowid DESC
+                    LIMIT ?
+                  `);
+                  return healStmt.all(expr, lim);
+                }
+                return rows;
+              }
+            };
+            const orFallbackRows = (lim) => {
+              let rare = [];
+              try {
+                rare = [...new Set(orTokens)].map((t) => ({ t, df: countStmt.get(`"${t}"`).c })).filter((x2) => x2.df > 0).sort((a, b2) => a.df - b2.df).map((x2) => x2.t);
+              } catch {
+                return [];
+              }
+              const rungs = [];
+              for (let k2 = Math.min(4, rare.length); k2 >= 2; k2--) {
+                rungs.push(rare.slice(0, k2).map((t) => `"${t}"`).join(" "));
+              }
+              for (const t of rare) rungs.push(`"${t}"`);
+              const perRung = [];
+              for (const expr of rungs) {
+                if (expr === ftsExpr) continue;
+                perRung.push(ftsStmt.all(expr, ...timeParams, lim));
+                const distinct = new Set(perRung.flat().map((r) => r.id));
+                if (distinct.size >= lim * 2) break;
+              }
+              const acc = [];
+              const seen = /* @__PURE__ */ new Set();
+              const quota = Math.max(1, Math.ceil(lim / 2));
+              for (const rows of perRung) {
+                let took = 0;
+                for (const r of rows) {
+                  if (took >= quota || acc.length >= lim) break;
+                  if (!seen.has(r.id)) {
+                    seen.add(r.id);
+                    acc.push(r);
+                    took++;
+                  }
+                }
+              }
+              for (const rows of perRung) {
+                for (const r of rows) {
+                  if (acc.length >= lim) break;
+                  if (!seen.has(r.id)) {
+                    seen.add(r.id);
+                    acc.push(r);
+                  }
+                }
+              }
+              return acc;
+            };
             if (ftsTokens.length <= MAX_FTS_TOKENS) {
               textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
               if (textResults.length === 0 && ftsTokens.length > 1) {
-                const orExpr = buildOrExpr();
-                if (orExpr && orExpr !== ftsExpr) {
-                  textResults = ftsStmt.all(orExpr, ...timeParams, limit);
-                }
+                textResults = orFallbackRows(limit);
               }
             } else {
               textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
               if (textResults.length < limit) {
-                const orExpr = buildOrExpr();
-                if (orExpr) {
-                  const orResults = ftsStmt.all(orExpr, ...timeParams, limit);
-                  const seenText = new Set(textResults.map((r) => r.id));
-                  for (const r of orResults) {
-                    if (!seenText.has(r.id) && textResults.length < limit) {
-                      textResults.push(r);
-                    }
+                const orResults = orFallbackRows(limit);
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
                   }
                 }
               }
