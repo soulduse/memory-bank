@@ -80,6 +80,7 @@ In Claude Code:
 memory-bank sync      # Sync & index conversations
 memory-bank search "React auth"  # Semantic search
 memory-bank stats     # Index statistics
+memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
 ```
 
 ## Fact System

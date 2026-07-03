@@ -7,6 +7,20 @@ import { initEmbeddings, generateExchangeEmbedding } from './embeddings.js';
 import { summarizeConversation } from './summarizer.js';
 import { ConversationExchange } from './types.js';
 import { getArchiveDir, getExcludedProjects } from './paths.js';
+import { archiveFileExists, statArchiveFile } from './archive-io.js';
+
+/**
+ * Copy source → archive unless a current copy (plain or .zst) already exists.
+ * A stale compressed copy must not mask a newer source file.
+ */
+function archiveIfStale(sourcePath: string, archivePath: string): boolean {
+  const destStat = statArchiveFile(archivePath);
+  if (destStat && destStat.mtimeMs >= fs.statSync(sourcePath).mtimeMs) {
+    return false;
+  }
+  fs.copyFileSync(sourcePath, archivePath);
+  return true;
+}
 
 // Set max output tokens for Claude SDK (used by summarizer)
 process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000';
@@ -103,9 +117,8 @@ export async function indexConversations(
       const sourcePath = path.join(projectPath, file);
       const archivePath = path.join(projectArchive, file);
 
-      // Copy to archive
-      if (!fs.existsSync(archivePath)) {
-        fs.copyFileSync(sourcePath, archivePath);
+      // Copy to archive (skip when a current plain or compressed copy exists)
+      if (archiveIfStale(sourcePath, archivePath)) {
         console.log(`  Archived: ${file}`);
       }
 
@@ -128,7 +141,7 @@ export async function indexConversations(
 
     // Batch summarize conversations in parallel (unless --no-summaries)
     if (!noSummaries) {
-      const needsSummary = toProcess.filter(c => !fs.existsSync(c.summaryPath));
+      const needsSummary = toProcess.filter(c => !archiveFileExists(c.summaryPath));
 
       if (needsSummary.length > 0) {
         console.log(`  Generating ${needsSummary.length} summaries (concurrency: ${concurrency})...`);
@@ -212,9 +225,7 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
       const archivePath = path.join(projectArchive, file);
 
       // Archive
-      if (!fs.existsSync(archivePath)) {
-        fs.copyFileSync(sourcePath, archivePath);
-      }
+      archiveIfStale(sourcePath, archivePath);
 
       // Parse and summarize
       const exchanges = await parseConversation(sourcePath, project, archivePath);
@@ -222,7 +233,7 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
       if (exchanges.length > 0) {
         // Generate summary (unless --no-summaries)
         const summaryPath = archivePath.replace('.jsonl', '-summary.txt');
-        if (!noSummaries && !fs.existsSync(summaryPath)) {
+        if (!noSummaries && !archiveFileExists(summaryPath)) {
           const summary = await summarizeConversation(exchanges);
           fs.writeFileSync(summaryPath, summary, 'utf-8');
           console.log(`Summary: ${summary.split(/\s+/).length} words`);
@@ -299,10 +310,8 @@ export async function indexUnprocessed(concurrency: number = 1, noSummaries: boo
 
       fs.mkdirSync(projectArchive, { recursive: true });
 
-      // Archive if needed
-      if (!fs.existsSync(archivePath)) {
-        fs.copyFileSync(sourcePath, archivePath);
-      }
+      // Archive if needed (a current plain or compressed copy counts)
+      archiveIfStale(sourcePath, archivePath);
 
       // Parse and check
       const exchanges = await parseConversation(sourcePath, project, archivePath);
@@ -322,7 +331,7 @@ export async function indexUnprocessed(concurrency: number = 1, noSummaries: boo
 
   // Batch process summaries (unless --no-summaries)
   if (!noSummaries) {
-    const needsSummary = unprocessed.filter(c => !fs.existsSync(c.summaryPath));
+    const needsSummary = unprocessed.filter(c => !archiveFileExists(c.summaryPath));
     if (needsSummary.length > 0) {
       console.log(`Generating ${needsSummary.length} summaries (concurrency: ${concurrency})...\n`);
 

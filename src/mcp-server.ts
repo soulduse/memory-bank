@@ -28,8 +28,8 @@ import { searchSimilarFacts, searchAllFacts, getRevisions } from './fact-db.js';
 import { generateEmbedding, initEmbeddings } from './embeddings.js';
 import { getOntologyTree, listDomains, listCategories, getRelatedFacts } from './ontology-db.js';
 import { askAvatar } from './avatar-responder.js';
-import fs from 'fs';
 import path from 'path';
+import { archiveFileExists, readArchiveFile } from './archive-io.js';
 
 // Zod Schemas for Input Validation
 
@@ -449,19 +449,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === 'read') {
       const params = ShowConversationInputSchema.parse(args);
 
-      // Validate path: must be absolute and a .jsonl file
+      // Validate path: must be absolute and a .jsonl file (optionally .zst-compressed)
       const resolvedPath = path.resolve(params.path);
-      if (!resolvedPath.endsWith('.jsonl')) {
+      if (!resolvedPath.endsWith('.jsonl') && !resolvedPath.endsWith('.jsonl.zst')) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
 
-      // Verify file exists
-      if (!fs.existsSync(resolvedPath)) {
+      // Verify file exists (plain or compressed variant)
+      if (!archiveFileExists(resolvedPath)) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
 
       // Read and format conversation with optional line range
-      const jsonlContent = fs.readFileSync(resolvedPath, 'utf-8');
+      const jsonlContent = readArchiveFile(resolvedPath);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,

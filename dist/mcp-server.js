@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs5, exportName) {
+    function addFormats(ajv, list, fs4, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs5[f]);
+        ajv.addFormat(f, fs4[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23744,8 +23744,79 @@ function rowToRelation(row) {
 }
 
 // src/search.ts
-import fs3 from "fs";
 import readline from "readline";
+
+// src/archive-io.ts
+import fs3 from "fs";
+import { Readable, pipeline as pipeline2 } from "stream";
+import * as zlib from "node:zlib";
+var ZST_SUFFIX = ".zst";
+var zstd = zlib;
+function resolveArchiveFile(filePath) {
+  try {
+    fs3.accessSync(filePath);
+    return filePath;
+  } catch {
+  }
+  const variant = filePath.endsWith(ZST_SUFFIX) ? filePath.slice(0, -ZST_SUFFIX.length) : filePath + ZST_SUFFIX;
+  try {
+    fs3.accessSync(variant);
+    return variant;
+  } catch {
+    return null;
+  }
+}
+function archiveFileExists(filePath) {
+  return resolveArchiveFile(filePath) !== null;
+}
+function requireZstdSync() {
+  if (!zstd.zstdDecompressSync) {
+    throw new Error(
+      "Archive file is zstd-compressed but this Node runtime has no zstd support (need Node >= 22.15)"
+    );
+  }
+  return zstd.zstdDecompressSync;
+}
+function readArchiveFile(filePath) {
+  const resolved = resolveArchiveFile(filePath);
+  if (!resolved) {
+    throw Object.assign(new Error(`ENOENT: no such file, open '${filePath}'`), { code: "ENOENT" });
+  }
+  const buf = fs3.readFileSync(resolved);
+  if (resolved.endsWith(ZST_SUFFIX)) {
+    return requireZstdSync()(buf).toString("utf-8");
+  }
+  return buf.toString("utf-8");
+}
+function createArchiveReadStream(filePath) {
+  const resolved = resolveArchiveFile(filePath);
+  if (!resolved) {
+    return fs3.createReadStream(filePath);
+  }
+  if (resolved.endsWith(ZST_SUFFIX)) {
+    if (zstd.createZstdDecompress) {
+      const source = fs3.createReadStream(resolved);
+      const decompress = zstd.createZstdDecompress();
+      pipeline2(source, decompress, () => {
+      });
+      return decompress;
+    }
+    const content = requireZstdSync()(fs3.readFileSync(resolved));
+    return Readable.from([content]);
+  }
+  return fs3.createReadStream(resolved);
+}
+function statArchiveFile(filePath) {
+  const resolved = resolveArchiveFile(filePath);
+  if (!resolved) return null;
+  try {
+    return fs3.statSync(resolved);
+  } catch {
+    return null;
+  }
+}
+
+// src/search.ts
 function validateISODate(dateStr, paramName) {
   const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!isoDateRegex.test(dateStr)) {
@@ -23885,7 +23956,7 @@ async function searchConversations(query2, options = {}) {
     const summaryPath = row.archive_path.replace(".jsonl", "-summary.txt");
     let summary;
     try {
-      summary = fs3.readFileSync(summaryPath, "utf-8").trim();
+      summary = readArchiveFile(summaryPath).trim();
     } catch {
     }
     const snippetText = exchange.userMessage.substring(0, 200).replace(/\s+/g, " ").trim();
@@ -23900,7 +23971,7 @@ async function searchConversations(query2, options = {}) {
 }
 async function countLines(filePath) {
   try {
-    const fileStream = fs3.createReadStream(filePath);
+    const fileStream = createArchiveReadStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
@@ -23915,12 +23986,9 @@ async function countLines(filePath) {
   }
 }
 function getFileSizeInKB(filePath) {
-  try {
-    const stats = fs3.statSync(filePath);
-    return Math.round(stats.size / 1024 * 10) / 10;
-  } catch (error2) {
-    return 0;
-  }
+  const stats = statArchiveFile(filePath);
+  if (!stats) return 0;
+  return Math.round(stats.size / 1024 * 10) / 10;
 }
 async function formatResults(results) {
   if (results.length === 0) {
@@ -25621,7 +25689,6 @@ async function askAvatar(db, question, project) {
 }
 
 // src/mcp-server.ts
-import fs4 from "fs";
 import path4 from "path";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
@@ -25959,13 +26026,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === "read") {
       const params = ShowConversationInputSchema.parse(args);
       const resolvedPath = path4.resolve(params.path);
-      if (!resolvedPath.endsWith(".jsonl")) {
+      if (!resolvedPath.endsWith(".jsonl") && !resolvedPath.endsWith(".jsonl.zst")) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
-      if (!fs4.existsSync(resolvedPath)) {
+      if (!archiveFileExists(resolvedPath)) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const jsonlContent = fs4.readFileSync(resolvedPath, "utf-8");
+      const jsonlContent = readArchiveFile(resolvedPath);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,

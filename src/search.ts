@@ -3,8 +3,8 @@ import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddin
 import { searchSimilarFacts } from './fact-db.js';
 import { getRelatedFacts, listDomains, listCategories } from './ontology-db.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
-import fs from 'fs';
 import readline from 'readline';
+import { readArchiveFile, createArchiveReadStream, statArchiveFile } from './archive-io.js';
 
 export interface SearchOptions {
   limit?: number;
@@ -211,7 +211,7 @@ export async function searchConversations(
     // Try to load summary if available
     const summaryPath = row.archive_path.replace('.jsonl', '-summary.txt');
     let summary: string | undefined;
-    try { summary = fs.readFileSync(summaryPath, 'utf-8').trim(); } catch { /* absent */ }
+    try { summary = readArchiveFile(summaryPath).trim(); } catch { /* absent */ }
 
     // Create snippet (first 200 chars, collapse newlines)
     const snippetText = exchange.userMessage.substring(0, 200).replace(/\s+/g, ' ').trim();
@@ -229,7 +229,7 @@ export async function searchConversations(
 // Helper function to count lines in a file efficiently
 async function countLines(filePath: string): Promise<number> {
   try {
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = createArchiveReadStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
@@ -245,14 +245,11 @@ async function countLines(filePath: string): Promise<number> {
   }
 }
 
-// Helper function to get file size in KB
+// Helper function to get file size in KB (resolves compressed variants)
 function getFileSizeInKB(filePath: string): number {
-  try {
-    const stats = fs.statSync(filePath);
-    return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
-  } catch (error) {
-    return 0;
-  }
+  const stats = statArchiveFile(filePath);
+  if (!stats) return 0;
+  return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
 }
 
 export async function formatResults(results: Array<SearchResult & { summary?: string }>): Promise<string> {

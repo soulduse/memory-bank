@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-03
+
+### Added
+- **`memory-bank analyze` command**: Deterministic full-history analysis of the entire
+  conversation index — coverage (fact extraction / summaries), fact breakdowns by
+  category/scope, top knowledge domains, per-project rollups, monthly activity
+  timeline, and backfill recommendations. Supports `--json`, `--out`, `--top`, `--months`.
+- **`analyzing-all-conversations` skill**: Plugin skill that runs the analyze engine,
+  kicks off backfill for unanalyzed sessions, enriches the numbers with fact/ontology
+  search, and presents an organized report of the whole conversation history.
+- **Transparent `.zst` archive support** (`src/archive-io.ts`): The conversation archive
+  may be compressed out-of-band (`*.jsonl` → `*.jsonl.zst`). All read paths — parser,
+  `read` MCP tool, search summaries/line counts, sync, stats, indexer, verify — now
+  resolve either variant using Node's built-in zstd (Node >= 22.15), no new dependency.
+
+### Changed
+- **Fact extraction quality/cost improvements**:
+  - Trivial exchanges (bare slash commands, harness artifacts, short acknowledgements)
+    are filtered before LLM calls.
+  - Cross-batch duplicate facts within a session are dropped via normalized comparison.
+  - Long sessions cap LLM calls (default 12, `MEMORY_BANK_MAX_EXTRACT_CALLS`) with
+    evenly-spread batch selection so the whole session is represented.
+  - Extraction prompt now prefers durable facts and problem→solution lessons.
+- **Sync no longer re-copies archives compressed out-of-band**: `copyIfNewer` treats a
+  current `.zst` copy as up-to-date, preventing full-history re-copy churn each session.
+
+### Fixed
+- **`read` MCP tool worked only on plain `.jsonl`**: reading any archived conversation
+  failed with "File not found" once the archive was compressed. Now resolves `.zst`.
+- **Summary coverage was misreported as zero**: existing `-summary.txt.zst` files are
+  now detected by stats/analyze/sync/indexer/verify.
+
 ## [1.1.0] - 2026-04-12
 
 ### Added

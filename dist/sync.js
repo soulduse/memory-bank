@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, detectCodingAgent } from './paths.js';
+import { archiveFileExists, readArchiveFile, statArchiveFile } from './archive-io.js';
 const EXCLUSION_MARKERS = [
     '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>',
     'Only use NO_INSIGHTS_FOUND',
@@ -9,7 +10,7 @@ const EXCLUSION_MARKERS = [
 ];
 function shouldSkipConversation(filePath) {
     try {
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = readArchiveFile(filePath);
         return EXCLUSION_MARKERS.some(marker => content.includes(marker));
     }
     catch (error) {
@@ -23,12 +24,14 @@ function copyIfNewer(src, dest) {
     if (!fs.existsSync(destDir)) {
         fs.mkdirSync(destDir, { recursive: true });
     }
-    // Check if destination exists and is up-to-date
-    if (fs.existsSync(dest)) {
+    // Check if destination exists and is up-to-date. The archive may have been
+    // compressed out-of-band (dest.zst) — treat a current compressed copy as
+    // up-to-date, otherwise every sync re-copies the whole history.
+    const destStat = statArchiveFile(dest);
+    if (destStat) {
         const srcStat = fs.statSync(src);
-        const destStat = fs.statSync(dest);
         if (destStat.mtimeMs >= srcStat.mtimeMs) {
-            return false; // Dest is current, skip
+            return false; // Dest (plain or compressed) is current, skip
         }
     }
     // Atomic copy: temp file + rename
@@ -100,7 +103,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 // Check if this file needs a summary (whether newly copied or existing)
                 if (!options.skipSummaries) {
                     const summaryPath = destFile.replace('.jsonl', '-summary.txt');
-                    if (!fs.existsSync(summaryPath) && !shouldSkipConversation(destFile)) {
+                    if (!archiveFileExists(summaryPath) && !shouldSkipConversation(destFile)) {
                         const sessionId = extractSessionIdFromPath(destFile);
                         if (sessionId) {
                             filesToSummarize.push({ path: destFile, sessionId });

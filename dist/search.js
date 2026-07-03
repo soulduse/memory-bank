@@ -2,8 +2,8 @@ import { initDatabase } from './db.js';
 import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
 import { getRelatedFacts, listDomains, listCategories } from './ontology-db.js';
-import fs from 'fs';
 import readline from 'readline';
+import { readArchiveFile, createArchiveReadStream, statArchiveFile } from './archive-io.js';
 function validateISODate(dateStr, paramName) {
     const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!isoDateRegex.test(dateStr)) {
@@ -171,7 +171,7 @@ export async function searchConversations(query, options = {}) {
         const summaryPath = row.archive_path.replace('.jsonl', '-summary.txt');
         let summary;
         try {
-            summary = fs.readFileSync(summaryPath, 'utf-8').trim();
+            summary = readArchiveFile(summaryPath).trim();
         }
         catch { /* absent */ }
         // Create snippet (first 200 chars, collapse newlines)
@@ -188,7 +188,7 @@ export async function searchConversations(query, options = {}) {
 // Helper function to count lines in a file efficiently
 async function countLines(filePath) {
     try {
-        const fileStream = fs.createReadStream(filePath);
+        const fileStream = createArchiveReadStream(filePath);
         const rl = readline.createInterface({
             input: fileStream,
             crlfDelay: Infinity
@@ -204,15 +204,12 @@ async function countLines(filePath) {
         return 0; // Return 0 if file can't be read
     }
 }
-// Helper function to get file size in KB
+// Helper function to get file size in KB (resolves compressed variants)
 function getFileSizeInKB(filePath) {
-    try {
-        const stats = fs.statSync(filePath);
-        return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
-    }
-    catch (error) {
+    const stats = statArchiveFile(filePath);
+    if (!stats)
         return 0;
-    }
+    return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
 }
 export async function formatResults(results) {
     if (results.length === 0) {

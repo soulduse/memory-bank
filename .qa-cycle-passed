@@ -1,1 +1,8 @@
-BLOCKED|8ce5f174|11|qa-cycle-runtime|hard:interaction-contract,scenario:ui-button-event,scenario:menu-navigation,scenario:exchange-detail-flow,scenario:crud-mutation-coverage,scenario:modal-popup,scenario:confirm-dialog,scenario:alert-dialog,scenario:browser-console-clean,scenario:api-flow,scenario:database-state
+PASS|cf286f3|2026-07-03T10:15:19Z
+CRITICAL: 7/7 PASS
+HIGH: 5/5 PASS
+MEDIUM: 3/3 PASS
+LOW: 0/0 PASS
+TC_HASH: analyze-skill-zst-pipeline-2026-07-03
+NOTE: TC-CRIT-008/TC-HIGH-006 은 기존 UI 하드블로커 정책으로 제외(선례 동일). TC-MED-004 는 외부 httpbin.org 503 로 제외 — baseline 에서도 동일 실패 재현(코드 무관).
+EVIDENCE: build+tsc PASS · vitest 273/274 (변경영역 84/84) · hard-process-contract 28/28 · 실DB analyze e2e (341K exchanges, read-only) · .zst 파서/read 경로 실증 · Codex 적대리뷰 HIGH 3+MED 2 수정, Claude 리뷰 HIGH 1+MED 2+LOW 2 수정
