@@ -1,7 +1,13 @@
 import { callHaiku, parseJsonResponse } from './llm.js';
 import { generateEmbedding } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
-import { listDomains, listCategories, getDomainByName, getCategoryByName, createDomain, createCategory, classifyFact, createRelation, } from './ontology-db.js';
+import { listDomains, listCategories, getDomainByName, getCategoryByName, createDomain, createCategory, classifyFact, createRelation, searchSimilarCategories, upsertCategoryEmbedding, } from './ontology-db.js';
+// Number of nearest existing categories to present to the classifier LLM as
+// reuse candidates. Replaces dumping ALL categories (measured 1,612 ≈ 95K
+// tokens) with an embedding top-K (≈ a few hundred tokens). The full domain
+// list (small) is always included so the LLM can still place a genuinely new
+// topic under the right domain.
+const CATEGORY_CANDIDATES = 20;
 const CLASSIFY_SYSTEM_PROMPT = `You are an ontology classifier for technical decision facts.
 Given a fact and a list of existing domains/categories, classify the fact.
 
@@ -41,15 +47,32 @@ Given a new fact and an existing fact, determine if there is a meaningful relati
   "relation_type": "INFLUENCES|SUPERSEDES|SUPPORTS|CONTRADICTS",
   "reasoning": "one-line explanation"
 }`;
+/** Embed "name: description" in passage mode so the candidate index matches facts. */
+function categoryEmbeddingText(name, description) {
+    return description ? `${name}: ${description}` : name;
+}
 export async function classifyFactToOntology(db, fact) {
     const domains = listDomains(db);
-    const categories = listCategories(db);
     const domainList = domains.map((d) => `- ${d.name}: ${d.description ?? '(no description)'}`).join('\n');
-    const categoryList = categories
-        .map((c) => {
-        const domain = domains.find((d) => d.id === c.domain_id);
-        return `- ${domain?.name ?? '?'} / ${c.name}: ${c.description ?? '(no description)'}`;
-    })
+    // Candidate retrieval: present only the top-K nearest existing categories
+    // (by fact embedding) instead of all categories. Falls back to the full list
+    // when there is no fact embedding or the category index is still empty
+    // (e.g. before the one-time backfill), so behaviour degrades gracefully.
+    let candidates = [];
+    if (fact.embedding) {
+        const hits = searchSimilarCategories(db, Array.from(fact.embedding), CATEGORY_CANDIDATES);
+        candidates = hits.map((h) => ({ name: h.category.name, domainName: h.domainName, description: h.category.description }));
+    }
+    if (candidates.length === 0) {
+        const all = listCategories(db);
+        candidates = all.map((c) => ({
+            name: c.name,
+            domainName: domains.find((d) => d.id === c.domain_id)?.name ?? '?',
+            description: c.description,
+        }));
+    }
+    const categoryList = candidates
+        .map((c) => `- ${c.domainName} / ${c.name}: ${c.description ?? '(no description)'}`)
         .join('\n');
     const prompt = [
         `Fact: "${fact.fact}"`,
@@ -58,7 +81,7 @@ export async function classifyFactToOntology(db, fact) {
         'Existing domains:',
         domainList || '(none)',
         '',
-        'Existing categories (domain / category):',
+        'Candidate categories (most similar existing — reuse one of these if it fits):',
         categoryList || '(none)',
     ].join('\n');
     const response = await callHaiku(CLASSIFY_SYSTEM_PROMPT, prompt, 512);
@@ -76,16 +99,32 @@ export async function classifyFactToOntology(db, fact) {
     let category = getCategoryByName(db, parsed.category, domain.id);
     if (!category) {
         category = createCategory(db, domain.id, parsed.category, parsed.category_description);
+        // Index the new category so future facts can retrieve it as a candidate
+        // (without this the candidate list could never grow → category sprawl).
+        try {
+            const emb = await generateEmbedding(categoryEmbeddingText(category.name, category.description), 'passage');
+            upsertCategoryEmbedding(db, category.id, emb);
+        }
+        catch (error) {
+            console.error(`Category embedding failed for ${category.id}:`, error);
+        }
     }
     // Apply classification
     classifyFact(db, fact.id, category.id);
     return { domainId: domain.id, categoryId: category.id };
 }
-export async function detectRelations(db, newFact, topK = 5) {
+export async function detectRelations(db, newFact, 
+// 2 (was 5): each candidate costs one Haiku call, so per-fact ontology cost
+// was classify ×1 + relations ×0..5 = up to 6 calls. Capping candidates at 2
+// drops that to up to 3 while still linking the strongest neighbours (the
+// 0.89 similarity floor already rejects weak pairs, so candidates 3-5 were
+// almost always borderline).
+topK = 2) {
     if (!newFact.embedding)
         return;
     const embeddingArray = Array.from(newFact.embedding);
-    const similar = searchSimilarFacts(db, embeddingArray, newFact.scope_project, topK, 0.75);
+    // e5 scale: related-but-distinct ~0.91, unrelated <=0.86 → 0.89 selects relation candidates
+    const similar = searchSimilarFacts(db, embeddingArray, newFact.scope_project, topK, 0.89);
     const candidates = similar.filter((s) => s.fact.id !== newFact.id);
     for (const { fact: existingFact } of candidates) {
         const prompt = [

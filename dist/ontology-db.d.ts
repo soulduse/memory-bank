@@ -7,6 +7,24 @@ export declare function getDomainByName(db: Database.Database, name: string): On
 export declare function createCategory(db: Database.Database, domainId: string, name: string, description?: string): OntologyCategory;
 export declare function listCategories(db: Database.Database, domainId?: string): OntologyCategory[];
 export declare function getCategoryByName(db: Database.Database, name: string, domainId?: string): OntologyCategory | null;
+/**
+ * Store/replace a category's embedding in vec_categories (atomic DELETE+INSERT,
+ * since vec0 virtual tables don't support REPLACE). The embedding is generated
+ * by the caller from "name: description" in 'passage' mode.
+ */
+export declare function upsertCategoryEmbedding(db: Database.Database, categoryId: string, embedding: number[]): void;
+export declare function deleteCategoryEmbedding(db: Database.Database, categoryId: string): void;
+/**
+ * Return the top-K most similar existing categories to a fact embedding, so the
+ * classifier can present a short candidate list to the LLM instead of all
+ * categories. Each result includes the owning domain name for a compact prompt.
+ * Returns [] if the index is empty (caller falls back to the full list).
+ */
+export declare function searchSimilarCategories(db: Database.Database, embedding: number[], k?: number): Array<{
+    category: OntologyCategory;
+    domainName: string;
+    distance: number;
+}>;
 export declare function classifyFact(db: Database.Database, factId: string, categoryId: string): void;
 export declare function getFactsByCategory(db: Database.Database, categoryId: string): Fact[];
 export declare function getFactsByDomain(db: Database.Database, domainId: string): Fact[];

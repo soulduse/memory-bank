@@ -91,6 +91,66 @@ export function getCategoryByName(
   );
 }
 
+// === Category embeddings (candidate retrieval for the classifier) ===
+
+/**
+ * Store/replace a category's embedding in vec_categories (atomic DELETE+INSERT,
+ * since vec0 virtual tables don't support REPLACE). The embedding is generated
+ * by the caller from "name: description" in 'passage' mode.
+ */
+export function upsertCategoryEmbedding(
+  db: Database.Database,
+  categoryId: string,
+  embedding: number[],
+): void {
+  const buf = Buffer.from(new Float32Array(embedding).buffer);
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM vec_categories WHERE id = ?').run(categoryId);
+    db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)').run(categoryId, buf);
+  });
+  tx();
+}
+
+export function deleteCategoryEmbedding(db: Database.Database, categoryId: string): void {
+  try {
+    db.prepare('DELETE FROM vec_categories WHERE id = ?').run(categoryId);
+  } catch { /* table may not exist on very old DBs */ }
+}
+
+/**
+ * Return the top-K most similar existing categories to a fact embedding, so the
+ * classifier can present a short candidate list to the LLM instead of all
+ * categories. Each result includes the owning domain name for a compact prompt.
+ * Returns [] if the index is empty (caller falls back to the full list).
+ */
+export function searchSimilarCategories(
+  db: Database.Database,
+  embedding: number[],
+  k: number = 20,
+): Array<{ category: OntologyCategory; domainName: string; distance: number }> {
+  const buf = Buffer.from(new Float32Array(embedding).buffer);
+  let hits: Array<{ id: string; distance: number }>;
+  try {
+    hits = db.prepare(`
+      SELECT id, distance FROM vec_categories
+      WHERE embedding MATCH ? ORDER BY distance LIMIT ?
+    `).all(buf, k) as Array<{ id: string; distance: number }>;
+  } catch {
+    return []; // index absent → caller uses the full category list
+  }
+
+  const results: Array<{ category: OntologyCategory; domainName: string; distance: number }> = [];
+  const catStmt = db.prepare('SELECT * FROM ontology_categories WHERE id = ?');
+  const domStmt = db.prepare('SELECT name FROM ontology_domains WHERE id = ?');
+  for (const h of hits) {
+    const category = catStmt.get(h.id) as OntologyCategory | undefined;
+    if (!category) continue; // stale vector row (category was merged/deleted)
+    const dom = domStmt.get(category.domain_id) as { name: string } | undefined;
+    results.push({ category, domainName: dom?.name ?? '?', distance: h.distance });
+  }
+  return results;
+}
+
 // === Fact Classification ===
 
 export function classifyFact(

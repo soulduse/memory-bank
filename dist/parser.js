@@ -1,9 +1,9 @@
-import fs from 'fs';
 import readline from 'readline';
 import crypto from 'crypto';
+import { createArchiveReadStream } from './archive-io.js';
 export async function parseConversation(filePath, projectName, archivePath) {
     const exchanges = [];
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = createArchiveReadStream(filePath);
     const rl = readline.createInterface({
         input: fileStream,
         crlfDelay: Infinity

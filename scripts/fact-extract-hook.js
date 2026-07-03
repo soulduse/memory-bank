@@ -1,37 +1,58 @@
 #!/usr/bin/env node
 
 /**
- * SessionEnd Hook: Extract facts from session conversations
+ * SessionEnd Hook: Extract facts from session conversations.
  *
- * Environment:
- *   SESSION_ID - current session ID
- *   CWD / PROJECT_DIR - current project path
+ * Claude Code passes hook input as JSON on stdin:
+ *   { "session_id": "...", "cwd": "...", "hook_event_name": "SessionEnd", ... }
+ *
+ * Env vars (SESSION_ID / CWD) are kept as a fallback for manual invocation.
+ *
+ * LLM extraction can exceed the hook timeout, so this hook only parses input
+ * and spawns a detached worker (fact-extract-worker.js), then exits immediately.
  */
 
-import { initDatabase } from '../dist/db.js';
-import { runFactExtraction } from '../dist/fact-extractor.js';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+function readStdin(timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) return resolve('');
+    let data = '';
+    const timer = setTimeout(() => resolve(data), timeoutMs);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => { data += chunk; });
+    process.stdin.on('end', () => { clearTimeout(timer); resolve(data); });
+    process.stdin.on('error', () => { clearTimeout(timer); resolve(data); });
+  });
+}
 
 async function main() {
-  const sessionId = process.env.SESSION_ID;
-  const project = process.env.CWD || process.env.PROJECT_DIR || process.cwd();
+  const raw = await readStdin();
+  let input = {};
+  try { input = JSON.parse(raw); } catch { /* not JSON — fall back to env */ }
+
+  const sessionId = input.session_id || process.env.SESSION_ID;
+  const project = input.cwd || process.env.CWD || process.env.PROJECT_DIR || process.cwd();
 
   if (!sessionId) {
-    console.log('fact-extract: SESSION_ID not set, skipping');
+    console.log('fact-extract: session_id not found in stdin/env, skipping');
     process.exit(0);
   }
 
-  console.log(`fact-extract: Processing session ${sessionId}`);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const worker = path.join(here, 'fact-extract-worker.js');
 
-  try {
-    const db = initDatabase();
-    const result = await runFactExtraction(db, sessionId, project);
-    console.log(`fact-extract: Extracted ${result.extracted} facts, saved ${result.saved}`);
-    db.close();
-  } catch (error) {
-    console.error('fact-extract: Error:', error instanceof Error ? error.message : error);
-    // Don't block session end on extraction failure
-    process.exit(0);
-  }
+  const child = spawn(process.execPath, [worker], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, SESSION_ID: sessionId, CWD: project },
+  });
+  child.unref();
+
+  console.log(`fact-extract: queued session ${sessionId} (worker pid ${child.pid})`);
+  process.exit(0);
 }
 
 main();

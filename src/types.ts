@@ -33,6 +33,9 @@ export interface ConversationExchange {
   thinkingDisabled?: boolean;
   thinkingTriggers?: string; // JSON array
 
+  // Coding agent that generated this exchange
+  codingAgent?: string; // e.g., 'claude-code', 'codex', 'opencode', 'custom-agent'
+
   // Tool calls (populated separately)
   toolCalls?: ToolCall[];
 }
@@ -69,6 +72,7 @@ export interface Fact {
   consolidated_count: number;
   is_active: boolean;
   ontology_category_id?: string | null;
+  coding_agent?: string | null; // e.g., 'claude-code', 'codex', 'opencode'
 }
 
 export interface FactRevision {
@@ -88,6 +92,7 @@ export interface FactSearchResult {
 
 export interface ExtractedFact {
   fact: string;
+  fact_kr?: string;
   category: FactCategory;
   scope_type: FactScopeType;
   confidence: number;

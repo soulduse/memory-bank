@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { getDbPath } from './paths.js';
+import { archiveFileExists } from './archive-io.js';
 export async function getIndexStats(dbPath) {
     const resolvedDbPath = dbPath || getDbPath();
     // Check if database exists
@@ -30,13 +31,12 @@ export async function getIndexStats(dbPath) {
         }
         // Total conversations
         const totalConversations = db.prepare('SELECT COUNT(DISTINCT archive_path) as count FROM exchanges').get();
-        // Check for summaries (these are files, not DB fields)
-        const fs = await import('fs');
+        // Check for summaries (these are files, not DB fields; may be .zst-compressed)
         const conversationPaths = db.prepare('SELECT DISTINCT archive_path FROM exchanges').all();
         let withSummariesCount = 0;
         for (const { archive_path } of conversationPaths) {
             const summaryPath = archive_path.replace('.jsonl', '-summary.txt');
-            if (fs.existsSync(summaryPath)) {
+            if (archiveFileExists(summaryPath)) {
                 withSummariesCount++;
             }
         }

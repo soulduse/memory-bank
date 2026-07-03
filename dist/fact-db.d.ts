@@ -7,6 +7,9 @@ interface InsertFactParams {
     scope_project: string | null;
     source_exchange_ids: string[];
     embedding: number[] | null;
+    coding_agent?: string;
+    fact_kr?: string | null;
+    embedding_kr?: number[] | null;
 }
 interface UpdateFactParams {
     fact?: string;
@@ -41,8 +44,12 @@ export declare function searchSimilarFacts(db: Database.Database, embedding: num
  * Score = (log2(consolidated_count + 1) * 3) + recency_bonus + scope_bonus
  *   recency_bonus: 5 if updated in last 7 days, 3 if last 30 days, 1 if last 90 days, 0 otherwise
  *   scope_bonus: 2 for project-scoped facts, 0 for global
+ *
+ * Project facts are guaranteed up to half of the result slots: heavily-confirmed
+ * global facts otherwise outscore any newly extracted project fact (count=1)
+ * forever, so project context would never surface in injection.
  */
-export declare function getTopFacts(db: Database.Database, project: string, limit?: number): Fact[];
+export declare function getTopFacts(db: Database.Database, rawProject: string, limit?: number): Fact[];
 /**
  * Legacy: get facts by pure confirmation count (for backward compatibility).
  */

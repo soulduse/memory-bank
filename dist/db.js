@@ -3,6 +3,43 @@ import path from 'path';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
 import { getDbPath } from './paths.js';
+import { autoHealScopeProjects } from './project-canon.js';
+import { EMBEDDING_VERSION } from './embeddings.js';
+export const VEC_INT8_SCALE = 127;
+/**
+ * Authoritative vector dtype for vec_exchanges.
+ *
+ * Derived from the ACTUAL table schema in sqlite_master — not a metadata flag.
+ * A flag can diverge from the real schema (missing/corrupt flag on an int8
+ * table would silently send float32 params against int8 storage); parsing the
+ * declared column type cannot. Absent table ⇒ 'int8' (that is what
+ * initDatabase creates for fresh DBs).
+ */
+export function getVecDtype(db) {
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`).get();
+    if (!row?.sql)
+        return 'int8';
+    return /int8\s*\[/i.test(row.sql) ? 'int8' : 'float32';
+}
+/** Convert a float embedding to the blob matching the table dtype. */
+export function embeddingToVecBlob(embedding, dtype) {
+    if (dtype === 'int8') {
+        const q = new Int8Array(embedding.length);
+        for (let i = 0; i < embedding.length; i++) {
+            q[i] = Math.max(-127, Math.min(127, Math.round(embedding[i] * VEC_INT8_SCALE)));
+        }
+        return Buffer.from(q.buffer);
+    }
+    return Buffer.from(new Float32Array(embedding).buffer);
+}
+/** SQL placeholder for a vec_exchanges MATCH/INSERT param under the dtype. */
+export function vecParamSql(dtype) {
+    return dtype === 'int8' ? 'vec_int8(?)' : '?';
+}
+/** Normalize a vec KNN distance back to float32 scale (int8 distances are ×127). */
+export function normalizeVecDistance(distance, dtype) {
+    return dtype === 'int8' ? distance / VEC_INT8_SCALE : distance;
+}
 export function migrateSchema(db) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
     const columnNames = new Set(columns.map(c => c.name));
@@ -17,17 +54,18 @@ export function migrateSchema(db) {
         { name: 'thinking_level', sql: 'ALTER TABLE exchanges ADD COLUMN thinking_level TEXT' },
         { name: 'thinking_disabled', sql: 'ALTER TABLE exchanges ADD COLUMN thinking_disabled BOOLEAN' },
         { name: 'thinking_triggers', sql: 'ALTER TABLE exchanges ADD COLUMN thinking_triggers TEXT' },
+        { name: 'coding_agent', sql: "ALTER TABLE exchanges ADD COLUMN coding_agent TEXT DEFAULT 'claude-code'" },
     ];
     let migrated = false;
     for (const migration of migrations) {
         if (!columnNames.has(migration.name)) {
-            console.log(`Migrating schema: adding ${migration.name} column...`);
+            console.error(`Migrating schema: adding ${migration.name} column...`);
             db.prepare(migration.sql).run();
             migrated = true;
         }
     }
     if (migrated) {
-        console.log('Migration complete.');
+        console.error('Migration complete.');
     }
 }
 export function initDatabase() {
@@ -43,6 +81,12 @@ export function initDatabase() {
     // Enable WAL mode for better concurrency
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
+    // Required so the exchanges_fts AFTER DELETE trigger fires when an exchange is
+    // re-indexed via `INSERT OR REPLACE` (the REPLACE-induced delete does NOT fire
+    // delete triggers unless recursive_triggers is on — verified: without it a
+    // re-indexed exchange leaves a stale FTS row). Keeps the external-content FTS
+    // index consistent with the source table on every write path.
+    db.pragma('recursive_triggers = ON');
     // Create exchanges table
     db.exec(`
     CREATE TABLE IF NOT EXISTS exchanges (
@@ -64,7 +108,8 @@ export function initDatabase() {
       claude_version TEXT,
       thinking_level TEXT,
       thinking_disabled BOOLEAN,
-      thinking_triggers TEXT
+      thinking_triggers TEXT,
+      coding_agent TEXT DEFAULT 'claude-code'
     )
   `);
     // Create tool_calls table
@@ -80,11 +125,19 @@ export function initDatabase() {
       FOREIGN KEY (exchange_id) REFERENCES exchanges(id)
     )
   `);
-    // Create vector search index
+    // Create vector search index.
+    //
+    // dtype: int8 quantized vectors use 4× less storage and ~2× faster KNN with
+    // no recall@10 loss (measured on a 50K-exchange benchmark: 73.6MB→18.4MB,
+    // p50 19.1ms→8.7ms, recall identical). Fresh DBs are created int8; existing
+    // float32 DBs keep float32 until scripts/migrate-vec-int8.mjs converts them.
+    // The authoritative dtype is the ACTUAL schema in sqlite_master (getVecDtype)
+    // — float32 and int8 blobs are not interchangeable, and deriving from the
+    // real schema (not a flag) makes flag/schema divergence impossible.
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // Run migrations first
@@ -109,10 +162,78 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_git_branch ON exchanges(git_branch)
   `);
     db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_coding_agent ON exchanges(coding_agent)
+  `);
+    db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_calls(tool_name)
   `);
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
+  `);
+    // === Full-text search index (FTS5) for exchanges ===
+    // External-content FTS5: stores only the inverted index (not a second copy of
+    // the text), reading the source columns from `exchanges` via rowid. Replaces
+    // the O(rows) `LIKE '%q%'` full scan (measured p50 3.2s / p95 14.5s on 239K
+    // rows) with a BM25-ranked index lookup. Triggers keep it in sync on every
+    // insert/update/delete (INSERT OR REPLACE fires AFTER DELETE then AFTER INSERT,
+    // so re-indexed exchanges stay consistent). The one-time backfill of existing
+    // rows is done by scripts/backfill-fts.mjs (`'rebuild'`), NOT here — keeping
+    // initDatabase() cheap since it runs on every MCP/hook invocation.
+    //
+    // detail=column: token positions are not stored — search.ts only issues
+    // per-token (quoted single-term) matches, never phrase/NEAR queries, and
+    // BM25 ranking still works at column granularity. On the production DB the
+    // default detail=full index cost 2.9GB vs ~1.3GB for detail=column.
+    db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='porter unicode61',
+      detail=column
+    )
+  `);
+    // Readiness flag (deterministic, not probed). For an external-content FTS5
+    // table the index is EMPTY right after creation even though the content table
+    // (exchanges) already has rows — so `SELECT rowid FROM exchanges_fts` would
+    // falsely look "ready". Track readiness explicitly instead. We (re)initialize
+    // the flag whenever it is MISSING — not only when the FTS table is newly
+    // created — so a DB from an earlier build (FTS table present, flag absent) or
+    // a crash between CREATE and the flag write is still handled correctly rather
+    // than permanently falling back to LIKE. When the flag is absent we cannot
+    // prove the index is populated, so be conservative: an empty exchanges set is
+    // ready (triggers index every future insert); a non-empty set stays NOT ready
+    // until scripts/backfill-fts.mjs rebuilds the index and sets the flag.
+    db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    const hasFtsFlag = db.prepare(`SELECT 1 FROM fts_meta WHERE key='exchanges_fts_built'`).get() !== undefined;
+    if (!hasFtsFlag) {
+        const exchangesHaveRows = db.prepare('SELECT 1 FROM exchanges LIMIT 1').get() !== undefined;
+        // INSERT OR IGNORE (not plain INSERT): initDatabase() runs in every MCP/hook
+        // process, so two callers can both observe a missing flag and race to insert.
+        // OR IGNORE makes the first writer win and the rest no-op instead of crashing
+        // on SQLITE_CONSTRAINT_PRIMARYKEY. The value is deterministic for the DB state,
+        // so a lost race is harmless.
+        db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`)
+            .run(exchangesHaveRows ? '0' : '1');
+    }
+    db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
+  `);
+    db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+    END
+  `);
+    db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au AFTER UPDATE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
   `);
     // === Facts Schema ===
     db.exec(`
@@ -161,6 +282,27 @@ export function initDatabase() {
       embedding FLOAT[384]
     )
   `);
+    // Korean-text vector index: facts are embedded twice (fact / fact_kr) because
+    // multilingual models match same-language pairs far better than cross-language.
+    // Queries search both tables and take the best score per fact id.
+    db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
+    // Category embedding index: lets the ontology classifier retrieve the top-K
+    // most-similar existing categories for a fact instead of dumping ALL
+    // categories into the LLM prompt (measured 1,612 categories ≈ 95K tokens per
+    // classify call). Embeddings (category name + description, 'passage' mode) are
+    // written on createCategory; existing rows are backfilled by
+    // scripts/backfill-category-embeddings.mjs.
+    db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
     // === Ontology Schema ===
     db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_domains (
@@ -188,6 +330,18 @@ export function initDatabase() {
     if (!factColumnNames.has('fact_kr')) {
         db.prepare('ALTER TABLE facts ADD COLUMN fact_kr TEXT').run();
     }
+    if (!factColumnNames.has('coding_agent')) {
+        db.prepare("ALTER TABLE facts ADD COLUMN coding_agent TEXT DEFAULT 'claude-code'").run();
+    }
+    // Embedding model version (1 = all-MiniLM-L6-v2, 2 = multilingual L12-v2).
+    // The re-embed worker upgrades rows where version < current.
+    if (!factColumnNames.has('embedding_version')) {
+        db.prepare('ALTER TABLE facts ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 1').run();
+    }
+    const exchangeColumns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
+    if (!exchangeColumns.some((c) => c.name === 'embedding_version')) {
+        db.prepare('ALTER TABLE exchanges ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 0').run();
+    }
     db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_relations (
       id TEXT PRIMARY KEY,
@@ -201,38 +355,69 @@ export function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_source ON ontology_relations(source_fact_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_target ON ontology_relations(target_fact_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
+    // Tracks which sessions have been through fact extraction (SessionEnd hook
+    // or the backfill worker). Makes extraction idempotent and lets the backfill
+    // find unprocessed sessions across ALL projects.
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_log (
+      session_id TEXT PRIMARY KEY,
+      processed_at TEXT NOT NULL,
+      extracted INTEGER NOT NULL DEFAULT 0,
+      saved INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+    // Self-heal slug-format scope_project rows (cheap probe; no-op when clean).
+    // Keeps the canonical path format intact even when other devices sync in
+    // facts written by older code.
+    autoHealScopeProjects(db);
     return db;
 }
 export function insertExchange(db, exchange, embedding, _toolNames) {
     const now = Date.now();
-    const stmt = db.prepare(`
-    INSERT OR REPLACE INTO exchanges
-    (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
-     parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
-     thinking_level, thinking_disabled, thinking_triggers)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-    stmt.run(exchange.id, exchange.project, exchange.timestamp, exchange.userMessage, exchange.assistantMessage, exchange.archivePath, exchange.lineStart, exchange.lineEnd, now, exchange.parentUuid || null, exchange.isSidechain ? 1 : 0, exchange.sessionId || null, exchange.cwd || null, exchange.gitBranch || null, exchange.claudeVersion || null, exchange.thinkingLevel || null, exchange.thinkingDisabled ? 1 : 0, exchange.thinkingTriggers || null);
-    // Insert into vector table (delete first since virtual tables don't support REPLACE)
-    const delStmt = db.prepare(`DELETE FROM vec_exchanges WHERE id = ?`);
-    delStmt.run(exchange.id);
-    const vecStmt = db.prepare(`
-    INSERT INTO vec_exchanges (id, embedding)
-    VALUES (?, ?)
-  `);
-    vecStmt.run(exchange.id, Buffer.from(new Float32Array(embedding).buffer));
-    // Insert tool calls if present
-    if (exchange.toolCalls && exchange.toolCalls.length > 0) {
-        const toolStmt = db.prepare(`
-      INSERT OR REPLACE INTO tool_calls
-      (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-        for (const toolCall of exchange.toolCalls) {
-            toolStmt.run(toolCall.id, toolCall.exchangeId, toolCall.toolName, toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null, toolCall.toolResult || null, toolCall.isError ? 1 : 0, toolCall.timestamp);
+    // ONE transaction for exchanges + vec + tool_calls, with the dtype read
+    // INSIDE it. Two invariants depend on this:
+    //  1. No partial state: an exchanges row without its vector must never be
+    //     observable (the int8 migration snapshots/verifies by comparing the
+    //     two tables — a row committed between separate transactions would be
+    //     missed by its delta pass and lose its vector permanently).
+    //  2. dtype consistency: the migration swaps the vec table dtype under
+    //     BEGIN IMMEDIATE; reading dtype inside our own write transaction
+    //     serializes against the swap, so we can never quantize for a schema
+    //     that changed between the read and the write.
+    const insertAll = db.transaction(() => {
+        db.prepare(`
+      INSERT OR REPLACE INTO exchanges
+      (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
+       parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
+       thinking_level, thinking_disabled, thinking_triggers, coding_agent, embedding_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(exchange.id, exchange.project, exchange.timestamp, exchange.userMessage, exchange.assistantMessage, exchange.archivePath, exchange.lineStart, exchange.lineEnd, now, exchange.parentUuid || null, exchange.isSidechain ? 1 : 0, exchange.sessionId || null, exchange.cwd || null, exchange.gitBranch || null, exchange.claudeVersion || null, exchange.thinkingLevel || null, exchange.thinkingDisabled ? 1 : 0, exchange.thinkingTriggers || null, exchange.codingAgent || 'claude-code', 
+        // The embedding parameter was just generated with the current model, so
+        // stamp the current version — search filters on it and the re-embed
+        // worker must not redo freshly indexed rows.
+        EMBEDDING_VERSION);
+        // Vector upsert: DELETE+INSERT since virtual tables don't support REPLACE.
+        const vecDtype = getVecDtype(db);
+        db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(exchange.id);
+        db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`)
+            .run(exchange.id, embeddingToVecBlob(embedding, vecDtype));
+        if (exchange.toolCalls && exchange.toolCalls.length > 0) {
+            const toolStmt = db.prepare(`
+        INSERT OR REPLACE INTO tool_calls
+        (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+            for (const toolCall of exchange.toolCalls) {
+                toolStmt.run(toolCall.id, toolCall.exchangeId, toolCall.toolName, toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null, toolCall.toolResult || null, toolCall.isError ? 1 : 0, toolCall.timestamp);
+            }
         }
-    }
+    });
+    // .immediate(): acquire the write lock at BEGIN, before any read — a
+    // deferred BEGIN would let the int8 migration swap commit between our reads
+    // and the lock upgrade (stale-dtype write / SQLITE_BUSY_SNAPSHOT).
+    insertAll.immediate();
 }
 export function getAllExchanges(db) {
     const stmt = db.prepare(`SELECT id, archive_path as archivePath FROM exchanges`);

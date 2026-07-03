@@ -25,6 +25,7 @@ export interface ConversationExchange {
     thinkingLevel?: string;
     thinkingDisabled?: boolean;
     thinkingTriggers?: string;
+    codingAgent?: string;
     toolCalls?: ToolCall[];
 }
 export interface SearchResult {
@@ -54,6 +55,7 @@ export interface Fact {
     consolidated_count: number;
     is_active: boolean;
     ontology_category_id?: string | null;
+    coding_agent?: string | null;
 }
 export interface FactRevision {
     id: string;
@@ -70,6 +72,7 @@ export interface FactSearchResult {
 }
 export interface ExtractedFact {
     fact: string;
+    fact_kr?: string;
     category: FactCategory;
     scope_type: FactScopeType;
     confidence: number;

@@ -42,6 +42,7 @@ COMMANDS:
   search      Search indexed conversations
   show        Display a conversation in readable format
   stats       Show index statistics
+  analyze     Analyze full conversation history (coverage, projects, facts)
 
 Run 'memory-bank <command> --help' for command-specific help.
 
@@ -78,6 +79,10 @@ async function main() {
 
       case 'stats':
         await runScript(join(distDir, 'stats-cli.js'), args);
+        break;
+
+      case 'analyze':
+        await runScript(join(distDir, 'analyze-cli.js'), args);
         break;
 
       case 'sync':

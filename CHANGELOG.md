@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-03
+
+### Added
+- **`memory-bank analyze` command**: Deterministic full-history analysis of the entire
+  conversation index — coverage (fact extraction / summaries), fact breakdowns by
+  category/scope, top knowledge domains, per-project rollups, monthly activity
+  timeline, and backfill recommendations. Supports `--json`, `--out`, `--top`, `--months`.
+- **`analyzing-all-conversations` skill**: Plugin skill that runs the analyze engine,
+  kicks off backfill for unanalyzed sessions, enriches the numbers with fact/ontology
+  search, and presents an organized report of the whole conversation history.
+- **Transparent `.zst` archive support** (`src/archive-io.ts`): The conversation archive
+  may be compressed out-of-band (`*.jsonl` → `*.jsonl.zst`). All read paths — parser,
+  `read` MCP tool, search summaries/line counts, sync, stats, indexer, verify — now
+  resolve either variant using Node's built-in zstd (Node >= 22.15), no new dependency.
+
+### Changed
+- **FTS5 text search**: BM25-ranked full-text search (`exchanges_fts`, detail=column) replaces
+  the O(rows) LIKE full scan — recall@10 0.93 → 1.00, FTS index 2,953MB → 407MB. Query
+  tokenization aligned with the unicode61 tokenizer; identifier tokens preserved; rank
+  budget + sparse-token AND ladder to avoid BM25 pathologies.
+- **Search-path performance**: cached search DB connection (path-keyed, mtime-checked),
+  int8 vector quantization for `vec_exchanges` (dual-dtype with migration), and
+  query-embedding LRU memoization (removes double embedding per MCP search).
+- **Backfill extraction guards**: self-referential projects excluded by default
+  (`BACKFILL_EXCLUDE_PROJECTS`) and minimum-exchange filter to skip empty sessions.
+- **Fact extraction quality/cost improvements**:
+  - Trivial exchanges (bare slash commands, harness artifacts, short acknowledgements)
+    are filtered before LLM calls.
+  - Cross-batch duplicate facts within a session are dropped via normalized comparison.
+  - Long sessions cap LLM calls (default 12, `MEMORY_BANK_MAX_EXTRACT_CALLS`) with
+    evenly-spread batch selection so the whole session is represented.
+  - Extraction prompt now prefers durable facts and problem→solution lessons.
+- **Sync no longer re-copies archives compressed out-of-band**: `copyIfNewer` treats a
+  current `.zst` copy as up-to-date, preventing full-history re-copy churn each session.
+
+### Fixed
+- **`read` MCP tool worked only on plain `.jsonl`**: reading any archived conversation
+  failed with "File not found" once the archive was compressed. Now resolves `.zst`.
+- **Summary coverage was misreported as zero**: existing `-summary.txt.zst` files are
+  now detected by stats/analyze/sync/indexer/verify.
+
+## [1.1.0] - 2026-04-12
+
+### Added
+- **Multi coding-agent tagging**: Conversations and extracted facts now record which coding agent produced them.
+  - Default source remains `claude-code`.
+  - Additional sources can be configured with `MEMORY_BANK_AGENT_SOURCES` or `conversation-index/agent-sources.json`.
+  - Supported agent labels include `claude-code`, `codex`, `opencode`, and custom agent names.
+- **Agent-aware search filters**: MCP and library search paths can filter conversations and facts by `coding_agent`.
+  - `search` supports a `coding_agent` filter.
+  - `search_facts` supports a `coding_agent` filter.
+  - Search result formatting shows an agent tag for non-default sources.
+
+### Changed
+- **Sync now preserves source-agent identity**: Synced exchanges are tagged during indexing so multi-agent setups can share one memory bank without losing provenance.
+- **Search agent upgraded to Sonnet**: The bundled `search-conversations` agent now uses Sonnet instead of Haiku for stronger retrieval and synthesis.
+- **Plugin update docs clarified**: README update instructions now use the correct `/plugin update memory-bank` command.
+
+### Fixed
+- **Facts inherit coding-agent metadata**: Fact extraction now carries the exchange agent through to saved facts.
+- **Search and fact schema migrations are backward-compatible**: Existing databases gain the new `coding_agent` columns through idempotent migrations.
+
+## [1.0.16] - 2026-03-25
+
+### Added
+- **`/show-memory-bank` slash command**: Opens the Memory Bank web dashboard from Claude Code.
+- **Automatic command installation**: SessionStart hooks install bundled slash commands into user scope.
+
+### Changed
+- **Plugin command manifest format**: `commands` now points to the commands directory so Claude Code can discover bundled commands correctly.
+
 ## [1.0.15] - 2025-12-17
 
 ### Changed

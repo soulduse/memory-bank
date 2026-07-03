@@ -8,3 +8,8 @@ tmp/
 *.db-wal
 .env
 .claude/settings.local.json
+supabase/.temp/
+.autoresearch/*
+!.autoresearch/results.tsv
+!.autoresearch/results-may-dashboard.tsv
+.qa-cycle-passed

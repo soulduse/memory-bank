@@ -4,17 +4,28 @@
 
 ![Memory Bank](docs/memory-bank.gif)
 
+## What's New in v1.2.0
+
+- 🆕 **`analyzing-all-conversations` skill** — new plugin skill that analyzes and organizes your ENTIRE indexed conversation history into one report, and kicks off backfill for unanalyzed sessions
+- 🆕 **`memory-bank analyze` command** — the deterministic engine behind the skill: coverage, per-project rollups, fact/domain breakdowns, monthly timeline, backfill recommendations
+- 🆕 **Transparent `.jsonl.zst` archive support** — archives compressed out-of-band keep working across every read path (no extra dependency; requires Node >= 22.15 for built-in zstd)
+- ⚡ **FTS5 text search** — BM25-ranked full-text search replaces the LIKE full scan (recall@10 0.93 → 1.00, FTS index 2.9GB → 407MB)
+- ⚡ **Search-path performance** — cached DB connection, int8 vector quantization (dual-dtype), query-embedding memoization
+- 🧹 **Fact extraction quality/cost controls** — trivial-exchange filtering, in-session dedup, strict confidence gating, per-session LLM call budget
+
 ## Features
 
 - **Knowledge Graph** -- Ontology classification (Domain → Category) + typed relations (INFLUENCES, SUPPORTS, SUPERSEDES, CONTRADICTS)
 - **RAG Search** -- Search results auto-enriched with related facts and ontology context
-- **Conversation Search** -- Semantic vector search across all past conversations
-- **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations
+- **Conversation Search** -- Semantic vector search + FTS5 (BM25) full-text search across all past conversations
+- **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the entire conversation *index* (projects, facts, domains, timeline, backfill gaps) — run `memory-bank sync` first so new conversations are indexed
+- **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations (trivial-exchange filtering, in-session dedup, confidence gating, LLM call budgeting)
 - **Fact Consolidation** -- Duplicate detection, contradiction handling, evolution tracking
 - **Graph Traversal** -- Multi-hop exploration (up to 3 hops) to trace decision chains
 - **Cross-Project Insights** -- Find similar decisions from other projects
 - **Fact Provenance** -- Trace any fact back to its source conversation
 - **Scope Isolation** -- Project facts stay in their project, global facts are shared
+- **Compressed Archive Support** -- Transparent `.jsonl.zst` reads across every path (parser, `read` tool, search, sync, stats, verify) using Node's built-in zstd (Node >= 22.15) — archives compressed out-of-band keep working
 - **MCP Integration** -- 9 tools: `search`, `read`, `search_facts`, `search_ontology`, `ask_avatar`, `trace_fact`, `explore_graph`, `cross_project_insights`, `graph_stats`
 - **3D Visualization** -- Interactive neon-style knowledge graph with data flow animation
 - **Web UI** -- Dark-theme web interface for browsing and searching conversations
@@ -68,17 +79,57 @@ In Claude Code:
 /plugin install memory-bank
 ```
 
+## Update
+
+```
+/plugin update memory-bank
+```
+
 ## Quick Start
 
 ```bash
 memory-bank sync      # Sync & index conversations
 memory-bank search "React auth"  # Semantic search
 memory-bank stats     # Index statistics
+memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
 ```
+
+## Full-History Analysis
+
+`memory-bank analyze` aggregates the entire conversation **index** into one report — deterministic, read-only, no LLM calls. It reports on what has been indexed into SQLite: archive files that were never synced are not visible to it. The SessionStart hook syncs in the background, but that runs asynchronously — when freshness matters, run `memory-bank sync` (foreground) and let it finish before analyzing.
+
+```bash
+memory-bank analyze                    # Markdown report to stdout
+memory-bank analyze --json             # Raw JSON for scripting
+memory-bank analyze --top 30 --out ~/report.md   # Top 30 projects, saved to file
+```
+
+The report covers:
+
+| Section | Contents |
+|---------|----------|
+| Coverage | Conversations (main sessions vs agent transcripts), sessions, exchanges, date range |
+| Pipeline coverage | Fact extraction done/pending %, summary done/missing % |
+| Facts | Active/inactive counts, by category, by scope |
+| Knowledge domains | Top ontology domains by fact count |
+| Projects | Per-project rollups: conversations, sessions, exchanges, facts, activity range |
+| Timeline | Monthly session/exchange activity |
+| Recommendations | Which backfills to run to close analysis gaps |
+
+The **`analyzing-all-conversations` skill** builds on this: it runs the analysis, kicks off
+backfill for unanalyzed sessions (`scripts/backfill-extract-worker.js` — lock-protected and
+resumable), then enriches the numbers with fact/ontology search into an organized report.
+Trigger it with requests like *"모든 대화 분석"*, *"analyze all my conversations"*.
 
 ## Fact System
 
 Facts are automatically extracted at session end and consolidated at session start.
+
+Extraction quality/cost controls (v1.2.0):
+- Trivial exchanges (bare slash commands, harness artifacts, short acknowledgements) are filtered before any LLM call
+- Duplicate facts within a session are dropped across batches (normalized comparison)
+- Facts without a valid numeric confidence ≥ 0.7 are rejected
+- Long sessions cap LLM calls with evenly-spread batch sampling (`MEMORY_BANK_MAX_EXTRACT_CALLS`, default 12)
 
 | Category | Example |
 |----------|---------|
@@ -150,6 +201,15 @@ cross_project_insights --query "authentication" --current_project ./my-app
 explore_graph --query "database choice" --hops 3
 ```
 
+## Skills
+
+Installed automatically with the plugin:
+
+| Skill | When it triggers | What it does |
+|-------|------------------|--------------|
+| `remembering-conversations` | "how should I...", "last time we...", stuck on a problem | Dispatches the search agent over past conversations and returns synthesized findings |
+| `analyzing-all-conversations` **(new in v1.2.0)** | "모든 대화 분석", "대화내역 정리", "analyze all conversations" | Runs `memory-bank analyze`, starts backfill for unanalyzed sessions, and produces an organized full-history report |
+
 ## Web UI
 
 A cinematic dark-theme web interface for browsing and searching your conversation history.
@@ -162,12 +222,14 @@ A cinematic dark-theme web interface for browsing and searching your conversatio
 - **Search** -- Full-text search across all conversations
 - **User Prompts** -- Browse and search only user messages
 - **Exchange Detail** -- View full user/assistant messages with tool call history
+- **Hue OS Publication** -- Q&A-only personal mirror chat backed by the personal mirror artifacts in `~/.codex/personal-mirror`
 
 ### Run
 
 ```bash
 node ui/server.cjs
 # Memory Bank UI: http://localhost:3847
+# Hue OS: http://localhost:3847/hue-os
 ```
 
 Custom port:
@@ -176,6 +238,13 @@ PORT=8080 node ui/server.cjs
 ```
 
 > **Note:** Requires `memory-bank sync` to have been run at least once to populate the database.
+> The Hue OS publication route (`/hue-os`, with `/replacement-os` kept as a compatibility alias) can still load from local Personal Mirror artifacts when the conversation database is unavailable.
+> Chat defaults to local terminal CLIs instead of API keys: Claude via `claude --print --model sonnet`, GPT via `codex exec --model gpt-5.5`.
+> Override with `REPLACEMENT_OS_CLAUDE_COMMAND`, `REPLACEMENT_OS_CLAUDE_ARGS_JSON`, `REPLACEMENT_OS_GPT_COMMAND`, or `REPLACEMENT_OS_GPT_ARGS_JSON`.
+> If local terminal providers are unavailable, the route falls back to a deterministic safety-preserving response mode.
+> Public sharing guardrails: `/hue-os` requires password login (`REPLACEMENT_OS_ACCESS_PASSWORD`, default `0525`; 4 digits auto-submit in the login UI) and limits each client IP to 200 chat requests per local day (`REPLACEMENT_OS_DAILY_LIMIT`, reset at 00:00). The chat UI hides provider selection, disables Send during responses, shows an in-chat loading bar while Hue OS answers, and uses Esc to cancel an in-flight answer.
+> Hue OS answer boundary: it refuses access/security-sensitive questions, including passwords, tokens, cookies, env values, server/tunnel URLs, auth bypasses, quota bypasses, and security-weakening instructions.
+> Vercel sharing bridge: `vercel/hue-os/` is a standalone Vercel project that proxies `/api/hue-os/*` to a public HTTPS tunnel for this local server. Vercel cannot call your private `localhost` directly; keep this server running and set `HUE_OS_LOCAL_ORIGIN` to the tunnel/reverse-proxy origin so Claude/Codex subscription CLI auth stays local.
 
 ## Claude Desktop Integration
 
@@ -207,6 +276,12 @@ export ANTHROPIC_API_KEY=your-key
 
 # Summarization model
 export MEMORY_BANK_API_MODEL=opus
+
+# Fact extraction LLM call budget per session (default: 12, evenly-spread batches)
+export MEMORY_BANK_MAX_EXTRACT_CALLS=12
+
+# Decompression cap for .zst archives (bytes; lowering only, default 256 MiB)
+export MEMORY_BANK_MAX_DECOMPRESSED_BYTES=268435456
 ```
 
 ## 3D Knowledge Graph
@@ -225,7 +300,7 @@ open docs/graph-3d.html   # Interactive 3D graph (local)
 
 ```
 ~/.config/superpowers/
-├── conversation-archive/       # Archived JSONL files
+├── conversation-archive/       # Archived JSONL files (plain or .jsonl.zst — read transparently)
 └── conversation-index/
     └── db.sqlite               # SQLite + sqlite-vec
         ├── exchanges           # Conversation data + embeddings
@@ -238,6 +313,28 @@ open docs/graph-3d.html   # Interactive 3D graph (local)
         ├── vec_exchanges       # Vector index (384-dim)
         └── vec_facts           # Vector index (384-dim)
 ```
+
+## Cloud (private alpha, opt-in)
+
+Local memory-bank is the default and is unaffected by cloud mode. A separate,
+issuer-bound **private** cloud plane (Supabase-backed) is available as an opt-in
+server — it is not auto-registered in the plugin and exposes no public tools.
+
+```bash
+# Server-only: never ship the service token to clients/browsers.
+export MEMORY_BANK_CLOUD_SUPABASE_URL="https://<ref>.supabase.co"
+export SUPABASE_SERVICE_ROLE_TOKEN="<service_role_key>"
+memory-bank-cloud-mcp-server          # client profile (no issue_token)
+memory-bank-cloud-mcp-server --admin  # control-plane profile (issue_token enabled)
+
+# Sidecar spool → cloud sync:
+memory-bank-cloud-sync status
+memory-bank-cloud-sync doctor
+memory-bank-cloud-sync push           # needs MEMORY_BANK_CLOUD_TOKEN or _SESSION_TOKEN
+```
+
+Deployment status and the remaining operator steps (project creation, `db push`,
+RLS, smoke) are tracked in [`docs/memory-bank-cloud-deploy-runbook.md`](docs/memory-bank-cloud-deploy-runbook.md).
 
 ## Development
 

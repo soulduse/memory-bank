@@ -1,16 +1,59 @@
-import { initDatabase } from './db.js';
-import { initEmbeddings, generateEmbedding } from './embeddings.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { getDbPath } from './paths.js';
+import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
 import { getRelatedFacts, listDomains, listCategories } from './ontology-db.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
+import type DatabaseType from 'better-sqlite3';
 import fs from 'fs';
 import readline from 'readline';
+import { readArchiveFile, createArchiveReadStream, statArchiveFile } from './archive-io.js';
+
+// Module-level cached connection for the search read path. searchConversations
+// runs inside long-lived MCP server processes where re-running initDatabase()'s
+// full DDL/migration pass and re-opening the file on EVERY search call is pure
+// overhead (~3-4ms/call). Keyed by resolved DB path AND file identity
+// (dev:inode) — a path-only key would keep serving a stale handle after the
+// DB file is unlinked/recreated (rebuild/restore), returning deleted rows and
+// missing new ones. Test overrides (TEST_DB_PATH / MEMORY_BANK_DB_PATH)
+// switching mid-process also get a fresh handle. Short-lived CLI processes
+// release the handle at exit.
+let cachedSearchDb: DatabaseType.Database | null = null;
+let cachedSearchDbPath: string | null = null;
+let cachedSearchDbIdent: string | null = null;
+
+function fileIdent(p: string): string | null {
+  try {
+    const st = fs.statSync(p);
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null; // file missing — force reopen (initDatabase recreates it)
+  }
+}
+
+function getSearchDb(): DatabaseType.Database {
+  const p = getDbPath();
+  const ident = fileIdent(p);
+  if (
+    cachedSearchDb && cachedSearchDb.open &&
+    cachedSearchDbPath === p &&
+    ident !== null && cachedSearchDbIdent === ident
+  ) {
+    return cachedSearchDb;
+  }
+  try { cachedSearchDb?.close(); } catch { /* already closed */ }
+  cachedSearchDb = initDatabase();
+  cachedSearchDbPath = p;
+  cachedSearchDbIdent = fileIdent(p);
+  return cachedSearchDb;
+}
 
 export interface SearchOptions {
   limit?: number;
   mode?: 'vector' | 'text' | 'both';
   after?: string;  // ISO date string
   before?: string; // ISO date string
+  coding_agent?: string; // Filter by coding agent (e.g., 'claude-code', 'codex', 'opencode')
 }
 
 interface ExchangeRow {
@@ -23,6 +66,7 @@ interface ExchangeRow {
   line_start: number;
   line_end: number;
   distance: number;
+  coding_agent: string | null;
 }
 
 function validateISODate(dateStr: string, paramName: string): void {
@@ -41,68 +85,96 @@ export async function searchConversations(
   query: string,
   options: SearchOptions = {}
 ): Promise<SearchResult[]> {
-  const { limit = 10, mode = 'both', after, before } = options;
+  const { limit = 10, mode = 'both', after, before, coding_agent } = options;
 
   // Validate date parameters
   if (after) validateISODate(after, '--after');
   if (before) validateISODate(before, '--before');
 
-  const db = initDatabase();
+  const db = getSearchDb();
   let results: ExchangeRow[] = [];
 
-  try {
-    // Build time filter clause with parameterized queries
-    const timeFilter: string[] = [];
-    const timeParams: string[] = [];
+  {
+    // Build filter clauses with parameterized queries
+    const filterParts: string[] = [];
+    const filterParams: string[] = [];
     if (after) {
-      timeFilter.push(`e.timestamp >= ?`);
-      timeParams.push(after);
+      filterParts.push(`e.timestamp >= ?`);
+      filterParams.push(after);
     }
     if (before) {
-      timeFilter.push(`e.timestamp <= ?`);
-      timeParams.push(before);
+      filterParts.push(`e.timestamp <= ?`);
+      filterParams.push(before);
     }
-    const timeClause = timeFilter.length > 0 ? `AND ${timeFilter.join(' AND ')}` : '';
+    if (coding_agent) {
+      filterParts.push(`e.coding_agent = ?`);
+      filterParams.push(coding_agent);
+    }
+    const timeClause = filterParts.length > 0 ? `AND ${filterParts.join(' AND ')}` : '';
+    const timeParams = filterParams;
 
     if (mode === 'vector' || mode === 'both') {
       // Vector similarity search
       await initEmbeddings();
-      const queryEmbedding = await generateEmbedding(query);
+      const queryEmbedding = await generateEmbedding(query, 'query');
 
-      const stmt = db.prepare(`
-        SELECT
-          e.id,
-          e.project,
-          e.timestamp,
-          e.user_message,
-          e.assistant_message,
-          e.archive_path,
-          e.line_start,
-          e.line_end,
-          vec.distance
-        FROM vec_exchanges AS vec
-        JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ?
-          AND k = ?
-          ${timeClause}
-        ORDER BY vec.distance ASC
-      `);
+      // dtype-aware: int8 tables need vec_int8()-wrapped quantized query blobs,
+      // and their distances come back ×127-scaled (normalized below).
+      const vecQuery = (vecDtype: 'float32' | 'int8'): ExchangeRow[] => {
+        const stmt = db.prepare(`
+          SELECT
+            e.id,
+            e.project,
+            e.timestamp,
+            e.user_message,
+            e.assistant_message,
+            e.archive_path,
+            e.line_start,
+            e.line_end,
+            e.coding_agent,
+            vec.distance
+          FROM vec_exchanges AS vec
+          JOIN exchanges AS e ON vec.id = e.id
+          WHERE vec.embedding MATCH ${vecParamSql(vecDtype)}
+            AND k = ?
+            AND e.embedding_version = ?
+            ${timeClause}
+          ORDER BY vec.distance ASC
+        `);
 
-      results = stmt.all(
-        Buffer.from(new Float32Array(queryEmbedding).buffer),
-        limit,
-        ...timeParams
-      ) as ExchangeRow[];
+        // embedding_version filter: old-model vectors are incomparable with the
+        // current-model query embedding — exclude rows the re-embed worker has
+        // not upgraded yet (newest sessions are upgraded first).
+        const rows = stmt.all(
+          embeddingToVecBlob(queryEmbedding, vecDtype),
+          limit,
+          EMBEDDING_VERSION,
+          ...timeParams
+        ) as ExchangeRow[];
+        for (const r of rows) r.distance = normalizeVecDistance(r.distance, vecDtype);
+        return rows;
+      };
+
+      let vecDtype = getVecDtype(db);
+      try {
+        results = vecQuery(vecDtype);
+      } catch (e) {
+        // The int8 migration may have swapped the table dtype between our
+        // dtype read and the query (read path is not serialized by the swap
+        // lock). Retry once with a fresh dtype; rethrow anything else.
+        const fresh = getVecDtype(db);
+        if (fresh === vecDtype) throw e;
+        vecDtype = fresh;
+        results = vecQuery(vecDtype);
+      }
     }
 
+    // In 'both' mode always run the text pass and merge: vector (semantic) and
+    // text (literal/keyword) are complementary, so skipping text when vector is
+    // full would drop exact matches that vector ranks lower. The text pass is now
+    // cheap (FTS5), so there is no reason to skip it.
     if (mode === 'text' || mode === 'both') {
-      // Escape LIKE metacharacters
-      const escapedQuery = query.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      const likePattern = `%${escapedQuery}%`;
-
-      // Text search
-      const textStmt = db.prepare(`
-        SELECT
+      const cols = `
           e.id,
           e.project,
           e.timestamp,
@@ -111,15 +183,251 @@ export async function searchConversations(
           e.archive_path,
           e.line_start,
           e.line_end,
-          0 as distance
-        FROM exchanges AS e
-        WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
-          ${timeClause}
-        ORDER BY e.timestamp DESC
-        LIMIT ?
-      `);
+          e.coding_agent`;
 
-      const textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit) as ExchangeRow[];
+      let textResults: ExchangeRow[] = [];
+
+      // FTS5 (BM25-ranked) — replaces the O(rows) LIKE full scan. Build a safe
+      // MATCH expression by quoting each whitespace token (neutralizes FTS5
+      // operators like -, *, OR, ", :). Falls back to LIKE if the FTS table is
+      // absent (older DB) or the query has no usable tokens.
+      //
+      // Two-stage matching: AND first (precision — every token must be
+      // present, identical to the original behavior), then an OR fallback
+      // ONLY when AND matches nothing. Long natural-language queries almost
+      // never contain ALL tokens in one exchange (measured 16% AND match rate
+      // on ~20-token queries), which silently killed the text pass and capped
+      // bench recall@10 at 0.930; the OR fallback rescues those (recall
+      // 1.000) without letting single-token hits displace exact matches on
+      // queries AND can satisfy. The OR pass caps to the longest tokens —
+      // longer tokens are rarer (cheaper posting unions) and more selective
+      // (better BM25 top-k).
+      // Split on ANY non-alphanumeric boundary (mirroring the unicode61
+      // tokenizer), not just whitespace: a whitespace-split token like
+      // "sqlite-vec" quoted becomes a multi-token PHRASE query after FTS
+      // tokenization, and phrase queries are unsupported under detail=column
+      // (they throw → silent LIKE fallback → seconds-long full scans).
+      // Single-token quoted terms can never form phrases.
+      const ftsTokens = query
+        .split(/[^\p{L}\p{N}]+/u)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(' ');
+      const MAX_FTS_TOKENS = 6;
+      const MAX_OR_TOKENS = 10; // hard bound on posting-list unions (latency)
+      let orTokens = ftsTokens;
+      if (orTokens.length > MAX_FTS_TOKENS) {
+        const uniq = [...new Set(orTokens)];
+        // Longest tokens are rarer (cheaper unions, better BM25 selectivity) —
+        // but short identifier-like tokens (id7, R8, C4, QA) are often the
+        // real discriminators, so digit-bearing tokens and short ALL-CAPS
+        // acronyms are always kept alongside the longest ones.
+        const identifiers = uniq.filter((t) => /\d/.test(t) || /^[A-Z]{2,4}$/.test(t));
+        const longest = uniq.sort((a, b) => b.length - a.length).slice(0, MAX_FTS_TOKENS);
+        orTokens = [...new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
+      }
+      // Rarest-token AND ladder (replaces a flat OR fallback): a flat OR over
+      // capped tokens either drags in very common terms (BM25 over 100K+
+      // matches — 35s measured) or, rank-degraded to newest-first, loses the
+      // target in mid-sized match sets. Instead: probe each candidate token's
+      // document frequency (posting-length count, ms each), sort rarest
+      // first, then try AND of the 4→3→2→1 rarest tokens and return the first
+      // non-empty result. The source document contains every query token, so
+      // it is in every ladder rung's match set; the first non-empty rung is
+      // the most selective one — small enough to BM25-rank meaningfully.
+
+      let usedFts = false;
+      if (ftsExpr) {
+        try {
+          // Readiness flag (set in db.ts / backfill-fts.mjs). On a fresh upgrade
+          // the external-content FTS index is EMPTY until backfill-fts.mjs runs;
+          // a row-probe would false-positive (it reads the content table), so we
+          // use an explicit '1' flag and fall back to LIKE until it is set — never
+          // silently hiding historical text matches.
+          const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get() as { value: string } | undefined;
+          if (built?.value === '1') {
+            // Unfiltered queries: sort + LIMIT happen INSIDE a subquery on
+            // the FTS table and only the k winners are joined to `exchanges`
+            // — joining before the sort materializes the FULL conversation
+            // text of every match (a common-word query matched 17.8K rows ≈
+            // 350MB pulled to keep 10; measured 34s).
+            // Filtered queries (after/before/coding_agent): the filter MUST
+            // apply BEFORE the limit or valid old/filtered hits vanish (an
+            // inner-limit over-fetch was reproduced hiding a valid old row
+            // behind 250 newer matches) — so they use the join-then-sort
+            // form; filters shrink the materialized set instead.
+            const mkFtsStmt = timeClause
+              ? (orderBy: string) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM exchanges_fts AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  WHERE exchanges_fts MATCH ?
+                    ${timeClause}
+                  ORDER BY ${orderBy.replace('rowid', 'fts.rowid')}
+                  LIMIT ?
+                `)
+              : (orderBy: string) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM (
+                    SELECT rowid FROM exchanges_fts
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY ${orderBy}
+                    LIMIT ?
+                  ) AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  LIMIT ?
+                `);
+            const rankedStmt = mkFtsStmt('rank');
+            const recentStmt = mkFtsStmt('rowid DESC');
+            // BM25 (ORDER BY rank) scores EVERY matching document, and under
+            // detail=column with external content each bm25() call RE-READS
+            // AND RE-TOKENIZES the source text (term frequencies are not in
+            // the index) — measured ~1.9ms/doc, 33s over a 17.8K-match
+            // common-word query. Under detail=full the frequencies are in the
+            // index and ranking is orders of magnitude cheaper. Guard: count
+            // matches first (posting iteration, no scoring — 12ms on 17.8K)
+            // and only rank within a budget scaled to the actual detail mode;
+            // over budget → newest-first (the vector pass provides semantic
+            // ranking).
+            const ftsSchema = (db.prepare(
+              `SELECT sql FROM sqlite_master WHERE name='exchanges_fts'`
+            ).get() as { sql: string } | undefined)?.sql ?? '';
+            const RANK_BUDGET = /detail\s*=\s*column/i.test(ftsSchema) ? 200 : 20000;
+            const countStmt = db.prepare(
+              `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
+            );
+            const ftsStmt = {
+              all: (expr: string, ...rest: unknown[]): unknown[] => {
+                const n = (countStmt.get(expr) as { c: number }).c;
+                if (n === 0) return [];
+                const lim = rest[rest.length - 1] as number;
+                const params = rest.slice(0, -1); // timeParams
+                const stmt = n <= RANK_BUDGET ? rankedStmt : recentStmt;
+                // filtered form: (expr, ...timeParams, limit)
+                // unfiltered subquery form: (expr, innerLimit, outerLimit)
+                if (timeClause) return stmt.all(expr, ...params, lim);
+                const rows = stmt.all(expr, lim, lim);
+                // Self-heal on index desync: every legit FTS rowid joins to an
+                // exchanges row (triggers keep them in sync), so a shortfall
+                // vs the counted matches means the inner LIMIT picked stale/
+                // orphan rowids that the join then dropped. Retry once with
+                // join-before-limit, which is correct even with orphans.
+                if (rows.length < Math.min(n, lim)) {
+                  const healStmt = db.prepare(`
+                    SELECT ${cols}, 0 as distance
+                    FROM exchanges_fts AS fts
+                    JOIN exchanges AS e ON e.rowid = fts.rowid
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY fts.rowid DESC
+                    LIMIT ?
+                  `);
+                  return healStmt.all(expr, lim);
+                }
+                return rows;
+              },
+            };
+            // Rarest-token AND ladder (see comment above orTokens): walk AND
+            // of the 4→3→2→1 rarest candidate tokens and ACCUMULATE rungs
+            // (dedup) until `lim` rows — most-selective hits first, but a
+            // single rare distractor cannot suppress hits that match the
+            // other query terms (lower rungs still contribute). df=0 tokens
+            // are dropped (they match nothing).
+            const orFallbackRows = (lim: number): ExchangeRow[] => {
+              let rare: string[] = [];
+              try {
+                rare = [...new Set(orTokens)]
+                  .map((t) => ({ t, df: (countStmt.get(`"${t}"`) as { c: number }).c }))
+                  .filter((x) => x.df > 0)
+                  .sort((a, b) => a.df - b.df)
+                  .map((x) => x.t);
+              } catch { return []; }
+              // Rungs: AND-of-rarest prefixes (most selective first), then
+              // every token individually in df order — so hits matching only
+              // the OTHER query terms still surface after the rare ones.
+              const rungs: string[] = [];
+              for (let k = Math.min(4, rare.length); k >= 2; k--) {
+                rungs.push(rare.slice(0, k).map((t) => `"${t}"`).join(' '));
+              }
+              for (const t of rare) rungs.push(`"${t}"`);
+              // Two-pass fill with a per-rung quota: pass 1 lets each rung
+              // take at most half the slots so one populous rung (many docs
+              // matching one rare token) cannot crowd out hits that match the
+              // OTHER query terms; pass 2 refills any remaining slots from
+              // rung leftovers in selectivity order.
+              const perRung: ExchangeRow[][] = [];
+              for (const expr of rungs) {
+                if (expr === ftsExpr) continue; // identical to the AND pass
+                perRung.push(ftsStmt.all(expr, ...timeParams, lim) as ExchangeRow[]);
+                const distinct = new Set(perRung.flat().map((r) => r.id));
+                if (distinct.size >= lim * 2) break; // enough material
+              }
+              const acc: ExchangeRow[] = [];
+              const seen = new Set<string>();
+              const quota = Math.max(1, Math.ceil(lim / 2));
+              for (const rows of perRung) {
+                let took = 0;
+                for (const r of rows) {
+                  if (took >= quota || acc.length >= lim) break;
+                  if (!seen.has(r.id)) { seen.add(r.id); acc.push(r); took++; }
+                }
+              }
+              for (const rows of perRung) {
+                for (const r of rows) {
+                  if (acc.length >= lim) break;
+                  if (!seen.has(r.id)) { seen.add(r.id); acc.push(r); }
+                }
+              }
+              return acc;
+            };
+            // Contract: the text pass returns AT MOST `limit` rows in every
+            // mode, all-token (AND/exact) matches always first — identical
+            // fetch depth to the original all-AND implementation.
+            if (ftsTokens.length <= MAX_FTS_TOKENS) {
+              // Short query: AND first (precision — identical to original
+              // behavior), ladder fallback only when AND matches nothing.
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit) as ExchangeRow[];
+              if (textResults.length === 0 && ftsTokens.length > 1) {
+                textResults = orFallbackRows(limit);
+              }
+            } else {
+              // Long query: AND pass first (full limit — exact matches are
+              // never capped below the caller's limit), then the ladder
+              // supplement fills only the REMAINING slots. AND results stay
+              // FIRST: an exact all-token match can never be hidden by
+              // partial-token hits. The ladder rescues the ~84% of long
+              // queries the full AND cannot match.
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit) as ExchangeRow[];
+              if (textResults.length < limit) {
+                const orResults = orFallbackRows(limit);
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
+                  }
+                }
+              }
+            }
+            usedFts = true;
+          }
+        } catch {
+          usedFts = false; // FTS table missing/unsupported → LIKE fallback below
+        }
+      }
+
+      if (!usedFts) {
+        // Escape LIKE metacharacters
+        const escapedQuery = query.replace(/%/g, '\\%').replace(/_/g, '\\_');
+        const likePattern = `%${escapedQuery}%`;
+        const textStmt = db.prepare(`
+          SELECT ${cols}, 0 as distance
+          FROM exchanges AS e
+          WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
+            ${timeClause}
+          ORDER BY e.timestamp DESC
+          LIMIT ?
+        `);
+        textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit) as ExchangeRow[];
+      }
 
       if (mode === 'both') {
         // Merge and deduplicate by ID
@@ -133,9 +441,9 @@ export async function searchConversations(
         results = textResults;
       }
     }
-  } finally {
-    db.close();
   }
+  // NOTE: no db.close() — the cached connection is reused across calls (see
+  // getSearchDb). CLI processes release it at exit; the MCP server keeps it.
 
   return results.map((row) => {
     const exchange: ConversationExchange = {
@@ -146,13 +454,14 @@ export async function searchConversations(
       assistantMessage: row.assistant_message,
       archivePath: row.archive_path,
       lineStart: row.line_start,
-      lineEnd: row.line_end
+      lineEnd: row.line_end,
+      codingAgent: row.coding_agent || 'claude-code',
     };
 
     // Try to load summary if available
     const summaryPath = row.archive_path.replace('.jsonl', '-summary.txt');
     let summary: string | undefined;
-    try { summary = fs.readFileSync(summaryPath, 'utf-8').trim(); } catch { /* absent */ }
+    try { summary = readArchiveFile(summaryPath).trim(); } catch { /* absent */ }
 
     // Create snippet (first 200 chars, collapse newlines)
     const snippetText = exchange.userMessage.substring(0, 200).replace(/\s+/g, ' ').trim();
@@ -170,7 +479,7 @@ export async function searchConversations(
 // Helper function to count lines in a file efficiently
 async function countLines(filePath: string): Promise<number> {
   try {
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = createArchiveReadStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
@@ -186,14 +495,11 @@ async function countLines(filePath: string): Promise<number> {
   }
 }
 
-// Helper function to get file size in KB
+// Helper function to get file size in KB (resolves compressed variants)
 function getFileSizeInKB(filePath: string): number {
-  try {
-    const stats = fs.statSync(filePath);
-    return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
-  } catch (error) {
-    return 0;
-  }
+  const stats = statArchiveFile(filePath);
+  if (!stats) return 0;
+  return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
 }
 
 export async function formatResults(results: Array<SearchResult & { summary?: string }>): Promise<string> {
@@ -209,8 +515,10 @@ export async function formatResults(results: Array<SearchResult & { summary?: st
     const date = new Date(result.exchange.timestamp).toISOString().split('T')[0];
     const simPct = result.similarity !== undefined ? Math.round(result.similarity * 100) : null;
 
-    // Header with match percentage
-    output += `${index + 1}. [${result.exchange.project}, ${date}]`;
+    // Header with match percentage and coding agent
+    const agent = result.exchange.codingAgent || 'claude-code';
+    const agentTag = agent !== 'claude-code' ? ` @${agent}` : '';
+    output += `${index + 1}. [${result.exchange.project}, ${date}${agentTag}]`;
     if (simPct !== null) {
       output += ` - ${simPct}% match`;
     }
@@ -339,7 +647,7 @@ export async function getKnowledgeContext(
   const db = initDatabase();
 
   try {
-    const queryEmbedding = await generateEmbedding(query);
+    const queryEmbedding = await generateEmbedding(query, 'query');
     const factResults = searchSimilarFacts(db, queryEmbedding, project ?? null, limit, 0.6);
 
     if (factResults.length === 0) {

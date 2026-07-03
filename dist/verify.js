@@ -3,6 +3,7 @@ import path from 'path';
 import { parseConversation } from './parser.js';
 import { initDatabase, getAllExchanges, getFileLastIndexed } from './db.js';
 import { getArchiveDir, getExcludedProjects } from './paths.js';
+import { archiveFileExists, canonicalArchiveName, statArchiveFile } from './archive-io.js';
 export async function verifyIndex() {
     const result = {
         missing: [],
@@ -31,7 +32,11 @@ export async function verifyIndex() {
         const stat = fs.statSync(projectPath);
         if (!stat.isDirectory())
             continue;
-        const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'));
+        // Archive files may be compressed out-of-band (.jsonl.zst) — canonicalize
+        // to the .jsonl name the database stores.
+        const files = [...new Set(fs.readdirSync(projectPath)
+                .filter(f => f.endsWith('.jsonl') || f.endsWith('.jsonl.zst'))
+                .map(f => canonicalArchiveName(f)))];
         for (const file of files) {
             totalChecked++;
             if (totalChecked % 100 === 0) {
@@ -41,15 +46,15 @@ export async function verifyIndex() {
             foundFiles.add(conversationPath);
             const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
             // Check for missing summary
-            if (!fs.existsSync(summaryPath)) {
+            if (!archiveFileExists(summaryPath)) {
                 result.missing.push({ path: conversationPath, reason: 'No summary file' });
                 continue;
             }
             // Check if file is outdated (modified after last_indexed)
             const lastIndexed = getFileLastIndexed(db, conversationPath);
             if (lastIndexed !== null) {
-                const fileStat = fs.statSync(conversationPath);
-                if (fileStat.mtimeMs > lastIndexed) {
+                const fileStat = statArchiveFile(conversationPath);
+                if (fileStat && fileStat.mtimeMs > lastIndexed) {
                     result.outdated.push({
                         path: conversationPath,
                         fileTime: fileStat.mtimeMs,

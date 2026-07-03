@@ -1,22 +1,42 @@
 #!/bin/bash
 # UserPromptSubmit Hook: Inject relevant past decisions into the conversation context.
 #
-# Reads the user's prompt from stdin, searches memory-bank for related facts,
-# and prints context to stdout so Claude Code prepends it to the prompt.
+# Claude Code passes hook input as JSON on stdin:
+#   { "session_id": "...", "cwd": "...", "prompt": "...", ... }
+# The actual user prompt must be parsed from the "prompt" field — using the
+# raw stdin blob would search memory with JSON wrapping noise.
 #
-# Environment variables:
-#   CWD             - Current working directory
-#   SESSION_ID      - Current session ID
+# Plain-text stdin (manual invocation) is still accepted as the prompt itself.
 
 set -euo pipefail
 
-CWD="${CWD:-$(pwd)}"
-
-# Read the user prompt from stdin
-USER_PROMPT=""
+# Read raw stdin
+RAW_INPUT=""
 if [ ! -t 0 ]; then
-  USER_PROMPT=$(cat 2>/dev/null || true)
+  RAW_INPUT=$(cat 2>/dev/null || true)
 fi
+
+if [[ -z "$RAW_INPUT" ]]; then
+  exit 0
+fi
+
+# Parse JSON fields (prompt, cwd); fall back to raw text / env for manual runs
+PARSED=$(node -e '
+let data = "";
+process.stdin.on("data", (c) => (data += c));
+process.stdin.on("end", () => {
+  try {
+    const j = JSON.parse(data);
+    process.stdout.write(JSON.stringify({ prompt: j.prompt || "", cwd: j.cwd || "" }));
+  } catch {
+    process.stdout.write(JSON.stringify({ prompt: data, cwd: "" }));
+  }
+});' <<< "$RAW_INPUT" 2>/dev/null || echo '{"prompt":"","cwd":""}')
+
+USER_PROMPT=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).prompt)' "$PARSED" 2>/dev/null || true)
+JSON_CWD=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).cwd)' "$PARSED" 2>/dev/null || true)
+
+CWD="${JSON_CWD:-${CWD:-$(pwd)}}"
 
 if [[ -z "$USER_PROMPT" ]]; then
   exit 0

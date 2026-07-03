@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
-import { getExcludedProjects } from './paths.js';
+import { getExcludedProjects, detectCodingAgent } from './paths.js';
+import { archiveFileExists, readArchiveFile, statArchiveFile } from './archive-io.js';
 const EXCLUSION_MARKERS = [
     '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>',
     'Only use NO_INSIGHTS_FOUND',
@@ -9,7 +10,7 @@ const EXCLUSION_MARKERS = [
 ];
 function shouldSkipConversation(filePath) {
     try {
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = readArchiveFile(filePath);
         return EXCLUSION_MARKERS.some(marker => content.includes(marker));
     }
     catch (error) {
@@ -23,12 +24,14 @@ function copyIfNewer(src, dest) {
     if (!fs.existsSync(destDir)) {
         fs.mkdirSync(destDir, { recursive: true });
     }
-    // Check if destination exists and is up-to-date
-    if (fs.existsSync(dest)) {
+    // Check if destination exists and is up-to-date. The archive may have been
+    // compressed out-of-band (dest.zst) — treat a current compressed copy as
+    // up-to-date, otherwise every sync re-copies the whole history.
+    const destStat = statArchiveFile(dest);
+    if (destStat) {
         const srcStat = fs.statSync(src);
-        const destStat = fs.statSync(dest);
         if (destStat.mtimeMs >= srcStat.mtimeMs) {
-            return false; // Dest is current, skip
+            return false; // Dest (plain or compressed) is current, skip
         }
     }
     // Atomic copy: temp file + rename
@@ -63,6 +66,8 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
         summarized: 0,
         errors: []
     };
+    // Detect coding agent from source directory or use override
+    const codingAgent = options.codingAgent || detectCodingAgent(sourceDir);
     // Ensure source directory exists
     if (!fs.existsSync(sourceDir)) {
         return result;
@@ -75,7 +80,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
     const excludedProjects = getExcludedProjects();
     for (const project of projects) {
         if (excludedProjects.includes(project)) {
-            console.log("\nSkipping excluded project: " + project);
+            console.error("\nSkipping excluded project: " + project);
             continue;
         }
         const projectPath = path.join(sourceDir, project);
@@ -98,7 +103,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 // Check if this file needs a summary (whether newly copied or existing)
                 if (!options.skipSummaries) {
                     const summaryPath = destFile.replace('.jsonl', '-summary.txt');
-                    if (!fs.existsSync(summaryPath) && !shouldSkipConversation(destFile)) {
+                    if (!archiveFileExists(summaryPath) && !shouldSkipConversation(destFile)) {
                         const sessionId = extractSessionIdFromPath(destFile);
                         if (sessionId) {
                             filesToSummarize.push({ path: destFile, sessionId });
@@ -130,6 +135,8 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 const project = path.basename(path.dirname(file));
                 const exchanges = await parseConversation(file, project, file);
                 for (const exchange of exchanges) {
+                    // Tag each exchange with the coding agent
+                    exchange.codingAgent = codingAgent;
                     const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
                     const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
                     insertExchange(db, exchange, embedding, toolNames);
@@ -152,18 +159,18 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
         const summaryLimit = options.summaryLimit ?? 10;
         const toSummarize = filesToSummarize.slice(0, summaryLimit);
         const remaining = filesToSummarize.length - toSummarize.length;
-        console.log(`Generating summaries for ${toSummarize.length} conversation(s)...`);
+        console.error(`Generating summaries for ${toSummarize.length} conversation(s)...`);
         if (remaining > 0) {
-            console.log(`  (${remaining} more need summaries - will process on next sync)`);
+            console.error(`  (${remaining} more need summaries - will process on next sync)`);
         }
-        for (const { path: filePath, sessionId } of toSummarize) {
+        for (const { path: filePath } of toSummarize) {
             try {
                 const project = path.basename(path.dirname(filePath));
                 const exchanges = await parseConversation(filePath, project, filePath);
                 if (exchanges.length === 0) {
                     continue; // Skip empty conversations
                 }
-                console.log(`  Summarizing ${path.basename(filePath)} (${exchanges.length} exchanges)...`);
+                console.error(`  Summarizing ${path.basename(filePath)} (${exchanges.length} exchanges)...`);
                 const summary = await summarizeConversation(exchanges);
                 const summaryPath = filePath.replace('.jsonl', '-summary.txt');
                 fs.writeFileSync(summaryPath, summary, 'utf-8');

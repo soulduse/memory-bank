@@ -1,0 +1,6 @@
+iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
+6	4fd6799	db.ts+search.ts+repeat-detector.ts	135.17	0.930	25.63	1144	keep	int8 양자화 (dual-dtype, recall 동일, KNN 2배, 신규DB -50%)
+7	012f5d1	embeddings.ts	143.57*	0.930	21.60*	1144	keep	query 임베딩 LRU 메모 (*p50은 2-pass 메모적중 아티팩트 — 실가치는 MCP 이중임베딩 제거, hit 0.00ms)
+8	5c31580	src/search.ts	125.99	1.000	35.97	1144	keep	work-recheck C4 수정: FTS OR 6캡+half-limit 재적용 — 사용자 요구(정확도 개선)가 합성메트릭보다 우선 (anti-Goodhart)
+9	ced31de	src/search.ts+db.ts	121.36	0.980	41.70	1144	keep	FTS detail=column(2953→407MB) + 토크나이저 정렬(phrase 예외 방지) + OR DF게이트(35s 병리 제거)
+10	5edc9fe	src/search.ts	139.49	0.980	25.20	1144	keep	BM25 detail=column 병리 수정: rank예산(detail분기) + 희소토큰 AND사다리 (35s→13ms, recall 0.980)

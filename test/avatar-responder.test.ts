@@ -13,6 +13,8 @@ vi.mock('../src/llm.js', () => ({
 vi.mock('../src/embeddings.js', () => ({
   generateEmbedding: vi.fn().mockResolvedValue(new Array(384).fill(0.1)),
   initEmbeddings: vi.fn().mockResolvedValue(undefined),
+  EMBEDDING_VERSION: 2,
+  EMBEDDING_MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
 }));
 
 import { callHaiku, parseJsonResponse } from '../src/llm.js';
@@ -34,9 +36,15 @@ function initTestSchema(db: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       consolidated_count INTEGER DEFAULT 1,
       is_active BOOLEAN DEFAULT 1,
-      ontology_category_id TEXT
+      ontology_category_id TEXT,
+      fact_kr TEXT,
+      embedding_version INTEGER NOT NULL DEFAULT 2
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding float[384]
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
       id TEXT PRIMARY KEY,
       embedding float[384]
     );

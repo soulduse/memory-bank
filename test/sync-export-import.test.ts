@@ -8,6 +8,8 @@ import { suppressConsole } from './test-utils.js';
 vi.mock('../src/embeddings.js', () => ({
   generateEmbedding: vi.fn().mockResolvedValue(new Array(384).fill(0.05)),
   initEmbeddings: vi.fn().mockResolvedValue(undefined),
+  EMBEDDING_VERSION: 2,
+  EMBEDDING_MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
 }));
 
 const originalEnv = { ...process.env };

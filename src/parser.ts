@@ -1,7 +1,7 @@
-import fs from 'fs';
 import readline from 'readline';
 import { ConversationExchange, ToolCall } from './types.js';
 import crypto from 'crypto';
+import { createArchiveReadStream } from './archive-io.js';
 
 interface JSONLMessage {
   type: string;
@@ -30,7 +30,7 @@ export async function parseConversation(
   archivePath: string
 ): Promise<ConversationExchange[]> {
   const exchanges: ConversationExchange[] = [];
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = createArchiveReadStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity

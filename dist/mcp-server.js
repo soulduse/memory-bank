@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs5, exportName) {
+    function addFormats(ajv, list, fs6, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs5[f]);
+        ajv.addFormat(f, fs6[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23166,6 +23166,12 @@ function getSuperpowersDir() {
   }
   return ensureDir(dir);
 }
+function getArchiveDir() {
+  if (process.env.TEST_ARCHIVE_DIR) {
+    return ensureDir(process.env.TEST_ARCHIVE_DIR);
+  }
+  return ensureDir(path.join(getSuperpowersDir(), "conversation-archive"));
+}
 function getIndexDir() {
   return ensureDir(path.join(getSuperpowersDir(), "conversation-index"));
 }
@@ -23176,7 +23182,145 @@ function getDbPath() {
   return path.join(getIndexDir(), "db.sqlite");
 }
 
+// src/project-canon.ts
+var slugCache = /* @__PURE__ */ new Map();
+function isSlugProject(project) {
+  return typeof project === "string" && project.startsWith("-");
+}
+function slugifyPath(p) {
+  return p.replace(/[/._]/g, "-");
+}
+function canonicalizeProject(db, project) {
+  if (!project || !isSlugProject(project)) return project;
+  const cached2 = slugCache.get(project);
+  if (cached2) return cached2;
+  let resolved = project;
+  try {
+    const rows = db.prepare(`
+      SELECT cwd, COUNT(*) AS n FROM exchanges
+      WHERE project = ? AND cwd IS NOT NULL
+      GROUP BY cwd ORDER BY n DESC
+    `).all(project);
+    const exact = rows.find((r) => slugifyPath(r.cwd) === project);
+    resolved = (exact || rows[0])?.cwd ?? project;
+  } catch {
+  }
+  if (resolved !== project) slugCache.set(project, resolved);
+  return resolved;
+}
+function autoHealScopeProjects(db) {
+  let healed = 0;
+  try {
+    const probe = db.prepare(
+      "SELECT 1 FROM facts WHERE scope_type = 'project' AND scope_project LIKE '-%' LIMIT 1"
+    ).get();
+    if (!probe) return 0;
+    const slugs = db.prepare(
+      "SELECT DISTINCT scope_project AS s FROM facts WHERE scope_type = 'project' AND scope_project LIKE '-%'"
+    ).all();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    for (const { s } of slugs) {
+      const canon = canonicalizeProject(db, s);
+      if (canon && canon !== s) {
+        const r = db.prepare(
+          "UPDATE facts SET scope_project = ?, updated_at = ? WHERE scope_type = 'project' AND scope_project = ?"
+        ).run(canon, now, s);
+        healed += r.changes;
+      }
+    }
+  } catch {
+  }
+  return healed;
+}
+
+// src/embeddings.ts
+import { pipeline } from "@xenova/transformers";
+var DEFAULT_EMBEDDING_MODEL = "Xenova/multilingual-e5-small";
+var EMBEDDING_MODEL = process.env.MEMORY_BANK_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+var KNOWN_MODEL_VERSIONS = {
+  "Xenova/all-MiniLM-L6-v2": 1,
+  "Xenova/paraphrase-multilingual-MiniLM-L12-v2": 2,
+  [DEFAULT_EMBEDDING_MODEL]: 3
+};
+function modelVersion(model) {
+  const known = KNOWN_MODEL_VERSIONS[model];
+  if (known !== void 0) return known;
+  let h = 0;
+  for (let i = 0; i < model.length; i++) h = h * 31 + model.charCodeAt(i) >>> 0;
+  return 1e3 + h % 1e6;
+}
+var EMBEDDING_VERSION = modelVersion(EMBEDDING_MODEL);
+var embeddingPipeline = null;
+async function initEmbeddings() {
+  if (!embeddingPipeline) {
+    console.error(`Loading embedding model ${EMBEDDING_MODEL} (first run may take time)...`);
+    embeddingPipeline = await pipeline(
+      "feature-extraction",
+      EMBEDDING_MODEL
+    );
+    console.error("Embedding model loaded");
+  }
+}
+function applyModePrefix(text, mode) {
+  if (EMBEDDING_MODEL.toLowerCase().includes("e5")) {
+    return `${mode}: ${text}`;
+  }
+  return text;
+}
+var QUERY_EMBED_MEMO_MAX = 32;
+var queryEmbedMemo = /* @__PURE__ */ new Map();
+async function generateEmbedding(text, mode = "passage") {
+  if (mode === "query") {
+    const hit = queryEmbedMemo.get(text);
+    if (hit) {
+      queryEmbedMemo.delete(text);
+      queryEmbedMemo.set(text, hit);
+      return hit.slice();
+    }
+  }
+  if (!embeddingPipeline) {
+    await initEmbeddings();
+  }
+  const truncated = applyModePrefix(text.substring(0, 2e3), mode);
+  const output = await embeddingPipeline(truncated, {
+    pooling: "mean",
+    normalize: true
+  });
+  const embedding = Array.from(output.data);
+  if (mode === "query") {
+    queryEmbedMemo.set(text, embedding.slice());
+    if (queryEmbedMemo.size > QUERY_EMBED_MEMO_MAX) {
+      queryEmbedMemo.delete(queryEmbedMemo.keys().next().value);
+    }
+  }
+  return embedding;
+}
+
 // src/db.ts
+var VEC_INT8_SCALE = 127;
+function getVecDtype(db) {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
+  ).get();
+  if (!row?.sql) return "int8";
+  return /int8\s*\[/i.test(row.sql) ? "int8" : "float32";
+}
+function embeddingToVecBlob(embedding, dtype) {
+  if (dtype === "int8") {
+    const q2 = new Int8Array(embedding.length);
+    for (let i = 0; i < embedding.length; i++) {
+      q2[i] = Math.max(-127, Math.min(127, Math.round(embedding[i] * VEC_INT8_SCALE)));
+    }
+    return Buffer.from(q2.buffer);
+  }
+  return Buffer.from(new Float32Array(embedding).buffer);
+}
+function vecParamSql(dtype) {
+  return dtype === "int8" ? "vec_int8(?)" : "?";
+}
+function normalizeVecDistance(distance, dtype) {
+  return dtype === "int8" ? distance / VEC_INT8_SCALE : distance;
+}
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
   const columnNames = new Set(columns.map((c) => c.name));
@@ -23190,18 +23334,19 @@ function migrateSchema(db) {
     { name: "claude_version", sql: "ALTER TABLE exchanges ADD COLUMN claude_version TEXT" },
     { name: "thinking_level", sql: "ALTER TABLE exchanges ADD COLUMN thinking_level TEXT" },
     { name: "thinking_disabled", sql: "ALTER TABLE exchanges ADD COLUMN thinking_disabled BOOLEAN" },
-    { name: "thinking_triggers", sql: "ALTER TABLE exchanges ADD COLUMN thinking_triggers TEXT" }
+    { name: "thinking_triggers", sql: "ALTER TABLE exchanges ADD COLUMN thinking_triggers TEXT" },
+    { name: "coding_agent", sql: "ALTER TABLE exchanges ADD COLUMN coding_agent TEXT DEFAULT 'claude-code'" }
   ];
   let migrated = false;
   for (const migration of migrations) {
     if (!columnNames.has(migration.name)) {
-      console.log(`Migrating schema: adding ${migration.name} column...`);
+      console.error(`Migrating schema: adding ${migration.name} column...`);
       db.prepare(migration.sql).run();
       migrated = true;
     }
   }
   if (migrated) {
-    console.log("Migration complete.");
+    console.error("Migration complete.");
   }
 }
 function initDatabase() {
@@ -23214,6 +23359,7 @@ function initDatabase() {
   sqliteVec.load(db);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
+  db.pragma("recursive_triggers = ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS exchanges (
       id TEXT PRIMARY KEY,
@@ -23234,7 +23380,8 @@ function initDatabase() {
       claude_version TEXT,
       thinking_level TEXT,
       thinking_disabled BOOLEAN,
-      thinking_triggers TEXT
+      thinking_triggers TEXT,
+      coding_agent TEXT DEFAULT 'claude-code'
     )
   `);
   db.exec(`
@@ -23252,7 +23399,7 @@ function initDatabase() {
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   migrateSchema(db);
@@ -23275,10 +23422,47 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_git_branch ON exchanges(git_branch)
   `);
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_coding_agent ON exchanges(coding_agent)
+  `);
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_calls(tool_name)
   `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
+  `);
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='porter unicode61',
+      detail=column
+    )
+  `);
+  db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const hasFtsFlag = db.prepare(`SELECT 1 FROM fts_meta WHERE key='exchanges_fts_built'`).get() !== void 0;
+  if (!hasFtsFlag) {
+    const exchangesHaveRows = db.prepare("SELECT 1 FROM exchanges LIMIT 1").get() !== void 0;
+    db.prepare(`INSERT OR IGNORE INTO fts_meta(key, value) VALUES('exchanges_fts_built', ?)`).run(exchangesHaveRows ? "0" : "1");
+  }
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au AFTER UPDATE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END
   `);
   db.exec(`
     CREATE TABLE IF NOT EXISTS facts (
@@ -23326,6 +23510,18 @@ function initDatabase() {
     )
   `);
   db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding FLOAT[384]
+    )
+  `);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_domains (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -23352,6 +23548,18 @@ function initDatabase() {
   if (!factColumnNames.has("fact_kr")) {
     db.prepare("ALTER TABLE facts ADD COLUMN fact_kr TEXT").run();
   }
+  if (!factColumnNames.has("coding_agent")) {
+    db.prepare("ALTER TABLE facts ADD COLUMN coding_agent TEXT DEFAULT 'claude-code'").run();
+  }
+  if (!factColumnNames.has("embedding_version")) {
+    db.prepare("ALTER TABLE facts ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 1").run();
+  }
+  const exchangeColumns = db.prepare(
+    `SELECT name FROM pragma_table_info('exchanges')`
+  ).all();
+  if (!exchangeColumns.some((c) => c.name === "embedding_version")) {
+    db.prepare("ALTER TABLE exchanges ADD COLUMN embedding_version INTEGER NOT NULL DEFAULT 0").run();
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS ontology_relations (
       id TEXT PRIMARY KEY,
@@ -23365,33 +23573,18 @@ function initDatabase() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_source ON ontology_relations(source_fact_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_target ON ontology_relations(target_fact_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_log (
+      session_id TEXT PRIMARY KEY,
+      processed_at TEXT NOT NULL,
+      extracted INTEGER NOT NULL DEFAULT 0,
+      saved INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  autoHealScopeProjects(db);
   return db;
-}
-
-// src/embeddings.ts
-import { pipeline } from "@xenova/transformers";
-var embeddingPipeline = null;
-async function initEmbeddings() {
-  if (!embeddingPipeline) {
-    console.log("Loading embedding model (first run may take time)...");
-    embeddingPipeline = await pipeline(
-      "feature-extraction",
-      "Xenova/all-MiniLM-L6-v2"
-    );
-    console.log("Embedding model loaded");
-  }
-}
-async function generateEmbedding(text) {
-  if (!embeddingPipeline) {
-    await initEmbeddings();
-  }
-  const truncated = text.substring(0, 2e3);
-  const output = await embeddingPipeline(truncated, {
-    pooling: "mean",
-    normalize: true
-  });
-  return Array.from(output.data);
 }
 
 // src/fact-db.ts
@@ -23401,21 +23594,37 @@ function getRevisions(db, factId) {
   ).all(factId);
 }
 function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85) {
-  const vecResults = db.prepare(`
-    SELECT id, distance
-    FROM vec_facts
-    WHERE embedding MATCH ?
-    ORDER BY distance
-    LIMIT ?
-  `).all(Buffer.from(new Float32Array(embedding).buffer), limit * 2);
+  const canonProject = project ? canonicalizeProject(db, project) : project;
+  const buf = Buffer.from(new Float32Array(embedding).buffer);
+  const candidateFetch = Math.max(limit * 2, 50);
+  const fetch2 = (table) => {
+    try {
+      return db.prepare(`
+        SELECT id, distance FROM ${table}
+        WHERE embedding MATCH ?
+        ORDER BY distance
+        LIMIT ?
+      `).all(buf, candidateFetch);
+    } catch {
+      return [];
+    }
+  };
+  const best = /* @__PURE__ */ new Map();
+  for (const vr of [...fetch2("vec_facts"), ...fetch2("vec_facts_kr")]) {
+    const cur = best.get(vr.id);
+    if (cur === void 0 || vr.distance < cur) best.set(vr.id, vr.distance);
+  }
+  const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b2) => a.distance - b2.distance);
   const results = [];
-  for (const vr of vecResults) {
+  for (const vr of merged) {
     const similarity = 1 - vr.distance * vr.distance / 2;
     if (similarity < threshold) continue;
-    const row = db.prepare("SELECT * FROM facts WHERE id = ? AND is_active = 1").get(vr.id);
+    const row = db.prepare(
+      "SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?"
+    ).get(vr.id, EMBEDDING_VERSION);
     if (!row) continue;
     const fact = rowToFact(row);
-    if (project && fact.scope_type === "project" && fact.scope_project !== project) continue;
+    if (canonProject && fact.scope_type === "project" && fact.scope_project !== canonProject) continue;
     results.push({ fact, distance: vr.distance });
     if (results.length >= limit) break;
   }
@@ -23460,7 +23669,8 @@ function rowToFact(row) {
     updated_at: row["updated_at"],
     consolidated_count: row["consolidated_count"],
     is_active: Boolean(row["is_active"]),
-    ontology_category_id: row["ontology_category_id"] ?? null
+    ontology_category_id: row["ontology_category_id"] ?? null,
+    coding_agent: row["coding_agent"] ?? null
   };
 }
 
@@ -23588,8 +23798,134 @@ function rowToRelation(row) {
 }
 
 // src/search.ts
-import fs3 from "fs";
+import fs4 from "fs";
 import readline from "readline";
+
+// src/archive-io.ts
+import fs3 from "fs";
+import { Readable, Transform, pipeline as pipeline2 } from "stream";
+import * as zlib from "node:zlib";
+var ZST_SUFFIX = ".zst";
+var DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
+function maxDecompressedBytes() {
+  const parsed = parseInt(process.env.MEMORY_BANK_MAX_DECOMPRESSED_BYTES || "", 10);
+  if (Number.isFinite(parsed) && parsed > 0 && parsed <= DEFAULT_MAX_DECOMPRESSED_BYTES) {
+    return parsed;
+  }
+  return DEFAULT_MAX_DECOMPRESSED_BYTES;
+}
+var zstd = zlib;
+function resolveArchiveFile(filePath) {
+  const variant = filePath.endsWith(ZST_SUFFIX) ? filePath.slice(0, -ZST_SUFFIX.length) : filePath + ZST_SUFFIX;
+  const statOrNull = (p) => {
+    try {
+      return fs3.statSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const primary = statOrNull(filePath);
+  const secondary = statOrNull(variant);
+  if (primary && secondary) {
+    const winner = secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
+    if (winner.endsWith(ZST_SUFFIX) && !zstd.zstdDecompressSync) {
+      return winner === filePath ? variant : filePath;
+    }
+    return winner;
+  }
+  if (primary) return filePath;
+  if (secondary) return variant;
+  return null;
+}
+function createByteLimit(maxBytes) {
+  let total = 0;
+  return new Transform({
+    transform(chunk, _enc, callback) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        callback(new Error(`Decompressed archive exceeds ${maxBytes} byte limit`));
+        return;
+      }
+      callback(null, chunk);
+    }
+  });
+}
+function requireZstdSync() {
+  const decompress = zstd.zstdDecompressSync;
+  if (!decompress) {
+    throw new Error(
+      "Archive file is zstd-compressed but this Node runtime has no zstd support (need Node >= 22.15)"
+    );
+  }
+  return (buf) => decompress(buf, { maxOutputLength: maxDecompressedBytes() });
+}
+function readArchiveFile(filePath) {
+  const resolved = resolveArchiveFile(filePath);
+  if (!resolved) {
+    throw Object.assign(new Error(`ENOENT: no such file, open '${filePath}'`), { code: "ENOENT" });
+  }
+  const buf = fs3.readFileSync(resolved);
+  if (resolved.endsWith(ZST_SUFFIX)) {
+    return requireZstdSync()(buf).toString("utf-8");
+  }
+  return buf.toString("utf-8");
+}
+function createArchiveReadStream(filePath) {
+  const resolved = resolveArchiveFile(filePath);
+  if (!resolved) {
+    return fs3.createReadStream(filePath);
+  }
+  if (resolved.endsWith(ZST_SUFFIX)) {
+    if (zstd.createZstdDecompress) {
+      const source = fs3.createReadStream(resolved);
+      const decompress = zstd.createZstdDecompress();
+      const limiter = createByteLimit(maxDecompressedBytes());
+      pipeline2(source, decompress, limiter, () => {
+      });
+      return limiter;
+    }
+    const content = requireZstdSync()(fs3.readFileSync(resolved));
+    return Readable.from([content]);
+  }
+  return fs3.createReadStream(resolved);
+}
+function statArchiveFile(filePath) {
+  const resolved = resolveArchiveFile(filePath);
+  if (!resolved) return null;
+  try {
+    return fs3.statSync(resolved);
+  } catch {
+    return null;
+  }
+}
+
+// src/search.ts
+var cachedSearchDb = null;
+var cachedSearchDbPath = null;
+var cachedSearchDbIdent = null;
+function fileIdent(p) {
+  try {
+    const st = fs4.statSync(p);
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
+function getSearchDb() {
+  const p = getDbPath();
+  const ident = fileIdent(p);
+  if (cachedSearchDb && cachedSearchDb.open && cachedSearchDbPath === p && ident !== null && cachedSearchDbIdent === ident) {
+    return cachedSearchDb;
+  }
+  try {
+    cachedSearchDb?.close();
+  } catch {
+  }
+  cachedSearchDb = initDatabase();
+  cachedSearchDbPath = p;
+  cachedSearchDbIdent = fileIdent(p);
+  return cachedSearchDb;
+}
 function validateISODate(dateStr, paramName) {
   const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!isoDateRegex.test(dateStr)) {
@@ -23601,55 +23937,73 @@ function validateISODate(dateStr, paramName) {
   }
 }
 async function searchConversations(query2, options = {}) {
-  const { limit = 10, mode = "both", after, before } = options;
+  const { limit = 10, mode = "both", after, before, coding_agent } = options;
   if (after) validateISODate(after, "--after");
   if (before) validateISODate(before, "--before");
-  const db = initDatabase();
+  const db = getSearchDb();
   let results = [];
-  try {
-    const timeFilter = [];
-    const timeParams = [];
+  {
+    const filterParts = [];
+    const filterParams = [];
     if (after) {
-      timeFilter.push(`e.timestamp >= ?`);
-      timeParams.push(after);
+      filterParts.push(`e.timestamp >= ?`);
+      filterParams.push(after);
     }
     if (before) {
-      timeFilter.push(`e.timestamp <= ?`);
-      timeParams.push(before);
+      filterParts.push(`e.timestamp <= ?`);
+      filterParams.push(before);
     }
-    const timeClause = timeFilter.length > 0 ? `AND ${timeFilter.join(" AND ")}` : "";
+    if (coding_agent) {
+      filterParts.push(`e.coding_agent = ?`);
+      filterParams.push(coding_agent);
+    }
+    const timeClause = filterParts.length > 0 ? `AND ${filterParts.join(" AND ")}` : "";
+    const timeParams = filterParams;
     if (mode === "vector" || mode === "both") {
       await initEmbeddings();
-      const queryEmbedding = await generateEmbedding(query2);
-      const stmt = db.prepare(`
-        SELECT
-          e.id,
-          e.project,
-          e.timestamp,
-          e.user_message,
-          e.assistant_message,
-          e.archive_path,
-          e.line_start,
-          e.line_end,
-          vec.distance
-        FROM vec_exchanges AS vec
-        JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ?
-          AND k = ?
-          ${timeClause}
-        ORDER BY vec.distance ASC
-      `);
-      results = stmt.all(
-        Buffer.from(new Float32Array(queryEmbedding).buffer),
-        limit,
-        ...timeParams
-      );
+      const queryEmbedding = await generateEmbedding(query2, "query");
+      const vecQuery = (vecDtype2) => {
+        const stmt = db.prepare(`
+          SELECT
+            e.id,
+            e.project,
+            e.timestamp,
+            e.user_message,
+            e.assistant_message,
+            e.archive_path,
+            e.line_start,
+            e.line_end,
+            e.coding_agent,
+            vec.distance
+          FROM vec_exchanges AS vec
+          JOIN exchanges AS e ON vec.id = e.id
+          WHERE vec.embedding MATCH ${vecParamSql(vecDtype2)}
+            AND k = ?
+            AND e.embedding_version = ?
+            ${timeClause}
+          ORDER BY vec.distance ASC
+        `);
+        const rows = stmt.all(
+          embeddingToVecBlob(queryEmbedding, vecDtype2),
+          limit,
+          EMBEDDING_VERSION,
+          ...timeParams
+        );
+        for (const r of rows) r.distance = normalizeVecDistance(r.distance, vecDtype2);
+        return rows;
+      };
+      let vecDtype = getVecDtype(db);
+      try {
+        results = vecQuery(vecDtype);
+      } catch (e) {
+        const fresh = getVecDtype(db);
+        if (fresh === vecDtype) throw e;
+        vecDtype = fresh;
+        results = vecQuery(vecDtype);
+      }
     }
     if (mode === "text" || mode === "both") {
-      const escapedQuery = query2.replace(/%/g, "\\%").replace(/_/g, "\\_");
-      const likePattern = `%${escapedQuery}%`;
-      const textStmt = db.prepare(`
-        SELECT
+      const cols = `
           e.id,
           e.project,
           e.timestamp,
@@ -23658,14 +24012,155 @@ async function searchConversations(query2, options = {}) {
           e.archive_path,
           e.line_start,
           e.line_end,
-          0 as distance
-        FROM exchanges AS e
-        WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
-          ${timeClause}
-        ORDER BY e.timestamp DESC
-        LIMIT ?
-      `);
-      const textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit);
+          e.coding_agent`;
+      let textResults = [];
+      const ftsTokens = query2.split(/[^\p{L}\p{N}]+/u).map((t) => t.trim()).filter(Boolean);
+      const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(" ");
+      const MAX_FTS_TOKENS = 6;
+      const MAX_OR_TOKENS = 10;
+      let orTokens = ftsTokens;
+      if (orTokens.length > MAX_FTS_TOKENS) {
+        const uniq = [...new Set(orTokens)];
+        const identifiers = uniq.filter((t) => /\d/.test(t) || /^[A-Z]{2,4}$/.test(t));
+        const longest = uniq.sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
+        orTokens = [.../* @__PURE__ */ new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
+      }
+      let usedFts = false;
+      if (ftsExpr) {
+        try {
+          const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get();
+          if (built?.value === "1") {
+            const mkFtsStmt = timeClause ? (orderBy) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM exchanges_fts AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  WHERE exchanges_fts MATCH ?
+                    ${timeClause}
+                  ORDER BY ${orderBy.replace("rowid", "fts.rowid")}
+                  LIMIT ?
+                `) : (orderBy) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM (
+                    SELECT rowid FROM exchanges_fts
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY ${orderBy}
+                    LIMIT ?
+                  ) AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  LIMIT ?
+                `);
+            const rankedStmt = mkFtsStmt("rank");
+            const recentStmt = mkFtsStmt("rowid DESC");
+            const ftsSchema = db.prepare(
+              `SELECT sql FROM sqlite_master WHERE name='exchanges_fts'`
+            ).get()?.sql ?? "";
+            const RANK_BUDGET = /detail\s*=\s*column/i.test(ftsSchema) ? 200 : 2e4;
+            const countStmt = db.prepare(
+              `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
+            );
+            const ftsStmt = {
+              all: (expr, ...rest) => {
+                const n = countStmt.get(expr).c;
+                if (n === 0) return [];
+                const lim = rest[rest.length - 1];
+                const params = rest.slice(0, -1);
+                const stmt = n <= RANK_BUDGET ? rankedStmt : recentStmt;
+                if (timeClause) return stmt.all(expr, ...params, lim);
+                const rows = stmt.all(expr, lim, lim);
+                if (rows.length < Math.min(n, lim)) {
+                  const healStmt = db.prepare(`
+                    SELECT ${cols}, 0 as distance
+                    FROM exchanges_fts AS fts
+                    JOIN exchanges AS e ON e.rowid = fts.rowid
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY fts.rowid DESC
+                    LIMIT ?
+                  `);
+                  return healStmt.all(expr, lim);
+                }
+                return rows;
+              }
+            };
+            const orFallbackRows = (lim) => {
+              let rare = [];
+              try {
+                rare = [...new Set(orTokens)].map((t) => ({ t, df: countStmt.get(`"${t}"`).c })).filter((x2) => x2.df > 0).sort((a, b2) => a.df - b2.df).map((x2) => x2.t);
+              } catch {
+                return [];
+              }
+              const rungs = [];
+              for (let k2 = Math.min(4, rare.length); k2 >= 2; k2--) {
+                rungs.push(rare.slice(0, k2).map((t) => `"${t}"`).join(" "));
+              }
+              for (const t of rare) rungs.push(`"${t}"`);
+              const perRung = [];
+              for (const expr of rungs) {
+                if (expr === ftsExpr) continue;
+                perRung.push(ftsStmt.all(expr, ...timeParams, lim));
+                const distinct = new Set(perRung.flat().map((r) => r.id));
+                if (distinct.size >= lim * 2) break;
+              }
+              const acc = [];
+              const seen = /* @__PURE__ */ new Set();
+              const quota = Math.max(1, Math.ceil(lim / 2));
+              for (const rows of perRung) {
+                let took = 0;
+                for (const r of rows) {
+                  if (took >= quota || acc.length >= lim) break;
+                  if (!seen.has(r.id)) {
+                    seen.add(r.id);
+                    acc.push(r);
+                    took++;
+                  }
+                }
+              }
+              for (const rows of perRung) {
+                for (const r of rows) {
+                  if (acc.length >= lim) break;
+                  if (!seen.has(r.id)) {
+                    seen.add(r.id);
+                    acc.push(r);
+                  }
+                }
+              }
+              return acc;
+            };
+            if (ftsTokens.length <= MAX_FTS_TOKENS) {
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+              if (textResults.length === 0 && ftsTokens.length > 1) {
+                textResults = orFallbackRows(limit);
+              }
+            } else {
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+              if (textResults.length < limit) {
+                const orResults = orFallbackRows(limit);
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
+                  }
+                }
+              }
+            }
+            usedFts = true;
+          }
+        } catch {
+          usedFts = false;
+        }
+      }
+      if (!usedFts) {
+        const escapedQuery = query2.replace(/%/g, "\\%").replace(/_/g, "\\_");
+        const likePattern = `%${escapedQuery}%`;
+        const textStmt = db.prepare(`
+          SELECT ${cols}, 0 as distance
+          FROM exchanges AS e
+          WHERE (e.user_message LIKE ? ESCAPE '\\' OR e.assistant_message LIKE ? ESCAPE '\\')
+            ${timeClause}
+          ORDER BY e.timestamp DESC
+          LIMIT ?
+        `);
+        textResults = textStmt.all(likePattern, likePattern, ...timeParams, limit);
+      }
       if (mode === "both") {
         const seenIds = new Set(results.map((r) => r.id));
         for (const textResult of textResults) {
@@ -23677,8 +24172,6 @@ async function searchConversations(query2, options = {}) {
         results = textResults;
       }
     }
-  } finally {
-    db.close();
   }
   return results.map((row) => {
     const exchange = {
@@ -23689,12 +24182,13 @@ async function searchConversations(query2, options = {}) {
       assistantMessage: row.assistant_message,
       archivePath: row.archive_path,
       lineStart: row.line_start,
-      lineEnd: row.line_end
+      lineEnd: row.line_end,
+      codingAgent: row.coding_agent || "claude-code"
     };
     const summaryPath = row.archive_path.replace(".jsonl", "-summary.txt");
     let summary;
     try {
-      summary = fs3.readFileSync(summaryPath, "utf-8").trim();
+      summary = readArchiveFile(summaryPath).trim();
     } catch {
     }
     const snippetText = exchange.userMessage.substring(0, 200).replace(/\s+/g, " ").trim();
@@ -23709,7 +24203,7 @@ async function searchConversations(query2, options = {}) {
 }
 async function countLines(filePath) {
   try {
-    const fileStream = fs3.createReadStream(filePath);
+    const fileStream = createArchiveReadStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
@@ -23724,12 +24218,9 @@ async function countLines(filePath) {
   }
 }
 function getFileSizeInKB(filePath) {
-  try {
-    const stats = fs3.statSync(filePath);
-    return Math.round(stats.size / 1024 * 10) / 10;
-  } catch (error2) {
-    return 0;
-  }
+  const stats = statArchiveFile(filePath);
+  if (!stats) return 0;
+  return Math.round(stats.size / 1024 * 10) / 10;
 }
 async function formatResults(results) {
   if (results.length === 0) {
@@ -23742,7 +24233,9 @@ async function formatResults(results) {
     const result = results[index];
     const date3 = new Date(result.exchange.timestamp).toISOString().split("T")[0];
     const simPct = result.similarity !== void 0 ? Math.round(result.similarity * 100) : null;
-    output += `${index + 1}. [${result.exchange.project}, ${date3}]`;
+    const agent = result.exchange.codingAgent || "claude-code";
+    const agentTag = agent !== "claude-code" ? ` @${agent}` : "";
+    output += `${index + 1}. [${result.exchange.project}, ${date3}${agentTag}]`;
     if (simPct !== null) {
       output += ` - ${simPct}% match`;
     }
@@ -23814,7 +24307,7 @@ async function getKnowledgeContext(query2, project, limit = 5) {
   await initEmbeddings();
   const db = initDatabase();
   try {
-    const queryEmbedding = await generateEmbedding(query2);
+    const queryEmbedding = await generateEmbedding(query2, "query");
     const factResults = searchSimilarFacts(db, queryEmbedding, project ?? null, limit, 0.6);
     if (factResults.length === 0) {
       return { facts: [] };
@@ -25381,7 +25874,7 @@ You represent their past engineering decisions, preferences, and patterns.
 - below 0.5: not enough information`;
 async function askAvatar(db, question, project) {
   await initEmbeddings();
-  const questionEmbedding = await generateEmbedding(question);
+  const questionEmbedding = await generateEmbedding(question, "query");
   const scopeProject = project ?? null;
   const vectorResults = searchSimilarFacts(db, questionEmbedding, scopeProject, 10, 0.6);
   if (vectorResults.length === 0) {
@@ -25465,8 +25958,9 @@ async function askAvatar(db, question, project) {
 }
 
 // src/mcp-server.ts
-import fs4 from "fs";
 import path4 from "path";
+import fs5 from "fs";
+import os2 from "os";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
 var SearchInputSchema = external_exports.object({
@@ -25482,6 +25976,7 @@ var SearchInputSchema = external_exports.object({
   limit: external_exports.number().int().min(1).max(50).default(10).describe("Maximum number of results to return (default: 10)"),
   after: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be in YYYY-MM-DD format").optional().describe("Only return conversations after this date (YYYY-MM-DD format)"),
   before: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be in YYYY-MM-DD format").optional().describe("Only return conversations before this date (YYYY-MM-DD format)"),
+  coding_agent: external_exports.string().optional().describe('Filter by coding agent (e.g., "claude-code", "codex", "opencode"). Omit to search all agents.'),
   response_format: ResponseFormatEnum.default("markdown").describe(
     'Output format: "markdown" for human-readable or "json" for machine-readable (default: "markdown")'
   )
@@ -25495,6 +25990,7 @@ var SearchFactsInputSchema = external_exports.object({
   query: external_exports.string().min(2, "Query must be at least 2 characters").max(1e4, "Query too long (max 10000 chars)"),
   project: external_exports.string().max(500).optional(),
   category: external_exports.enum(["decision", "preference", "pattern", "knowledge", "constraint"]).optional(),
+  coding_agent: external_exports.string().optional().describe('Filter facts by coding agent (e.g., "claude-code", "codex")'),
   include_revisions: external_exports.boolean().default(false),
   limit: external_exports.number().int().min(1).max(50).default(10)
 }).strict();
@@ -25543,6 +26039,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: { type: "number", minimum: 1, maximum: 50, default: 10 },
             after: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
             before: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+            coding_agent: { type: "string", description: 'Filter by coding agent (e.g., "claude-code", "codex", "opencode")' },
             response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" }
           },
           required: ["query"],
@@ -25590,6 +26087,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               enum: ["decision", "preference", "pattern", "knowledge", "constraint"],
               description: "Filter by fact category"
             },
+            coding_agent: { type: "string", description: 'Filter by coding agent (e.g., "claude-code", "codex", "opencode")' },
             include_revisions: { type: "boolean", description: "Include revision history", default: false },
             limit: { type: "number", minimum: 1, maximum: 50, default: 10, description: "Max results" }
           },
@@ -25738,7 +26236,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const options = {
           limit: params.limit,
           after: params.after,
-          before: params.before
+          before: params.before,
+          coding_agent: params.coding_agent
         };
         const results = await searchMultipleConcepts(params.query, options);
         if (params.response_format === "json") {
@@ -25759,7 +26258,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           mode: params.mode,
           limit: params.limit,
           after: params.after,
-          before: params.before
+          before: params.before,
+          coding_agent: params.coding_agent
         };
         const results = await searchConversations(params.query, options);
         if (params.response_format === "json") {
@@ -25797,13 +26297,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === "read") {
       const params = ShowConversationInputSchema.parse(args);
       const resolvedPath = path4.resolve(params.path);
-      if (!resolvedPath.endsWith(".jsonl")) {
+      if (!resolvedPath.endsWith(".jsonl") && !resolvedPath.endsWith(".jsonl.zst")) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
-      if (!fs4.existsSync(resolvedPath)) {
+      const resolvedFile = resolveArchiveFile(resolvedPath);
+      if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const jsonlContent = fs4.readFileSync(resolvedPath, "utf-8");
+      const realFile = fs5.realpathSync(resolvedFile);
+      const allowedRoots = [
+        getArchiveDir(),
+        path4.join(os2.homedir(), ".claude", "projects")
+      ].map((root) => {
+        try {
+          return fs5.realpathSync(root);
+        } catch {
+          return path4.resolve(root);
+        }
+      });
+      const isAllowed = allowedRoots.some(
+        (root) => realFile === root || realFile.startsWith(root + path4.sep)
+      );
+      if (!isAllowed) {
+        throw new Error("Access denied: path is outside the conversation archive");
+      }
+      const jsonlContent = readArchiveFile(realFile);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,
@@ -25824,13 +26342,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const results = searchSimilarFacts(db, queryEmbedding, currentProject, params.limit);
-        const filtered = params.category ? results.filter((r) => r.fact.category === params.category) : results;
+        let filtered = results;
+        if (params.category) {
+          filtered = filtered.filter((r) => r.fact.category === params.category);
+        }
+        if (params.coding_agent) {
+          filtered = filtered.filter((r) => (r.fact.coding_agent || "claude-code") === params.coding_agent);
+        }
+        const agentLabel = params.coding_agent ? ` | Agent: ${params.coding_agent}` : "";
         let output = `# Facts Search Results
 
 Query: "${params.query}"
-Project: ${currentProject}
+Project: ${currentProject}${agentLabel}
 Results: ${filtered.length}
 
 `;
@@ -25848,7 +26373,8 @@ Results: ${filtered.length}
           const catName = catInfo ? catInfo.name : "";
           output += `## [${fact.category}] ${fact.fact}
 `;
-          output += `- Scope: ${fact.scope_type}${fact.scope_project ? ` (${fact.scope_project})` : ""}
+          const factAgent = fact.coding_agent || "claude-code";
+          output += `- Scope: ${fact.scope_type}${fact.scope_project ? ` (${fact.scope_project})` : ""} | Agent: ${factAgent}
 `;
           output += `- Confirmed: ${fact.consolidated_count}x | Similarity: ${similarity}
 `;
@@ -26013,7 +26539,7 @@ Results: ${filtered.length}
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const results = searchSimilarFacts(db, queryEmbedding, currentProject, params.limit, 0.5);
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No matching facts found to trace." }] };
@@ -26173,7 +26699,7 @@ _Source exchanges not available._
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const allResults = searchAllFacts(db, queryEmbedding, params.limit * 3, 0.5);
         const currentProject = params.current_project || process.cwd();
         const crossProjectResults = allResults.filter(
@@ -26221,7 +26747,7 @@ Excluding: ${currentProject}
       await initEmbeddings();
       const db = initDatabase();
       try {
-        const queryEmbedding = await generateEmbedding(params.query);
+        const queryEmbedding = await generateEmbedding(params.query, "query");
         const seedFacts = searchSimilarFacts(db, queryEmbedding, params.project ?? null, 3, 0.5);
         if (seedFacts.length === 0) {
           return { content: [{ type: "text", text: `No facts found related to "${params.query}" to start graph exploration.` }] };

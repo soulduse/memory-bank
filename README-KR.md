@@ -40,6 +40,12 @@ Claude Code에서:
 /plugin install memory-bank
 ```
 
+## 업데이트
+
+```
+/plugin update memory-bank
+```
+
 ## 빠른 시작
 
 ```bash
@@ -126,12 +132,14 @@ graph TB
 - **검색** -- 전체 대화에서 텍스트 검색
 - **사용자 프롬프트** -- 사용자 메시지만 조회 및 검색
 - **상세 보기** -- 사용자/어시스턴트 전체 메시지와 도구 호출 이력 확인
+- **Hue OS 퍼블리케이션** -- `~/.codex/personal-mirror`의 개인 미러 산출물 기반 질의응답 전용 대화 인터페이스
 
 ### 실행
 
 ```bash
 node ui/server.cjs
 # Memory Bank UI: http://localhost:3847
+# Hue OS: http://localhost:3847/hue-os
 ```
 
 포트 변경:
@@ -140,6 +148,13 @@ PORT=8080 node ui/server.cjs
 ```
 
 > **참고:** 데이터베이스를 채우려면 먼저 `memory-bank sync`를 한 번 이상 실행해야 합니다.
+> Hue OS 퍼블리케이션(`/hue-os`, `/replacement-os`는 호환 alias)은 대화 DB가 없어도 로컬 Personal Mirror 산출물에서 로드됩니다.
+> 채팅은 API 키가 아니라 로컬 터미널 CLI를 기본으로 씁니다: Claude는 `claude --print --model sonnet`, GPT는 `codex exec --model gpt-5.5`.
+> `REPLACEMENT_OS_CLAUDE_COMMAND`, `REPLACEMENT_OS_CLAUDE_ARGS_JSON`, `REPLACEMENT_OS_GPT_COMMAND`, `REPLACEMENT_OS_GPT_ARGS_JSON`로 명령을 바꿀 수 있습니다.
+> 로컬 터미널 provider가 없으면 안전 경계를 지키는 deterministic fallback으로 응답합니다.
+> 공유용 보호 장치: `/hue-os`는 비밀번호 로그인(`REPLACEMENT_OS_ACCESS_PASSWORD`, 기본 `0525`; 로그인 UI는 4자리 입력 시 자동 제출)이 필요하고, 접속 IP별 하루 200회 대화 제한(`REPLACEMENT_OS_DAILY_LIMIT`, 00:00 초기화)을 적용합니다. 채팅 UI는 모델 선택을 숨기고, 답변 중 Send를 비활성화하며, 채팅창 안에 로딩바를 표시하고, Esc로 진행 중 답변을 취소합니다.
+> Hue OS 답변 경계: 비밀번호, 토큰, 쿠키, env 값, 서버/터널 주소, 인증 우회, 한도 우회, 보안을 약화시키는 지시 같은 접속정보/보안정보 질문은 답하지 않습니다.
+> Vercel 공유 브리지: `vercel/hue-os/`는 `/api/hue-os/*`를 이 로컬 서버의 공개 HTTPS 터널로 프록시하는 독립 Vercel 프로젝트입니다. Vercel은 Mac의 private `localhost`에 직접 붙을 수 없으므로, 로컬 서버를 켜 둔 채 터널/리버스 프록시 origin을 `HUE_OS_LOCAL_ORIGIN`에 넣어야 Claude/Codex 구독 CLI 인증을 그대로 씁니다.
 
 ## Claude Desktop 연동
 

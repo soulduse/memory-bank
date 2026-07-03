@@ -13,12 +13,18 @@
 
 import { initDatabase } from '../dist/db.js';
 import { searchSimilarFacts } from '../dist/fact-db.js';
-import { generateEmbedding, initEmbeddings } from '../dist/embeddings.js';
+import { generateEmbedding, initEmbeddings, queryBaseline } from '../dist/embeddings.js';
 import { getRelatedFacts } from '../dist/ontology-db.js';
 import { detectRepeat, formatRepeatContext } from '../dist/repeat-detector.js';
 
 const TOP_K = 5;
-const SIMILARITY_THRESHOLD = 0.75;
+// Probe-baseline relevance gate (e5 scores are compressed, so absolute
+// thresholds cannot separate relevant from irrelevant). A fact is injected
+// only when sim(query, fact) exceeds the query's own background baseline by
+// this margin. Measured on KR/EN real-DB pairs: related +0.047~+0.123,
+// unrelated -0.028~-0.091; long compound "memory" facts can leak in at
+// +0.04~+0.045, so the margin sits just above that noise band.
+const BASELINE_MARGIN = 0.045;
 const MAX_CONTEXT_FACTS = 8;
 
 async function main() {
@@ -31,10 +37,16 @@ async function main() {
 
   try {
     await initEmbeddings();
-    const embedding = await generateEmbedding(userPrompt);
+    const embedding = await generateEmbedding(userPrompt, 'query');
+    const baseline = await queryBaseline(embedding);
 
     const db = initDatabase();
-    const results = searchSimilarFacts(db, embedding, project, TOP_K, SIMILARITY_THRESHOLD);
+    // threshold 0: take top-k by distance, then gate by baseline margin below
+    const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
+    const results = candidates.filter((r) => {
+      const similarity = 1 - (r.distance * r.distance) / 2;
+      return similarity - baseline >= BASELINE_MARGIN;
+    });
 
     if (results.length === 0) {
       db.close();
