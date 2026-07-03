@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolve either variant using Node's built-in zstd (Node >= 22.15), no new dependency.
 
 ### Changed
+- **FTS5 text search**: BM25-ranked full-text search (`exchanges_fts`, detail=column) replaces
+  the O(rows) LIKE full scan — recall@10 0.93 → 1.00, FTS index 2,953MB → 407MB. Query
+  tokenization aligned with the unicode61 tokenizer; identifier tokens preserved; rank
+  budget + sparse-token AND ladder to avoid BM25 pathologies.
+- **Search-path performance**: cached search DB connection (path-keyed, mtime-checked),
+  int8 vector quantization for `vec_exchanges` (dual-dtype with migration), and
+  query-embedding LRU memoization (removes double embedding per MCP search).
+- **Backfill extraction guards**: self-referential projects excluded by default
+  (`BACKFILL_EXCLUDE_PROJECTS`) and minimum-exchange filter to skip empty sessions.
 - **Fact extraction quality/cost improvements**:
   - Trivial exchanges (bare slash commands, harness artifacts, short acknowledgements)
     are filtered before LLM calls.

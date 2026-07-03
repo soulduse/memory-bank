@@ -4,11 +4,20 @@
 
 ![Memory Bank](docs/memory-bank.gif)
 
+## What's New in v1.2.0
+
+- 🆕 **`analyzing-all-conversations` skill** — new plugin skill that analyzes and organizes your ENTIRE indexed conversation history into one report, and kicks off backfill for unanalyzed sessions
+- 🆕 **`memory-bank analyze` command** — the deterministic engine behind the skill: coverage, per-project rollups, fact/domain breakdowns, monthly timeline, backfill recommendations
+- 🆕 **Transparent `.jsonl.zst` archive support** — archives compressed out-of-band keep working across every read path (no extra dependency, Node built-in zstd)
+- ⚡ **FTS5 text search** — BM25-ranked full-text search replaces the LIKE full scan (recall@10 0.93 → 1.00, FTS index 2.9GB → 407MB)
+- ⚡ **Search-path performance** — cached DB connection, int8 vector quantization (dual-dtype), query-embedding memoization
+- 🧹 **Fact extraction quality/cost controls** — trivial-exchange filtering, in-session dedup, strict confidence gating, per-session LLM call budget
+
 ## Features
 
 - **Knowledge Graph** -- Ontology classification (Domain → Category) + typed relations (INFLUENCES, SUPPORTS, SUPERSEDES, CONTRADICTS)
 - **RAG Search** -- Search results auto-enriched with related facts and ontology context
-- **Conversation Search** -- Semantic vector search across all past conversations
+- **Conversation Search** -- Semantic vector search + FTS5 (BM25) full-text search across all past conversations
 - **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the entire conversation *index* (projects, facts, domains, timeline, backfill gaps) — run `memory-bank sync` first so new conversations are indexed
 - **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations (trivial-exchange filtering, in-session dedup, confidence gating, LLM call budgeting)
 - **Fact Consolidation** -- Duplicate detection, contradiction handling, evolution tracking
@@ -199,7 +208,7 @@ Installed automatically with the plugin:
 | Skill | When it triggers | What it does |
 |-------|------------------|--------------|
 | `remembering-conversations` | "how should I...", "last time we...", stuck on a problem | Dispatches the search agent over past conversations and returns synthesized findings |
-| `analyzing-all-conversations` | "모든 대화 분석", "대화내역 정리", "analyze all conversations" | Runs `memory-bank analyze`, starts backfill for unanalyzed sessions, and produces an organized full-history report |
+| `analyzing-all-conversations` **(new in v1.2.0)** | "모든 대화 분석", "대화내역 정리", "analyze all conversations" | Runs `memory-bank analyze`, starts backfill for unanalyzed sessions, and produces an organized full-history report |
 
 ## Web UI
 
