@@ -8,7 +8,7 @@
 
 - 🆕 **`analyzing-all-conversations` skill** — new plugin skill that analyzes and organizes your ENTIRE indexed conversation history into one report, and kicks off backfill for unanalyzed sessions
 - 🆕 **`memory-bank analyze` command** — the deterministic engine behind the skill: coverage, per-project rollups, fact/domain breakdowns, monthly timeline, backfill recommendations
-- 🆕 **Transparent `.jsonl.zst` archive support** — archives compressed out-of-band keep working across every read path (no extra dependency, Node built-in zstd)
+- 🆕 **Transparent `.jsonl.zst` archive support** — archives compressed out-of-band keep working across every read path (no extra dependency; requires Node >= 22.15 for built-in zstd)
 - ⚡ **FTS5 text search** — BM25-ranked full-text search replaces the LIKE full scan (recall@10 0.93 → 1.00, FTS index 2.9GB → 407MB)
 - ⚡ **Search-path performance** — cached DB connection, int8 vector quantization (dual-dtype), query-embedding memoization
 - 🧹 **Fact extraction quality/cost controls** — trivial-exchange filtering, in-session dedup, strict confidence gating, per-session LLM call budget
@@ -25,7 +25,7 @@
 - **Cross-Project Insights** -- Find similar decisions from other projects
 - **Fact Provenance** -- Trace any fact back to its source conversation
 - **Scope Isolation** -- Project facts stay in their project, global facts are shared
-- **Compressed Archive Support** -- Transparent `.jsonl.zst` reads across every path (parser, `read` tool, search, sync, stats, verify) using Node's built-in zstd — archives compressed out-of-band keep working
+- **Compressed Archive Support** -- Transparent `.jsonl.zst` reads across every path (parser, `read` tool, search, sync, stats, verify) using Node's built-in zstd (Node >= 22.15) — archives compressed out-of-band keep working
 - **MCP Integration** -- 9 tools: `search`, `read`, `search_facts`, `search_ontology`, `ask_avatar`, `trace_fact`, `explore_graph`, `cross_project_insights`, `graph_stats`
 - **3D Visualization** -- Interactive neon-style knowledge graph with data flow animation
 - **Web UI** -- Dark-theme web interface for browsing and searching conversations
