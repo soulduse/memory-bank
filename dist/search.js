@@ -162,9 +162,15 @@ export async function searchConversations(query, options = {}) {
             // queries AND can satisfy. The OR pass caps to the longest tokens —
             // longer tokens are rarer (cheaper posting unions) and more selective
             // (better BM25 top-k).
+            // Split on ANY non-alphanumeric boundary (mirroring the unicode61
+            // tokenizer), not just whitespace: a whitespace-split token like
+            // "sqlite-vec" quoted becomes a multi-token PHRASE query after FTS
+            // tokenization, and phrase queries are unsupported under detail=column
+            // (they throw → silent LIKE fallback → seconds-long full scans).
+            // Single-token quoted terms can never form phrases.
             const ftsTokens = query
-                .split(/\s+/)
-                .map((t) => t.replace(/"/g, '').trim())
+                .split(/[^\p{L}\p{N}]+/u)
+                .map((t) => t.trim())
                 .filter(Boolean);
             const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(' ');
             const MAX_FTS_TOKENS = 6;
@@ -180,7 +186,31 @@ export async function searchConversations(query, options = {}) {
                 const longest = uniq.sort((a, b) => b.length - a.length).slice(0, MAX_FTS_TOKENS);
                 orTokens = [...new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
             }
-            const ftsOrExpr = orTokens.map((t) => `"${t}"`).join(' OR ');
+            // OR expression is built LAZILY with a document-frequency gate: ORing a
+            // very common token ("memory", "push") forces BM25 to score every one
+            // of its hundreds of thousands of matches (measured 35s on 456K rows).
+            // Tokens matching more than DF_CEILING docs are dropped from the OR set
+            // — they carry no selectivity anyway; the AND pass and the vector pass
+            // still cover them. Count probes are posting-length scans (no scoring),
+            // a few ms each, and only run when the OR pass is actually needed.
+            const DF_CEILING = 20000;
+            const buildOrExpr = () => {
+                let kept = orTokens;
+                try {
+                    const dfStmt = db.prepare(`SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`);
+                    const withDf = orTokens.map((t) => ({
+                        t,
+                        df: dfStmt.get(`"${t}"`).c,
+                    }));
+                    kept = withDf.filter((x) => x.df <= DF_CEILING).map((x) => x.t);
+                    // All tokens too common → keep the 2 rarest so OR still runs cheaply.
+                    if (kept.length === 0) {
+                        kept = withDf.sort((a, b) => a.df - b.df).slice(0, 2).map((x) => x.t);
+                    }
+                }
+                catch { /* df probe failed → use unfiltered tokens */ }
+                return kept.map((t) => `"${t}"`).join(' OR ');
+            };
             let usedFts = false;
             if (ftsExpr) {
                 try {
@@ -207,8 +237,11 @@ export async function searchConversations(query, options = {}) {
                             // Short query: AND first (precision — identical to original
                             // behavior), OR fallback only when AND matches nothing.
                             textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
-                            if (textResults.length === 0 && ftsOrExpr !== ftsExpr) {
-                                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit);
+                            if (textResults.length === 0 && ftsTokens.length > 1) {
+                                const orExpr = buildOrExpr();
+                                if (orExpr && orExpr !== ftsExpr) {
+                                    textResults = ftsStmt.all(orExpr, ...timeParams, limit);
+                                }
                             }
                         }
                         else {
@@ -222,11 +255,14 @@ export async function searchConversations(query, options = {}) {
                             // of long queries AND cannot match.
                             textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
                             if (textResults.length < limit) {
-                                const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit);
-                                const seenText = new Set(textResults.map((r) => r.id));
-                                for (const r of orResults) {
-                                    if (!seenText.has(r.id) && textResults.length < limit) {
-                                        textResults.push(r);
+                                const orExpr = buildOrExpr();
+                                if (orExpr) {
+                                    const orResults = ftsStmt.all(orExpr, ...timeParams, limit);
+                                    const seenText = new Set(textResults.map((r) => r.id));
+                                    for (const r of orResults) {
+                                        if (!seenText.has(r.id) && textResults.length < limit) {
+                                            textResults.push(r);
+                                        }
                                     }
                                 }
                             }

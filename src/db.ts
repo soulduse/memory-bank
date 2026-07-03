@@ -209,11 +209,17 @@ export function initDatabase(): Database.Database {
   // so re-indexed exchanges stay consistent). The one-time backfill of existing
   // rows is done by scripts/backfill-fts.mjs (`'rebuild'`), NOT here — keeping
   // initDatabase() cheap since it runs on every MCP/hook invocation.
+  //
+  // detail=column: token positions are not stored — search.ts only issues
+  // per-token (quoted single-term) matches, never phrase/NEAR queries, and
+  // BM25 ranking still works at column granularity. On the production DB the
+  // default detail=full index cost 2.9GB vs ~1.3GB for detail=column.
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
       user_message, assistant_message,
       content='exchanges', content_rowid='rowid',
-      tokenize='porter unicode61'
+      tokenize='porter unicode61',
+      detail=column
     )
   `);
   // Readiness flag (deterministic, not probed). For an external-content FTS5

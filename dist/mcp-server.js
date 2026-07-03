@@ -23422,7 +23422,8 @@ function initDatabase() {
     CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
       user_message, assistant_message,
       content='exchanges', content_rowid='rowid',
-      tokenize='porter unicode61'
+      tokenize='porter unicode61',
+      detail=column
     )
   `);
   db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
@@ -23901,7 +23902,7 @@ async function searchConversations(query2, options = {}) {
           e.line_end,
           e.coding_agent`;
       let textResults = [];
-      const ftsTokens = query2.split(/\s+/).map((t) => t.replace(/"/g, "").trim()).filter(Boolean);
+      const ftsTokens = query2.split(/[^\p{L}\p{N}]+/u).map((t) => t.trim()).filter(Boolean);
       const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(" ");
       const MAX_FTS_TOKENS = 6;
       const MAX_OR_TOKENS = 10;
@@ -23912,7 +23913,25 @@ async function searchConversations(query2, options = {}) {
         const longest = uniq.sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
         orTokens = [.../* @__PURE__ */ new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
       }
-      const ftsOrExpr = orTokens.map((t) => `"${t}"`).join(" OR ");
+      const DF_CEILING = 2e4;
+      const buildOrExpr = () => {
+        let kept = orTokens;
+        try {
+          const dfStmt = db.prepare(
+            `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
+          );
+          const withDf = orTokens.map((t) => ({
+            t,
+            df: dfStmt.get(`"${t}"`).c
+          }));
+          kept = withDf.filter((x2) => x2.df <= DF_CEILING).map((x2) => x2.t);
+          if (kept.length === 0) {
+            kept = withDf.sort((a, b2) => a.df - b2.df).slice(0, 2).map((x2) => x2.t);
+          }
+        } catch {
+        }
+        return kept.map((t) => `"${t}"`).join(" OR ");
+      };
       let usedFts = false;
       if (ftsExpr) {
         try {
@@ -23929,17 +23948,23 @@ async function searchConversations(query2, options = {}) {
             `);
             if (ftsTokens.length <= MAX_FTS_TOKENS) {
               textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
-              if (textResults.length === 0 && ftsOrExpr !== ftsExpr) {
-                textResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit);
+              if (textResults.length === 0 && ftsTokens.length > 1) {
+                const orExpr = buildOrExpr();
+                if (orExpr && orExpr !== ftsExpr) {
+                  textResults = ftsStmt.all(orExpr, ...timeParams, limit);
+                }
               }
             } else {
               textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
               if (textResults.length < limit) {
-                const orResults = ftsStmt.all(ftsOrExpr, ...timeParams, limit);
-                const seenText = new Set(textResults.map((r) => r.id));
-                for (const r of orResults) {
-                  if (!seenText.has(r.id) && textResults.length < limit) {
-                    textResults.push(r);
+                const orExpr = buildOrExpr();
+                if (orExpr) {
+                  const orResults = ftsStmt.all(orExpr, ...timeParams, limit);
+                  const seenText = new Set(textResults.map((r) => r.id));
+                  for (const r of orResults) {
+                    if (!seenText.has(r.id) && textResults.length < limit) {
+                      textResults.push(r);
+                    }
                   }
                 }
               }
