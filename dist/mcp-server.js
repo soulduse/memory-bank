@@ -23760,7 +23760,10 @@ var ZST_SUFFIX = ".zst";
 var DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
 function maxDecompressedBytes() {
   const parsed = parseInt(process.env.MEMORY_BANK_MAX_DECOMPRESSED_BYTES || "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_DECOMPRESSED_BYTES;
+  if (Number.isFinite(parsed) && parsed > 0 && parsed <= DEFAULT_MAX_DECOMPRESSED_BYTES) {
+    return parsed;
+  }
+  return DEFAULT_MAX_DECOMPRESSED_BYTES;
 }
 var zstd = zlib;
 function resolveArchiveFile(filePath) {

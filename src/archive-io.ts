@@ -23,7 +23,11 @@ const DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024; // 256 MiB
 
 function maxDecompressedBytes(): number {
   const parsed = parseInt(process.env.MEMORY_BANK_MAX_DECOMPRESSED_BYTES || '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_DECOMPRESSED_BYTES;
+  // Only allow tightening — raising the cap would defeat the bomb protection.
+  if (Number.isFinite(parsed) && parsed > 0 && parsed <= DEFAULT_MAX_DECOMPRESSED_BYTES) {
+    return parsed;
+  }
+  return DEFAULT_MAX_DECOMPRESSED_BYTES;
 }
 
 // Optional access: older Node runtimes don't ship zstd in node:zlib.
