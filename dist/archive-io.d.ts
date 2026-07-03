@@ -4,7 +4,10 @@ import { Readable } from 'stream';
 export declare function canonicalArchiveName(fileName: string): string;
 /**
  * Resolve the on-disk file for an archive path, trying both the plain and
- * `.zst`-compressed variants. Returns null when neither exists.
+ * `.zst`-compressed variants. When both exist the NEWER one wins (an active
+ * session may have re-synced a plain copy after compression, or the
+ * compressor may have refreshed the `.zst` after a stale plain copy).
+ * Returns null when neither exists.
  */
 export declare function resolveArchiveFile(filePath: string): string | null;
 /** Whether an archive file exists in either plain or compressed form. */

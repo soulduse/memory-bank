@@ -275,6 +275,23 @@ describe('analyze', () => {
       expect(md).toContain('## Recommendations');
     });
 
+    it('escapes pipe characters from DB-sourced values in table cells', async () => {
+      const db = new Database(dbPath);
+      createSchema(db);
+      db.prepare(`
+        INSERT INTO exchanges (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, is_sidechain, session_id)
+        VALUES ('e1', 'evil | project', '2026-06-01T00:00:00Z', 'q', 'a', ?, 1, 2, 0, 'sess-1')
+      `).run(join(testDir, 'x.jsonl'));
+      db.prepare(`INSERT INTO facts VALUES ('f1', 'Fact', 'cat | injected', 'project', 'p', 1, NULL)`).run();
+      db.close();
+
+      const report = await analyzeHistory({ dbPath });
+      const md = formatAnalysisMarkdown(report);
+      expect(md).toContain('evil \\| project');
+      expect(md).toContain('cat \\| injected');
+      expect(md).not.toContain('| evil | project |');
+    });
+
     it('renders an empty report without crashing', () => {
       const md = formatAnalysisMarkdown({
         generatedAt: '2026-07-03T00:00:00Z',

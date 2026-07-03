@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs4, exportName) {
+    function addFormats(ajv, list, fs5, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs4[f]);
+        ajv.addFormat(f, fs5[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23160,6 +23160,12 @@ function getSuperpowersDir() {
   }
   return ensureDir(dir);
 }
+function getArchiveDir() {
+  if (process.env.TEST_ARCHIVE_DIR) {
+    return ensureDir(process.env.TEST_ARCHIVE_DIR);
+  }
+  return ensureDir(path.join(getSuperpowersDir(), "conversation-archive"));
+}
 function getIndexDir() {
   return ensureDir(path.join(getSuperpowersDir(), "conversation-index"));
 }
@@ -23751,31 +23757,34 @@ import fs3 from "fs";
 import { Readable, pipeline as pipeline2 } from "stream";
 import * as zlib from "node:zlib";
 var ZST_SUFFIX = ".zst";
+var MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
 var zstd = zlib;
 function resolveArchiveFile(filePath) {
-  try {
-    fs3.accessSync(filePath);
-    return filePath;
-  } catch {
-  }
   const variant = filePath.endsWith(ZST_SUFFIX) ? filePath.slice(0, -ZST_SUFFIX.length) : filePath + ZST_SUFFIX;
-  try {
-    fs3.accessSync(variant);
-    return variant;
-  } catch {
-    return null;
+  const statOrNull = (p) => {
+    try {
+      return fs3.statSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const primary = statOrNull(filePath);
+  const secondary = statOrNull(variant);
+  if (primary && secondary) {
+    return secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
   }
-}
-function archiveFileExists(filePath) {
-  return resolveArchiveFile(filePath) !== null;
+  if (primary) return filePath;
+  if (secondary) return variant;
+  return null;
 }
 function requireZstdSync() {
-  if (!zstd.zstdDecompressSync) {
+  const decompress = zstd.zstdDecompressSync;
+  if (!decompress) {
     throw new Error(
       "Archive file is zstd-compressed but this Node runtime has no zstd support (need Node >= 22.15)"
     );
   }
-  return zstd.zstdDecompressSync;
+  return (buf) => decompress(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
 }
 function readArchiveFile(filePath) {
   const resolved = resolveArchiveFile(filePath);
@@ -25690,6 +25699,8 @@ async function askAvatar(db, question, project) {
 
 // src/mcp-server.ts
 import path4 from "path";
+import fs4 from "fs";
+import os2 from "os";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
 var SearchInputSchema = external_exports.object({
@@ -26029,10 +26040,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!resolvedPath.endsWith(".jsonl") && !resolvedPath.endsWith(".jsonl.zst")) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
-      if (!archiveFileExists(resolvedPath)) {
+      const resolvedFile = resolveArchiveFile(resolvedPath);
+      if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const jsonlContent = readArchiveFile(resolvedPath);
+      const realFile = fs4.realpathSync(resolvedFile);
+      const allowedRoots = [
+        getArchiveDir(),
+        path4.join(os2.homedir(), ".claude", "projects")
+      ].map((root) => {
+        try {
+          return fs4.realpathSync(root);
+        } catch {
+          return path4.resolve(root);
+        }
+      });
+      const isAllowed = allowedRoots.some(
+        (root) => realFile === root || realFile.startsWith(root + path4.sep)
+      );
+      if (!isAllowed) {
+        throw new Error("Access denied: path is outside the conversation archive");
+      }
+      const jsonlContent = readArchiveFile(realFile);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,

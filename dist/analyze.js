@@ -259,6 +259,13 @@ function fmtDate(iso) {
         return '-';
     return iso.slice(0, 10);
 }
+/**
+ * Escape DB-sourced text for Markdown table cells — crafted project/category
+ * names must not be able to inject fake rows or headings into the report.
+ */
+function mdCell(value) {
+    return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
 export function formatAnalysisMarkdown(report) {
     const c = report.coverage;
     const lines = [];
@@ -293,7 +300,7 @@ export function formatAnalysisMarkdown(report) {
         lines.push('| Category | Count |');
         lines.push('|----------|-------|');
         for (const row of report.facts.byCategory) {
-            lines.push(`| ${row.category} | ${row.count.toLocaleString()} |`);
+            lines.push(`| ${mdCell(row.category)} | ${row.count.toLocaleString()} |`);
         }
     }
     if (report.facts.byScope.length > 0) {
@@ -301,7 +308,7 @@ export function formatAnalysisMarkdown(report) {
         lines.push('| Scope | Count |');
         lines.push('|-------|-------|');
         for (const row of report.facts.byScope) {
-            lines.push(`| ${row.scope} | ${row.count.toLocaleString()} |`);
+            lines.push(`| ${mdCell(row.scope)} | ${row.count.toLocaleString()} |`);
         }
     }
     lines.push('');
@@ -311,7 +318,7 @@ export function formatAnalysisMarkdown(report) {
         lines.push('| Domain | Facts |');
         lines.push('|--------|-------|');
         for (const d of report.domains) {
-            lines.push(`| ${d.domain} | ${d.facts.toLocaleString()} |`);
+            lines.push(`| ${mdCell(d.domain)} | ${d.facts.toLocaleString()} |`);
         }
         lines.push('');
     }
@@ -321,7 +328,7 @@ export function formatAnalysisMarkdown(report) {
         lines.push('| Project | Conversations | Sessions | Exchanges | Facts | First | Last |');
         lines.push('|---------|---------------|----------|-----------|-------|-------|------|');
         for (const p of report.projects) {
-            lines.push(`| ${p.project} | ${p.conversations.toLocaleString()} | ${p.sessions.toLocaleString()} | ${p.exchanges.toLocaleString()} | ${p.facts.toLocaleString()} | ${fmtDate(p.firstActivity)} | ${fmtDate(p.lastActivity)} |`);
+            lines.push(`| ${mdCell(p.project)} | ${p.conversations.toLocaleString()} | ${p.sessions.toLocaleString()} | ${p.exchanges.toLocaleString()} | ${p.facts.toLocaleString()} | ${fmtDate(p.firstActivity)} | ${fmtDate(p.lastActivity)} |`);
         }
         lines.push('');
     }
@@ -331,7 +338,7 @@ export function formatAnalysisMarkdown(report) {
         lines.push('| Month | Sessions | Exchanges |');
         lines.push('|-------|----------|-----------|');
         for (const m of report.timeline) {
-            lines.push(`| ${m.month} | ${m.sessions.toLocaleString()} | ${m.exchanges.toLocaleString()} |`);
+            lines.push(`| ${mdCell(m.month)} | ${m.sessions.toLocaleString()} | ${m.exchanges.toLocaleString()} |`);
         }
         lines.push('');
     }

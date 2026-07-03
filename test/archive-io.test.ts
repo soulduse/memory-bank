@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import * as zlib from 'node:zlib';
@@ -62,6 +62,24 @@ describe('archive-io', () => {
     it('returns null when neither variant exists', () => {
       expect(resolveArchiveFile(join(testDir, 'missing.jsonl'))).toBeNull();
       expect(archiveFileExists(join(testDir, 'missing.jsonl'))).toBe(false);
+    });
+
+    it('prefers the newer variant when both exist', () => {
+      const plain = join(testDir, 'conv.jsonl');
+      const zst = plain + '.zst';
+      writeFileSync(plain, 'old');
+      writeFileSync(zst, 'new-compressed');
+      const past = new Date(Date.now() - 60_000);
+      const now = new Date();
+
+      // zst newer → zst wins
+      utimesSync(plain, past, past);
+      utimesSync(zst, now, now);
+      expect(resolveArchiveFile(plain)).toBe(zst);
+
+      // plain newer → plain wins
+      utimesSync(plain, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+      expect(resolveArchiveFile(plain)).toBe(plain);
     });
   });
 

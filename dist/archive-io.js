@@ -10,6 +10,12 @@ import * as zlib from 'node:zlib';
  * Node >= 22.15 ships zstd support in node:zlib — no extra dependency.
  */
 const ZST_SUFFIX = '.zst';
+/**
+ * Cap for in-memory decompression — a hostile high-ratio `.zst` file
+ * ("compression bomb") must not be able to exhaust process memory. Real
+ * conversation files decompress to a few MB. Node throws when exceeded.
+ */
+const MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024; // 256 MiB
 // Optional access: older Node runtimes don't ship zstd in node:zlib.
 const zstd = zlib;
 /** Strip a trailing `.zst` so archive filenames compare in canonical form. */
@@ -18,36 +24,44 @@ export function canonicalArchiveName(fileName) {
 }
 /**
  * Resolve the on-disk file for an archive path, trying both the plain and
- * `.zst`-compressed variants. Returns null when neither exists.
+ * `.zst`-compressed variants. When both exist the NEWER one wins (an active
+ * session may have re-synced a plain copy after compression, or the
+ * compressor may have refreshed the `.zst` after a stale plain copy).
+ * Returns null when neither exists.
  */
 export function resolveArchiveFile(filePath) {
-    try {
-        fs.accessSync(filePath);
-        return filePath;
-    }
-    catch {
-        // fall through to variant checks
-    }
     const variant = filePath.endsWith(ZST_SUFFIX)
         ? filePath.slice(0, -ZST_SUFFIX.length)
         : filePath + ZST_SUFFIX;
-    try {
-        fs.accessSync(variant);
+    const statOrNull = (p) => {
+        try {
+            return fs.statSync(p);
+        }
+        catch {
+            return null;
+        }
+    };
+    const primary = statOrNull(filePath);
+    const secondary = statOrNull(variant);
+    if (primary && secondary) {
+        return secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
+    }
+    if (primary)
+        return filePath;
+    if (secondary)
         return variant;
-    }
-    catch {
-        return null;
-    }
+    return null;
 }
 /** Whether an archive file exists in either plain or compressed form. */
 export function archiveFileExists(filePath) {
     return resolveArchiveFile(filePath) !== null;
 }
 function requireZstdSync() {
-    if (!zstd.zstdDecompressSync) {
+    const decompress = zstd.zstdDecompressSync;
+    if (!decompress) {
         throw new Error('Archive file is zstd-compressed but this Node runtime has no zstd support (need Node >= 22.15)');
     }
-    return zstd.zstdDecompressSync;
+    return (buf) => decompress(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
 }
 /** Read an archive file as UTF-8, transparently decompressing `.zst`. */
 export function readArchiveFile(filePath) {

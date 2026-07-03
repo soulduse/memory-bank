@@ -29,7 +29,10 @@ import { generateEmbedding, initEmbeddings } from './embeddings.js';
 import { getOntologyTree, listDomains, listCategories, getRelatedFacts } from './ontology-db.js';
 import { askAvatar } from './avatar-responder.js';
 import path from 'path';
-import { archiveFileExists, readArchiveFile } from './archive-io.js';
+import fs from 'fs';
+import os from 'os';
+import { readArchiveFile, resolveArchiveFile } from './archive-io.js';
+import { getArchiveDir } from './paths.js';
 
 // Zod Schemas for Input Validation
 
@@ -456,12 +459,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Verify file exists (plain or compressed variant)
-      if (!archiveFileExists(resolvedPath)) {
+      const resolvedFile = resolveArchiveFile(resolvedPath);
+      if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
 
+      // Confine reads to conversation storage roots — this tool must not be
+      // usable as an arbitrary-file reader (prompt-injected paths like
+      // /tmp/secret.jsonl would otherwise be readable).
+      const realFile = fs.realpathSync(resolvedFile);
+      const allowedRoots = [
+        getArchiveDir(),
+        path.join(os.homedir(), '.claude', 'projects'),
+      ].map(root => {
+        try { return fs.realpathSync(root); } catch { return path.resolve(root); }
+      });
+      const isAllowed = allowedRoots.some(
+        root => realFile === root || realFile.startsWith(root + path.sep),
+      );
+      if (!isAllowed) {
+        throw new Error('Access denied: path is outside the conversation archive');
+      }
+
       // Read and format conversation with optional line range
-      const jsonlContent = readArchiveFile(resolvedPath);
+      const jsonlContent = readArchiveFile(realFile);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,
