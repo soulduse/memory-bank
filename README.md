@@ -87,7 +87,7 @@ memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
 
 ## Full-History Analysis
 
-`memory-bank analyze` aggregates the entire conversation **index** into one report — deterministic, read-only, no LLM calls. It reports on what has been indexed into SQLite: archive files that were never synced are not visible to it, so run `memory-bank sync` first (the SessionStart hook does this automatically).
+`memory-bank analyze` aggregates the entire conversation **index** into one report — deterministic, read-only, no LLM calls. It reports on what has been indexed into SQLite: archive files that were never synced are not visible to it. The SessionStart hook syncs in the background, but that runs asynchronously — when freshness matters, run `memory-bank sync` (foreground) and let it finish before analyzing.
 
 ```bash
 memory-bank analyze                    # Markdown report to stdout
