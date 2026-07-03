@@ -9,7 +9,7 @@
 - **Knowledge Graph** -- Ontology classification (Domain → Category) + typed relations (INFLUENCES, SUPPORTS, SUPERSEDES, CONTRADICTS)
 - **RAG Search** -- Search results auto-enriched with related facts and ontology context
 - **Conversation Search** -- Semantic vector search across all past conversations
-- **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the ENTIRE archive (projects, facts, domains, timeline, backfill gaps)
+- **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the entire conversation *index* (projects, facts, domains, timeline, backfill gaps) — run `memory-bank sync` first so new conversations are indexed
 - **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations (trivial-exchange filtering, in-session dedup, confidence gating, LLM call budgeting)
 - **Fact Consolidation** -- Duplicate detection, contradiction handling, evolution tracking
 - **Graph Traversal** -- Multi-hop exploration (up to 3 hops) to trace decision chains
@@ -87,7 +87,7 @@ memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
 
 ## Full-History Analysis
 
-`memory-bank analyze` aggregates the entire conversation index into one report — deterministic, read-only, no LLM calls:
+`memory-bank analyze` aggregates the entire conversation **index** into one report — deterministic, read-only, no LLM calls. It reports on what has been indexed into SQLite: archive files that were never synced are not visible to it, so run `memory-bank sync` first (the SessionStart hook does this automatically).
 
 ```bash
 memory-bank analyze                    # Markdown report to stdout
