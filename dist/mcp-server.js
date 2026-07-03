@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs5, exportName) {
+    function addFormats(ajv, list, fs6, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs5[f]);
+        ajv.addFormat(f, fs6[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23261,7 +23261,17 @@ function applyModePrefix(text, mode) {
   }
   return text;
 }
+var QUERY_EMBED_MEMO_MAX = 32;
+var queryEmbedMemo = /* @__PURE__ */ new Map();
 async function generateEmbedding(text, mode = "passage") {
+  if (mode === "query") {
+    const hit = queryEmbedMemo.get(text);
+    if (hit) {
+      queryEmbedMemo.delete(text);
+      queryEmbedMemo.set(text, hit);
+      return hit.slice();
+    }
+  }
   if (!embeddingPipeline) {
     await initEmbeddings();
   }
@@ -23270,10 +23280,41 @@ async function generateEmbedding(text, mode = "passage") {
     pooling: "mean",
     normalize: true
   });
-  return Array.from(output.data);
+  const embedding = Array.from(output.data);
+  if (mode === "query") {
+    queryEmbedMemo.set(text, embedding.slice());
+    if (queryEmbedMemo.size > QUERY_EMBED_MEMO_MAX) {
+      queryEmbedMemo.delete(queryEmbedMemo.keys().next().value);
+    }
+  }
+  return embedding;
 }
 
 // src/db.ts
+var VEC_INT8_SCALE = 127;
+function getVecDtype(db) {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
+  ).get();
+  if (!row?.sql) return "int8";
+  return /int8\s*\[/i.test(row.sql) ? "int8" : "float32";
+}
+function embeddingToVecBlob(embedding, dtype) {
+  if (dtype === "int8") {
+    const q2 = new Int8Array(embedding.length);
+    for (let i = 0; i < embedding.length; i++) {
+      q2[i] = Math.max(-127, Math.min(127, Math.round(embedding[i] * VEC_INT8_SCALE)));
+    }
+    return Buffer.from(q2.buffer);
+  }
+  return Buffer.from(new Float32Array(embedding).buffer);
+}
+function vecParamSql(dtype) {
+  return dtype === "int8" ? "vec_int8(?)" : "?";
+}
+function normalizeVecDistance(distance, dtype) {
+  return dtype === "int8" ? distance / VEC_INT8_SCALE : distance;
+}
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
   const columnNames = new Set(columns.map((c) => c.name));
@@ -23352,7 +23393,7 @@ function initDatabase() {
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   migrateSchema(db);
@@ -23387,7 +23428,8 @@ function initDatabase() {
     CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
       user_message, assistant_message,
       content='exchanges', content_rowid='rowid',
-      tokenize='porter unicode61'
+      tokenize='porter unicode61',
+      detail=column
     )
   `);
   db.exec(`CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT)`);
@@ -23750,6 +23792,7 @@ function rowToRelation(row) {
 }
 
 // src/search.ts
+import fs4 from "fs";
 import readline from "readline";
 
 // src/archive-io.ts
@@ -23851,6 +23894,32 @@ function statArchiveFile(filePath) {
 }
 
 // src/search.ts
+var cachedSearchDb = null;
+var cachedSearchDbPath = null;
+var cachedSearchDbIdent = null;
+function fileIdent(p) {
+  try {
+    const st = fs4.statSync(p);
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
+function getSearchDb() {
+  const p = getDbPath();
+  const ident = fileIdent(p);
+  if (cachedSearchDb && cachedSearchDb.open && cachedSearchDbPath === p && ident !== null && cachedSearchDbIdent === ident) {
+    return cachedSearchDb;
+  }
+  try {
+    cachedSearchDb?.close();
+  } catch {
+  }
+  cachedSearchDb = initDatabase();
+  cachedSearchDbPath = p;
+  cachedSearchDbIdent = fileIdent(p);
+  return cachedSearchDb;
+}
 function validateISODate(dateStr, paramName) {
   const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!isoDateRegex.test(dateStr)) {
@@ -23865,9 +23934,9 @@ async function searchConversations(query2, options = {}) {
   const { limit = 10, mode = "both", after, before, coding_agent } = options;
   if (after) validateISODate(after, "--after");
   if (before) validateISODate(before, "--before");
-  const db = initDatabase();
+  const db = getSearchDb();
   let results = [];
-  try {
+  {
     const filterParts = [];
     const filterParams = [];
     if (after) {
@@ -23887,32 +23956,45 @@ async function searchConversations(query2, options = {}) {
     if (mode === "vector" || mode === "both") {
       await initEmbeddings();
       const queryEmbedding = await generateEmbedding(query2, "query");
-      const stmt = db.prepare(`
-        SELECT
-          e.id,
-          e.project,
-          e.timestamp,
-          e.user_message,
-          e.assistant_message,
-          e.archive_path,
-          e.line_start,
-          e.line_end,
-          e.coding_agent,
-          vec.distance
-        FROM vec_exchanges AS vec
-        JOIN exchanges AS e ON vec.id = e.id
-        WHERE vec.embedding MATCH ?
-          AND k = ?
-          AND e.embedding_version = ?
-          ${timeClause}
-        ORDER BY vec.distance ASC
-      `);
-      results = stmt.all(
-        Buffer.from(new Float32Array(queryEmbedding).buffer),
-        limit,
-        EMBEDDING_VERSION,
-        ...timeParams
-      );
+      const vecQuery = (vecDtype2) => {
+        const stmt = db.prepare(`
+          SELECT
+            e.id,
+            e.project,
+            e.timestamp,
+            e.user_message,
+            e.assistant_message,
+            e.archive_path,
+            e.line_start,
+            e.line_end,
+            e.coding_agent,
+            vec.distance
+          FROM vec_exchanges AS vec
+          JOIN exchanges AS e ON vec.id = e.id
+          WHERE vec.embedding MATCH ${vecParamSql(vecDtype2)}
+            AND k = ?
+            AND e.embedding_version = ?
+            ${timeClause}
+          ORDER BY vec.distance ASC
+        `);
+        const rows = stmt.all(
+          embeddingToVecBlob(queryEmbedding, vecDtype2),
+          limit,
+          EMBEDDING_VERSION,
+          ...timeParams
+        );
+        for (const r of rows) r.distance = normalizeVecDistance(r.distance, vecDtype2);
+        return rows;
+      };
+      let vecDtype = getVecDtype(db);
+      try {
+        results = vecQuery(vecDtype);
+      } catch (e) {
+        const fresh = getVecDtype(db);
+        if (fresh === vecDtype) throw e;
+        vecDtype = fresh;
+        results = vecQuery(vecDtype);
+      }
     }
     if (mode === "text" || mode === "both") {
       const cols = `
@@ -23926,22 +24008,134 @@ async function searchConversations(query2, options = {}) {
           e.line_end,
           e.coding_agent`;
       let textResults = [];
-      const ftsExpr = query2.split(/\s+/).map((t) => t.replace(/"/g, "").trim()).filter(Boolean).map((t) => `"${t}"`).join(" ");
+      const ftsTokens = query2.split(/[^\p{L}\p{N}]+/u).map((t) => t.trim()).filter(Boolean);
+      const ftsExpr = ftsTokens.map((t) => `"${t}"`).join(" ");
+      const MAX_FTS_TOKENS = 6;
+      const MAX_OR_TOKENS = 10;
+      let orTokens = ftsTokens;
+      if (orTokens.length > MAX_FTS_TOKENS) {
+        const uniq = [...new Set(orTokens)];
+        const identifiers = uniq.filter((t) => /\d/.test(t) || /^[A-Z]{2,4}$/.test(t));
+        const longest = uniq.sort((a, b2) => b2.length - a.length).slice(0, MAX_FTS_TOKENS);
+        orTokens = [.../* @__PURE__ */ new Set([...longest, ...identifiers])].slice(0, MAX_OR_TOKENS);
+      }
       let usedFts = false;
       if (ftsExpr) {
         try {
           const built = db.prepare(`SELECT value FROM fts_meta WHERE key='exchanges_fts_built'`).get();
           if (built?.value === "1") {
-            const ftsStmt = db.prepare(`
-              SELECT ${cols}, 0 as distance
-              FROM exchanges_fts AS fts
-              JOIN exchanges AS e ON e.rowid = fts.rowid
-              WHERE exchanges_fts MATCH ?
-                ${timeClause}
-              ORDER BY rank
-              LIMIT ?
-            `);
-            textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+            const mkFtsStmt = timeClause ? (orderBy) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM exchanges_fts AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  WHERE exchanges_fts MATCH ?
+                    ${timeClause}
+                  ORDER BY ${orderBy.replace("rowid", "fts.rowid")}
+                  LIMIT ?
+                `) : (orderBy) => db.prepare(`
+                  SELECT ${cols}, 0 as distance
+                  FROM (
+                    SELECT rowid FROM exchanges_fts
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY ${orderBy}
+                    LIMIT ?
+                  ) AS fts
+                  JOIN exchanges AS e ON e.rowid = fts.rowid
+                  LIMIT ?
+                `);
+            const rankedStmt = mkFtsStmt("rank");
+            const recentStmt = mkFtsStmt("rowid DESC");
+            const ftsSchema = db.prepare(
+              `SELECT sql FROM sqlite_master WHERE name='exchanges_fts'`
+            ).get()?.sql ?? "";
+            const RANK_BUDGET = /detail\s*=\s*column/i.test(ftsSchema) ? 200 : 2e4;
+            const countStmt = db.prepare(
+              `SELECT count(*) c FROM exchanges_fts WHERE exchanges_fts MATCH ?`
+            );
+            const ftsStmt = {
+              all: (expr, ...rest) => {
+                const n = countStmt.get(expr).c;
+                if (n === 0) return [];
+                const lim = rest[rest.length - 1];
+                const params = rest.slice(0, -1);
+                const stmt = n <= RANK_BUDGET ? rankedStmt : recentStmt;
+                if (timeClause) return stmt.all(expr, ...params, lim);
+                const rows = stmt.all(expr, lim, lim);
+                if (rows.length < Math.min(n, lim)) {
+                  const healStmt = db.prepare(`
+                    SELECT ${cols}, 0 as distance
+                    FROM exchanges_fts AS fts
+                    JOIN exchanges AS e ON e.rowid = fts.rowid
+                    WHERE exchanges_fts MATCH ?
+                    ORDER BY fts.rowid DESC
+                    LIMIT ?
+                  `);
+                  return healStmt.all(expr, lim);
+                }
+                return rows;
+              }
+            };
+            const orFallbackRows = (lim) => {
+              let rare = [];
+              try {
+                rare = [...new Set(orTokens)].map((t) => ({ t, df: countStmt.get(`"${t}"`).c })).filter((x2) => x2.df > 0).sort((a, b2) => a.df - b2.df).map((x2) => x2.t);
+              } catch {
+                return [];
+              }
+              const rungs = [];
+              for (let k2 = Math.min(4, rare.length); k2 >= 2; k2--) {
+                rungs.push(rare.slice(0, k2).map((t) => `"${t}"`).join(" "));
+              }
+              for (const t of rare) rungs.push(`"${t}"`);
+              const perRung = [];
+              for (const expr of rungs) {
+                if (expr === ftsExpr) continue;
+                perRung.push(ftsStmt.all(expr, ...timeParams, lim));
+                const distinct = new Set(perRung.flat().map((r) => r.id));
+                if (distinct.size >= lim * 2) break;
+              }
+              const acc = [];
+              const seen = /* @__PURE__ */ new Set();
+              const quota = Math.max(1, Math.ceil(lim / 2));
+              for (const rows of perRung) {
+                let took = 0;
+                for (const r of rows) {
+                  if (took >= quota || acc.length >= lim) break;
+                  if (!seen.has(r.id)) {
+                    seen.add(r.id);
+                    acc.push(r);
+                    took++;
+                  }
+                }
+              }
+              for (const rows of perRung) {
+                for (const r of rows) {
+                  if (acc.length >= lim) break;
+                  if (!seen.has(r.id)) {
+                    seen.add(r.id);
+                    acc.push(r);
+                  }
+                }
+              }
+              return acc;
+            };
+            if (ftsTokens.length <= MAX_FTS_TOKENS) {
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+              if (textResults.length === 0 && ftsTokens.length > 1) {
+                textResults = orFallbackRows(limit);
+              }
+            } else {
+              textResults = ftsStmt.all(ftsExpr, ...timeParams, limit);
+              if (textResults.length < limit) {
+                const orResults = orFallbackRows(limit);
+                const seenText = new Set(textResults.map((r) => r.id));
+                for (const r of orResults) {
+                  if (!seenText.has(r.id) && textResults.length < limit) {
+                    textResults.push(r);
+                  }
+                }
+              }
+            }
             usedFts = true;
           }
         } catch {
@@ -23972,8 +24166,6 @@ async function searchConversations(query2, options = {}) {
         results = textResults;
       }
     }
-  } finally {
-    db.close();
   }
   return results.map((row) => {
     const exchange = {
@@ -25724,7 +25916,7 @@ async function askAvatar(db, question, project) {
 
 // src/mcp-server.ts
 import path4 from "path";
-import fs4 from "fs";
+import fs5 from "fs";
 import os2 from "os";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
@@ -26069,13 +26261,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const realFile = fs4.realpathSync(resolvedFile);
+      const realFile = fs5.realpathSync(resolvedFile);
       const allowedRoots = [
         getArchiveDir(),
         path4.join(os2.homedir(), ".claude", "projects")
       ].map((root) => {
         try {
-          return fs4.realpathSync(root);
+          return fs5.realpathSync(root);
         } catch {
           return path4.resolve(root);
         }

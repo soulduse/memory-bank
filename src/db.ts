@@ -7,6 +7,55 @@ import { getDbPath } from './paths.js';
 import { autoHealScopeProjects } from './project-canon.js';
 import { EMBEDDING_VERSION } from './embeddings.js';
 
+// === vec_exchanges dtype support (float32 legacy / int8 quantized) ===
+// int8 quantization: q = clamp(round(x*127)). e5 embeddings are L2-normalized
+// (components ≪ 1), so 127-scaling loses <1% distance precision — measured
+// recall@10 is identical to float32 while storage is 4× smaller and KNN ~2×
+// faster. IMPORTANT: int8 L2 distances are scaled by ×127 vs float32 —
+// consumers converting distance→similarity must divide by VEC_INT8_SCALE first.
+
+export type VecDtype = 'float32' | 'int8';
+export const VEC_INT8_SCALE = 127;
+
+/**
+ * Authoritative vector dtype for vec_exchanges.
+ *
+ * Derived from the ACTUAL table schema in sqlite_master — not a metadata flag.
+ * A flag can diverge from the real schema (missing/corrupt flag on an int8
+ * table would silently send float32 params against int8 storage); parsing the
+ * declared column type cannot. Absent table ⇒ 'int8' (that is what
+ * initDatabase creates for fresh DBs).
+ */
+export function getVecDtype(db: Database.Database): VecDtype {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
+  ).get() as { sql: string } | undefined;
+  if (!row?.sql) return 'int8';
+  return /int8\s*\[/i.test(row.sql) ? 'int8' : 'float32';
+}
+
+/** Convert a float embedding to the blob matching the table dtype. */
+export function embeddingToVecBlob(embedding: number[], dtype: VecDtype): Buffer {
+  if (dtype === 'int8') {
+    const q = new Int8Array(embedding.length);
+    for (let i = 0; i < embedding.length; i++) {
+      q[i] = Math.max(-127, Math.min(127, Math.round(embedding[i] * VEC_INT8_SCALE)));
+    }
+    return Buffer.from(q.buffer);
+  }
+  return Buffer.from(new Float32Array(embedding).buffer);
+}
+
+/** SQL placeholder for a vec_exchanges MATCH/INSERT param under the dtype. */
+export function vecParamSql(dtype: VecDtype): string {
+  return dtype === 'int8' ? 'vec_int8(?)' : '?';
+}
+
+/** Normalize a vec KNN distance back to float32 scale (int8 distances are ×127). */
+export function normalizeVecDistance(distance: number, dtype: VecDtype): number {
+  return dtype === 'int8' ? distance / VEC_INT8_SCALE : distance;
+}
+
 export function migrateSchema(db: Database.Database): void {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all() as Array<{ name: string }>;
   const columnNames = new Set(columns.map(c => c.name));
@@ -103,11 +152,19 @@ export function initDatabase(): Database.Database {
     )
   `);
 
-  // Create vector search index
+  // Create vector search index.
+  //
+  // dtype: int8 quantized vectors use 4× less storage and ~2× faster KNN with
+  // no recall@10 loss (measured on a 50K-exchange benchmark: 73.6MB→18.4MB,
+  // p50 19.1ms→8.7ms, recall identical). Fresh DBs are created int8; existing
+  // float32 DBs keep float32 until scripts/migrate-vec-int8.mjs converts them.
+  // The authoritative dtype is the ACTUAL schema in sqlite_master (getVecDtype)
+  // — float32 and int8 blobs are not interchangeable, and deriving from the
+  // real schema (not a flag) makes flag/schema divergence impossible.
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
 
@@ -152,11 +209,17 @@ export function initDatabase(): Database.Database {
   // so re-indexed exchanges stay consistent). The one-time backfill of existing
   // rows is done by scripts/backfill-fts.mjs (`'rebuild'`), NOT here — keeping
   // initDatabase() cheap since it runs on every MCP/hook invocation.
+  //
+  // detail=column: token positions are not stored — search.ts only issues
+  // per-token (quoted single-term) matches, never phrase/NEAR queries, and
+  // BM25 ranking still works at column granularity. On the production DB the
+  // default detail=full index cost 2.9GB vs ~1.3GB for detail=column.
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
       user_message, assistant_message,
       content='exchanges', content_rowid='rowid',
-      tokenize='porter unicode61'
+      tokenize='porter unicode61',
+      detail=column
     )
   `);
   // Readiness flag (deterministic, not probed). For an external-content FTS5
@@ -369,67 +432,79 @@ export function insertExchange(
 ): void {
   const now = Date.now();
 
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO exchanges
-    (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
-     parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
-     thinking_level, thinking_disabled, thinking_triggers, coding_agent, embedding_version)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  // ONE transaction for exchanges + vec + tool_calls, with the dtype read
+  // INSIDE it. Two invariants depend on this:
+  //  1. No partial state: an exchanges row without its vector must never be
+  //     observable (the int8 migration snapshots/verifies by comparing the
+  //     two tables — a row committed between separate transactions would be
+  //     missed by its delta pass and lose its vector permanently).
+  //  2. dtype consistency: the migration swaps the vec table dtype under
+  //     BEGIN IMMEDIATE; reading dtype inside our own write transaction
+  //     serializes against the swap, so we can never quantize for a schema
+  //     that changed between the read and the write.
+  const insertAll = db.transaction(() => {
+    db.prepare(`
+      INSERT OR REPLACE INTO exchanges
+      (id, project, timestamp, user_message, assistant_message, archive_path, line_start, line_end, last_indexed,
+       parent_uuid, is_sidechain, session_id, cwd, git_branch, claude_version,
+       thinking_level, thinking_disabled, thinking_triggers, coding_agent, embedding_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      exchange.id,
+      exchange.project,
+      exchange.timestamp,
+      exchange.userMessage,
+      exchange.assistantMessage,
+      exchange.archivePath,
+      exchange.lineStart,
+      exchange.lineEnd,
+      now,
+      exchange.parentUuid || null,
+      exchange.isSidechain ? 1 : 0,
+      exchange.sessionId || null,
+      exchange.cwd || null,
+      exchange.gitBranch || null,
+      exchange.claudeVersion || null,
+      exchange.thinkingLevel || null,
+      exchange.thinkingDisabled ? 1 : 0,
+      exchange.thinkingTriggers || null,
+      exchange.codingAgent || 'claude-code',
+      // The embedding parameter was just generated with the current model, so
+      // stamp the current version — search filters on it and the re-embed
+      // worker must not redo freshly indexed rows.
+      EMBEDDING_VERSION
+    );
 
-  stmt.run(
-    exchange.id,
-    exchange.project,
-    exchange.timestamp,
-    exchange.userMessage,
-    exchange.assistantMessage,
-    exchange.archivePath,
-    exchange.lineStart,
-    exchange.lineEnd,
-    now,
-    exchange.parentUuid || null,
-    exchange.isSidechain ? 1 : 0,
-    exchange.sessionId || null,
-    exchange.cwd || null,
-    exchange.gitBranch || null,
-    exchange.claudeVersion || null,
-    exchange.thinkingLevel || null,
-    exchange.thinkingDisabled ? 1 : 0,
-    exchange.thinkingTriggers || null,
-    exchange.codingAgent || 'claude-code',
-    // The embedding parameter was just generated with the current model, so
-    // stamp the current version — search filters on it and the re-embed
-    // worker must not redo freshly indexed rows.
-    EMBEDDING_VERSION
-  );
+    // Vector upsert: DELETE+INSERT since virtual tables don't support REPLACE.
+    const vecDtype = getVecDtype(db);
+    db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(exchange.id);
+    db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`)
+      .run(exchange.id, embeddingToVecBlob(embedding, vecDtype));
 
-  // Insert into vector table (atomic DELETE+INSERT via transaction, since virtual tables don't support REPLACE)
-  const upsertVecExchange = db.transaction((vecId: string, buf: Buffer) => {
-    db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(vecId);
-    db.prepare('INSERT INTO vec_exchanges (id, embedding) VALUES (?, ?)').run(vecId, buf);
-  });
-  upsertVecExchange(exchange.id, Buffer.from(new Float32Array(embedding).buffer));
+    if (exchange.toolCalls && exchange.toolCalls.length > 0) {
+      const toolStmt = db.prepare(`
+        INSERT OR REPLACE INTO tool_calls
+        (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
 
-  // Insert tool calls if present
-  if (exchange.toolCalls && exchange.toolCalls.length > 0) {
-    const toolStmt = db.prepare(`
-      INSERT OR REPLACE INTO tool_calls
-      (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const toolCall of exchange.toolCalls) {
-      toolStmt.run(
-        toolCall.id,
-        toolCall.exchangeId,
-        toolCall.toolName,
-        toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null,
-        toolCall.toolResult || null,
-        toolCall.isError ? 1 : 0,
-        toolCall.timestamp
-      );
+      for (const toolCall of exchange.toolCalls) {
+        toolStmt.run(
+          toolCall.id,
+          toolCall.exchangeId,
+          toolCall.toolName,
+          toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null,
+          toolCall.toolResult || null,
+          toolCall.isError ? 1 : 0,
+          toolCall.timestamp
+        );
+      }
     }
-  }
+  });
+  // .immediate(): acquire the write lock at BEGIN, before any read — a
+  // deferred BEGIN would let the int8 migration swap commit between our reads
+  // and the lock upgrade (stale-dtype write / SQLITE_BUSY_SNAPSHOT).
+  insertAll.immediate();
 }
 
 export function getAllExchanges(db: Database.Database): Array<{ id: string; archivePath: string }> {

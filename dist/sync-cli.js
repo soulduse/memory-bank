@@ -3,6 +3,7 @@ import { getArchiveDir } from './paths.js';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
+import fs from 'fs';
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
     console.log(`
@@ -51,6 +52,55 @@ if (isBackground) {
     console.log('Sync started in background...');
     process.exit(0);
 }
+// ---- singleton lock (2026-07-02): SessionStart hook fires sync --background on EVERY
+// session start; with many concurrent sessions (auto-issue workers, QA cron, interactive)
+// detached syncs pile up unbounded (measured: 76 concurrent -> load avg 164).
+// Sync is idempotent - if one is already running, later ones can safely skip.
+const __lockDir = path.join(os.homedir(), '.claude', 'run-locks', 'memory-bank-sync.lock');
+const __pidFile = path.join(__lockDir, 'pid');
+function __pidAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (e) {
+        return !!e && e.code === 'EPERM';
+    }
+}
+function __acquireLock() {
+    try {
+        fs.mkdirSync(__lockDir, { recursive: false });
+    }
+    catch {
+        let holder = NaN;
+        try {
+            holder = parseInt(fs.readFileSync(__pidFile, 'utf8').trim(), 10);
+        }
+        catch { }
+        if (Number.isFinite(holder) && __pidAlive(holder))
+            return false;
+        try {
+            fs.rmSync(__lockDir, { recursive: true, force: true });
+            fs.mkdirSync(__lockDir, { recursive: false });
+        }
+        catch {
+            return false;
+        }
+    }
+    try {
+        fs.writeFileSync(__pidFile, String(process.pid));
+    }
+    catch { }
+    return true;
+}
+if (!__acquireLock()) {
+    console.log('Sync already running - skip (singleton lock)');
+    process.exit(0);
+}
+process.on('exit', () => { try {
+    fs.rmSync(__lockDir, { recursive: true, force: true });
+}
+catch { } });
 const sourceDir = path.join(os.homedir(), '.claude', 'projects');
 const destDir = getArchiveDir();
 console.log('Syncing conversations...');

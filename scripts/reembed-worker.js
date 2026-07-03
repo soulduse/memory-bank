@@ -19,7 +19,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { initDatabase } from '../dist/db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql } from '../dist/db.js';
 import { generateEmbedding, generateExchangeEmbedding, initEmbeddings, EMBEDDING_VERSION, EMBEDDING_MODEL } from '../dist/embeddings.js';
 import { getIndexDir } from '../dist/paths.js';
 
@@ -29,6 +29,20 @@ const MAX_EXCHANGES = maxExArg > -1 ? parseInt(process.argv[maxExArg + 1], 10) :
 const BATCH = 200;
 
 const LOCK = path.join(getIndexDir(), 'reembed.lock');
+const MIGRATE_LOCK = path.join(getIndexDir(), 'migrate-vec-int8.lock');
+
+/** int8 migration mutual exclusion — checked at start AND before every batch
+ * (the migration only checks our lock once at ITS start, so we must yield if
+ * it began after us; TOCTOU is closed from this side by the per-batch check +
+ * dtype-in-transaction serialization above). */
+function migrationActive() {
+  try {
+    const pid = parseInt(fs.readFileSync(MIGRATE_LOCK, 'utf-8'), 10);
+    if (!Number.isFinite(pid)) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch { return false; }
+}
 const LOG = path.join(getIndexDir(), 'reembed.log');
 
 function log(line) {
@@ -134,6 +148,7 @@ async function reembedExchanges(db) {
   const toolStmt = db.prepare('SELECT tool_name FROM tool_calls WHERE exchange_id = ?');
   let done = 0;
   while (done < MAX_EXCHANGES) {
+    if (migrationActive()) { log('int8 migration in progress — yielding (resume later)'); return; }
     const batch = db.prepare(`
       SELECT id, user_message, assistant_message FROM exchanges
       WHERE embedding_version != ?
@@ -145,14 +160,24 @@ async function reembedExchanges(db) {
     for (const row of batch) {
       const toolNames = toolStmt.all(row.id).map((t) => t.tool_name);
       const emb = await generateExchangeEmbedding(row.user_message, row.assistant_message, toolNames);
-      const buf = Buffer.from(new Float32Array(emb).buffer);
+      // dtype read INSIDE the write transaction: serializes against the int8
+      // migration's BEGIN IMMEDIATE swap — we can never write a blob for a
+      // schema that changed between read and write. exchanges.embedding is
+      // legacy dead weight (no reader in src/) — NULL it instead of
+      // duplicating ~1.5KB per row. last_indexed stamp: the migration's delta
+      // reconciliation depends on every vector writer stamping it.
       const tx = db.transaction(() => {
-        db.prepare('UPDATE exchanges SET embedding = ?, embedding_version = ? WHERE id = ?')
-          .run(buf, EMBEDDING_VERSION, row.id);
+        const vecDtype = getVecDtype(db);
+        const buf = embeddingToVecBlob(emb, vecDtype);
+        db.prepare('UPDATE exchanges SET embedding = NULL, embedding_version = ?, last_indexed = ? WHERE id = ?')
+          .run(EMBEDDING_VERSION, Date.now(), row.id);
         db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(row.id);
-        db.prepare('INSERT INTO vec_exchanges (id, embedding) VALUES (?, ?)').run(row.id, buf);
+        db.prepare(`INSERT INTO vec_exchanges (id, embedding) VALUES (?, ${vecParamSql(vecDtype)})`).run(row.id, buf);
       });
-      tx();
+      // .immediate(): BEGIN IMMEDIATE — the write lock is acquired BEFORE the
+      // dtype read (a deferred BEGIN would read first and let the migration
+      // swap commit before our lock upgrade → stale-dtype write / busy-snapshot).
+      tx.immediate();
       done++;
     }
     log(`exchanges: ${done}/${Math.min(total, MAX_EXCHANGES)}`);
