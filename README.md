@@ -9,12 +9,14 @@
 - **Knowledge Graph** -- Ontology classification (Domain → Category) + typed relations (INFLUENCES, SUPPORTS, SUPERSEDES, CONTRADICTS)
 - **RAG Search** -- Search results auto-enriched with related facts and ontology context
 - **Conversation Search** -- Semantic vector search across all past conversations
-- **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations
+- **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the ENTIRE archive (projects, facts, domains, timeline, backfill gaps)
+- **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations (trivial-exchange filtering, in-session dedup, confidence gating, LLM call budgeting)
 - **Fact Consolidation** -- Duplicate detection, contradiction handling, evolution tracking
 - **Graph Traversal** -- Multi-hop exploration (up to 3 hops) to trace decision chains
 - **Cross-Project Insights** -- Find similar decisions from other projects
 - **Fact Provenance** -- Trace any fact back to its source conversation
 - **Scope Isolation** -- Project facts stay in their project, global facts are shared
+- **Compressed Archive Support** -- Transparent `.jsonl.zst` reads across every path (parser, `read` tool, search, sync, stats, verify) using Node's built-in zstd — archives compressed out-of-band keep working
 - **MCP Integration** -- 9 tools: `search`, `read`, `search_facts`, `search_ontology`, `ask_avatar`, `trace_fact`, `explore_graph`, `cross_project_insights`, `graph_stats`
 - **3D Visualization** -- Interactive neon-style knowledge graph with data flow animation
 - **Web UI** -- Dark-theme web interface for browsing and searching conversations
@@ -83,9 +85,42 @@ memory-bank stats     # Index statistics
 memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
 ```
 
+## Full-History Analysis
+
+`memory-bank analyze` aggregates the entire conversation index into one report — deterministic, read-only, no LLM calls:
+
+```bash
+memory-bank analyze                    # Markdown report to stdout
+memory-bank analyze --json             # Raw JSON for scripting
+memory-bank analyze --top 30 --out ~/report.md   # Top 30 projects, saved to file
+```
+
+The report covers:
+
+| Section | Contents |
+|---------|----------|
+| Coverage | Conversations (main sessions vs agent transcripts), sessions, exchanges, date range |
+| Pipeline coverage | Fact extraction done/pending %, summary done/missing % |
+| Facts | Active/inactive counts, by category, by scope |
+| Knowledge domains | Top ontology domains by fact count |
+| Projects | Per-project rollups: conversations, sessions, exchanges, facts, activity range |
+| Timeline | Monthly session/exchange activity |
+| Recommendations | Which backfills to run to close analysis gaps |
+
+The **`analyzing-all-conversations` skill** builds on this: it runs the analysis, kicks off
+backfill for unanalyzed sessions (`scripts/backfill-extract-worker.js` — lock-protected and
+resumable), then enriches the numbers with fact/ontology search into an organized report.
+Trigger it with requests like *"모든 대화 분석"*, *"analyze all my conversations"*.
+
 ## Fact System
 
 Facts are automatically extracted at session end and consolidated at session start.
+
+Extraction quality/cost controls (v1.2.0):
+- Trivial exchanges (bare slash commands, harness artifacts, short acknowledgements) are filtered before any LLM call
+- Duplicate facts within a session are dropped across batches (normalized comparison)
+- Facts without a valid numeric confidence ≥ 0.7 are rejected
+- Long sessions cap LLM calls with evenly-spread batch sampling (`MEMORY_BANK_MAX_EXTRACT_CALLS`, default 12)
 
 | Category | Example |
 |----------|---------|
@@ -157,6 +192,15 @@ cross_project_insights --query "authentication" --current_project ./my-app
 explore_graph --query "database choice" --hops 3
 ```
 
+## Skills
+
+Installed automatically with the plugin:
+
+| Skill | When it triggers | What it does |
+|-------|------------------|--------------|
+| `remembering-conversations` | "how should I...", "last time we...", stuck on a problem | Dispatches the search agent over past conversations and returns synthesized findings |
+| `analyzing-all-conversations` | "모든 대화 분석", "대화내역 정리", "analyze all conversations" | Runs `memory-bank analyze`, starts backfill for unanalyzed sessions, and produces an organized full-history report |
+
 ## Web UI
 
 A cinematic dark-theme web interface for browsing and searching your conversation history.
@@ -223,6 +267,12 @@ export ANTHROPIC_API_KEY=your-key
 
 # Summarization model
 export MEMORY_BANK_API_MODEL=opus
+
+# Fact extraction LLM call budget per session (default: 12, evenly-spread batches)
+export MEMORY_BANK_MAX_EXTRACT_CALLS=12
+
+# Decompression cap for .zst archives (bytes; lowering only, default 256 MiB)
+export MEMORY_BANK_MAX_DECOMPRESSED_BYTES=268435456
 ```
 
 ## 3D Knowledge Graph
@@ -241,7 +291,7 @@ open docs/graph-3d.html   # Interactive 3D graph (local)
 
 ```
 ~/.config/superpowers/
-├── conversation-archive/       # Archived JSONL files
+├── conversation-archive/       # Archived JSONL files (plain or .jsonl.zst — read transparently)
 └── conversation-index/
     └── db.sqlite               # SQLite + sqlite-vec
         ├── exchanges           # Conversation data + embeddings
