@@ -14,11 +14,17 @@ import * as zlib from 'node:zlib';
 const ZST_SUFFIX = '.zst';
 
 /**
- * Cap for in-memory decompression — a hostile high-ratio `.zst` file
+ * Cap for decompressed archive bytes — a hostile high-ratio `.zst` file
  * ("compression bomb") must not be able to exhaust process memory. Real
- * conversation files decompress to a few MB. Node throws when exceeded.
+ * conversation files decompress to a few MB. Reads fail loudly when exceeded.
+ * Override (mainly for tests): MEMORY_BANK_MAX_DECOMPRESSED_BYTES.
  */
-const MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024; // 256 MiB
+const DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024; // 256 MiB
+
+function maxDecompressedBytes(): number {
+  const parsed = parseInt(process.env.MEMORY_BANK_MAX_DECOMPRESSED_BYTES || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_DECOMPRESSED_BYTES;
+}
 
 // Optional access: older Node runtimes don't ship zstd in node:zlib.
 const zstd: {
@@ -90,7 +96,7 @@ function requireZstdSync(): (buf: Buffer) => Buffer {
       'Archive file is zstd-compressed but this Node runtime has no zstd support (need Node >= 22.15)',
     );
   }
-  return (buf: Buffer) => decompress(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+  return (buf: Buffer) => decompress(buf, { maxOutputLength: maxDecompressedBytes() });
 }
 
 /** Read an archive file as UTF-8, transparently decompressing `.zst`. */
@@ -125,7 +131,7 @@ export function createArchiveReadStream(filePath: string): Readable {
       // sync path (stream constructors ignore maxOutputLength).
       const source = fs.createReadStream(resolved);
       const decompress = zstd.createZstdDecompress();
-      const limiter = createByteLimit(MAX_DECOMPRESSED_BYTES);
+      const limiter = createByteLimit(maxDecompressedBytes());
       pipeline(source, decompress, limiter, () => { /* error surfaces on the returned stream */ });
       return limiter;
     }

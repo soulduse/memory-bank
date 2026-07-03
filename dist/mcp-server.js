@@ -23757,7 +23757,11 @@ import fs3 from "fs";
 import { Readable, Transform, pipeline as pipeline2 } from "stream";
 import * as zlib from "node:zlib";
 var ZST_SUFFIX = ".zst";
-var MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
+var DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
+function maxDecompressedBytes() {
+  const parsed = parseInt(process.env.MEMORY_BANK_MAX_DECOMPRESSED_BYTES || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_DECOMPRESSED_BYTES;
+}
 var zstd = zlib;
 function resolveArchiveFile(filePath) {
   const variant = filePath.endsWith(ZST_SUFFIX) ? filePath.slice(0, -ZST_SUFFIX.length) : filePath + ZST_SUFFIX;
@@ -23801,7 +23805,7 @@ function requireZstdSync() {
       "Archive file is zstd-compressed but this Node runtime has no zstd support (need Node >= 22.15)"
     );
   }
-  return (buf) => decompress(buf, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+  return (buf) => decompress(buf, { maxOutputLength: maxDecompressedBytes() });
 }
 function readArchiveFile(filePath) {
   const resolved = resolveArchiveFile(filePath);
@@ -23823,7 +23827,7 @@ function createArchiveReadStream(filePath) {
     if (zstd.createZstdDecompress) {
       const source = fs3.createReadStream(resolved);
       const decompress = zstd.createZstdDecompress();
-      const limiter = createByteLimit(MAX_DECOMPRESSED_BYTES);
+      const limiter = createByteLimit(maxDecompressedBytes());
       pipeline2(source, decompress, limiter, () => {
       });
       return limiter;

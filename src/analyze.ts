@@ -354,7 +354,10 @@ function fmtDate(iso: string | null): string {
  * names must not be able to inject fake rows or headings into the report.
  */
 function mdCell(value: string): string {
-  return value.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+  return value
+    .replace(/\\/g, '\\\\') // backslashes first, or `\|` input re-arms the pipe
+    .replace(/\|/g, '\\|')
+    .replace(/[\r\n]+/g, ' ');
 }
 
 export function formatAnalysisMarkdown(report: AnalysisReport): string {
