@@ -23754,7 +23754,7 @@ import readline from "readline";
 
 // src/archive-io.ts
 import fs3 from "fs";
-import { Readable, pipeline as pipeline2 } from "stream";
+import { Readable, Transform, pipeline as pipeline2 } from "stream";
 import * as zlib from "node:zlib";
 var ZST_SUFFIX = ".zst";
 var MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
@@ -23771,11 +23771,28 @@ function resolveArchiveFile(filePath) {
   const primary = statOrNull(filePath);
   const secondary = statOrNull(variant);
   if (primary && secondary) {
-    return secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
+    const winner = secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
+    if (winner.endsWith(ZST_SUFFIX) && !zstd.zstdDecompressSync) {
+      return winner === filePath ? variant : filePath;
+    }
+    return winner;
   }
   if (primary) return filePath;
   if (secondary) return variant;
   return null;
+}
+function createByteLimit(maxBytes) {
+  let total = 0;
+  return new Transform({
+    transform(chunk, _enc, callback) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        callback(new Error(`Decompressed archive exceeds ${maxBytes} byte limit`));
+        return;
+      }
+      callback(null, chunk);
+    }
+  });
 }
 function requireZstdSync() {
   const decompress = zstd.zstdDecompressSync;
@@ -23806,9 +23823,10 @@ function createArchiveReadStream(filePath) {
     if (zstd.createZstdDecompress) {
       const source = fs3.createReadStream(resolved);
       const decompress = zstd.createZstdDecompress();
-      pipeline2(source, decompress, () => {
+      const limiter = createByteLimit(MAX_DECOMPRESSED_BYTES);
+      pipeline2(source, decompress, limiter, () => {
       });
-      return decompress;
+      return limiter;
     }
     const content = requireZstdSync()(fs3.readFileSync(resolved));
     return Readable.from([content]);

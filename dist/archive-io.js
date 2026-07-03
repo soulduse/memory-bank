@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { Readable, pipeline } from 'stream';
+import { Readable, Transform, pipeline } from 'stream';
 import * as zlib from 'node:zlib';
 /**
  * Transparent access to archived conversation files.
@@ -44,7 +44,13 @@ export function resolveArchiveFile(filePath) {
     const primary = statOrNull(filePath);
     const secondary = statOrNull(variant);
     if (primary && secondary) {
-        return secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
+        // Never pick a compressed variant this runtime cannot decompress —
+        // a readable (possibly staler) plain copy beats an unreadable newer one.
+        const winner = secondary.mtimeMs > primary.mtimeMs ? variant : filePath;
+        if (winner.endsWith(ZST_SUFFIX) && !zstd.zstdDecompressSync) {
+            return winner === filePath ? variant : filePath;
+        }
+        return winner;
     }
     if (primary)
         return filePath;
@@ -55,6 +61,20 @@ export function resolveArchiveFile(filePath) {
 /** Whether an archive file exists in either plain or compressed form. */
 export function archiveFileExists(filePath) {
     return resolveArchiveFile(filePath) !== null;
+}
+/** Pass-through Transform that aborts once total bytes exceed the cap. */
+function createByteLimit(maxBytes) {
+    let total = 0;
+    return new Transform({
+        transform(chunk, _enc, callback) {
+            total += chunk.length;
+            if (total > maxBytes) {
+                callback(new Error(`Decompressed archive exceeds ${maxBytes} byte limit`));
+                return;
+            }
+            callback(null, chunk);
+        },
+    });
 }
 function requireZstdSync() {
     const decompress = zstd.zstdDecompressSync;
@@ -90,12 +110,15 @@ export function createArchiveReadStream(filePath) {
             // pipeline() propagates source errors (e.g. the file being swapped by
             // the external compressor between resolve and open) to the returned
             // stream — bare .pipe() would leave them unhandled and crash.
+            // The byte limiter enforces the same decompression-bomb cap as the
+            // sync path (stream constructors ignore maxOutputLength).
             const source = fs.createReadStream(resolved);
             const decompress = zstd.createZstdDecompress();
-            pipeline(source, decompress, () => { });
-            return decompress;
+            const limiter = createByteLimit(MAX_DECOMPRESSED_BYTES);
+            pipeline(source, decompress, limiter, () => { });
+            return limiter;
         }
-        // Fallback: decompress in memory
+        // Fallback: decompress in memory (capped via maxOutputLength)
         const content = requireZstdSync()(fs.readFileSync(resolved));
         return Readable.from([content]);
     }

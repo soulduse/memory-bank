@@ -283,6 +283,7 @@ describe('analyze', () => {
         VALUES ('e1', 'evil | project', '2026-06-01T00:00:00Z', 'q', 'a', ?, 1, 2, 0, 'sess-1')
       `).run(join(testDir, 'x.jsonl'));
       db.prepare(`INSERT INTO facts VALUES ('f1', 'Fact', 'cat | injected', 'project', 'p', 1, NULL)`).run();
+      db.prepare("INSERT INTO facts VALUES ('f2', 'Fact2', 'cr' || char(13) || '## injected-heading', 'project', 'p', 1, NULL)").run();
       db.close();
 
       const report = await analyzeHistory({ dbPath });
@@ -290,6 +291,9 @@ describe('analyze', () => {
       expect(md).toContain('evil \\| project');
       expect(md).toContain('cat \\| injected');
       expect(md).not.toContain('| evil | project |');
+      // lone \r must not survive as a line break either
+      expect(md).not.toMatch(/\r/);
+      expect(md).not.toMatch(/^## injected-heading/m);
     });
 
     it('renders an empty report without crashing', () => {
