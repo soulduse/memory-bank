@@ -113,18 +113,19 @@ export function getFactsByDomain(db, domainId) {
 }
 // === Relation CRUD ===
 export function createRelation(db, sourceFactId, relationType, targetFactId, reasoning) {
-    // Idempotent on the directed PAIR (source, target), not just the triple:
-    // relation detection legitimately re-runs for the same fact
-    // (classification retries under a held-back IndexRepairError, backfill
-    // re-selection), and the LLM can flap between relation types across
-    // retries — keying on the triple would stack SUPPORTS + INFLUENCES edges
-    // for the same pair. First detection wins; later re-detections return it.
-    const existingPair = db
+    // Idempotent on the TRIPLE (source, type, target) — matching the UNIQUE
+    // index. Retries (classification re-runs under a held-back
+    // IndexRepairError, backfill re-selection) must not stack duplicate rows
+    // of the SAME type; distinct relation TYPES between the same facts remain
+    // valid, user-visible graph data (a SUPPORTS b + a CONTRADICTS b) and are
+    // deliberately NOT collapsed — an LLM type-flap across retries therefore
+    // adds at most one row per type (bounded by the 4-type enum).
+    const existing = db
         .prepare(`SELECT * FROM ontology_relations
-       WHERE source_fact_id = ? AND target_fact_id = ? LIMIT 1`)
-        .get(sourceFactId, targetFactId);
-    if (existingPair)
-        return existingPair;
+       WHERE source_fact_id = ? AND relation_type = ? AND target_fact_id = ?`)
+        .get(sourceFactId, relationType, targetFactId);
+    if (existing)
+        return existing;
     const id = randomUUID();
     const now = new Date().toISOString();
     try {
@@ -132,13 +133,17 @@ export function createRelation(db, sourceFactId, relationType, targetFactId, rea
        VALUES (?, ?, ?, ?, ?, ?)`).run(id, sourceFactId, relationType, targetFactId, reasoning ?? null, now);
     }
     catch (error) {
-        // Cross-process race: another writer inserted the pair between our check
-        // and insert — the UNIQUE index (see db.ts migration) rejects ours;
-        // return the winner instead of surfacing a duplicate-key error.
+        // Recover ONLY from the expected unique-constraint race (another process
+        // inserted the same triple between our check and insert) — any other
+        // failure (schema, CHECK violation, corruption) must surface, not be
+        // laundered into a fake winner lookup.
+        const code = error.code ?? '';
+        if (!code.startsWith('SQLITE_CONSTRAINT'))
+            throw error;
         const winner = db
             .prepare(`SELECT * FROM ontology_relations
-         WHERE source_fact_id = ? AND target_fact_id = ? LIMIT 1`)
-            .get(sourceFactId, targetFactId);
+         WHERE source_fact_id = ? AND relation_type = ? AND target_fact_id = ?`)
+            .get(sourceFactId, relationType, targetFactId);
         if (winner)
             return winner;
         throw error;

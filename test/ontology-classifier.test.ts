@@ -659,9 +659,12 @@ describe('ontology-classifier', () => {
       };
       expect(row.ontology_attempts).toBe(0); // …but infra corruption ≠ the fact's fault: no ledger burn
       expect(row.ontology_category_id).toBeNull(); // NOT parked in General/Misc
-      // vec_facts is healthy → relation edges must NOT be lost to the category-index outage,
-      // and repeated retries must NOT stack duplicates (createRelation is idempotent)
-      expect(getRelationsForFact(db, 'ir-0').length).toBe(1);
+      // vec_facts is healthy → relation edges must NOT be lost to the category-index outage.
+      // Triple-level idempotency: the exact-dup SUPPORTS retry is suppressed, while the
+      // flapped INFLUENCES stays as a valid distinct-typed edge (bounded by the type enum).
+      const rels = getRelationsForFact(db, 'ir-0');
+      expect(rels.length).toBe(2);
+      expect(new Set(rels.map((r) => r.relation_type)).size).toBe(2); // no same-type duplicates
     });
 
     it('vec table scans but rejects INSERT (wrong schema) → hard repair failure, not transient loop', async () => {
