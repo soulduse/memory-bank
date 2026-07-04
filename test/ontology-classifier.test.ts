@@ -508,25 +508,25 @@ describe('ontology-classifier', () => {
       expect(row.ontology_attempts).toBe(0);
     });
 
-    it('vec index unusable(dropped) while categories exist → refuses starved classification (transient)', async () => {
+    it('vec index unusable(dropped) while categories exist → HARD repair failure surfaces loudly', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'st-0', 'Starved', embeddingArr);
       const domain = createDomain(db, 'Existing', 'e');
       createCategory(db, domain.id, 'Existing Cat', 'c');
-      db.exec('DROP TABLE vec_categories'); // swallowed-error path: lookup AND heal both impossible
+      db.exec('DROP TABLE vec_categories'); // lookup AND heal both impossible — unrepairable from here
 
-      const result = await classifyFactsBatch(db, [
-        makeFact({ id: 'st-0', fact: 'Starved', embedding: new Float32Array(embeddingArr) }),
-      ]);
-
-      expect(result.transient).toEqual(['st-0']); // no starved LLM call, no persistence
+      // Not silent-transient (eternal re-selection) and not a content failure:
+      // a plain Error propagates so the worker logs batch-ERROR + circuit-breaks.
+      await expect(
+        classifyFactsBatch(db, [makeFact({ id: 'st-0', fact: 'Starved', embedding: new Float32Array(embeddingArr) })]),
+      ).rejects.toThrow(/repair FAILED/);
       expect(callHaiku).not.toHaveBeenCalled();
       const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('st-0') as {
         ontology_category_id: string | null;
         ontology_attempts: number;
       };
       expect(row.ontology_category_id).toBeNull();
-      expect(row.ontology_attempts).toBe(0);
+      expect(row.ontology_attempts).toBe(0); // hard failure is not the fact's fault either
     });
 
     it('STALE vec rows masking a missing category still get healed (0-hit fallback)', async () => {

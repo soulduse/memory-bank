@@ -145,7 +145,7 @@ async function healCategoryIndex(db, limit = 100) {
         // vec table unusable — nothing to heal here; report full missingness so
         // the caller refuses rather than classifying candidate-starved.
         const live = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
-        return { added: 0, purged: 0, missingRemaining: live, staleRemaining: 0 };
+        return { added: 0, purged: 0, missingRemaining: live, staleRemaining: 0, blocked: 'scan' };
     }
     const liveRows = db.prepare('SELECT id, name, description FROM ontology_categories').all();
     const liveIds = new Set(liveRows.map((r) => r.id));
@@ -158,13 +158,15 @@ async function healCategoryIndex(db, limit = 100) {
     // filters into missing candidate slots).
     const staleAll = [...indexed].filter((id) => !liveIds.has(id));
     let purged = 0;
+    let blocked = null;
     for (const id of staleAll) {
         try {
             db.prepare('DELETE FROM vec_categories WHERE id = ?').run(id);
             purged++;
         }
         catch {
-            break; // vec table unusable mid-way — stop, guard decides
+            blocked = 'purge'; // vec table write-broken mid-way — stop, guard decides
+            break;
         }
         if (purged >= limit)
             break;
@@ -179,14 +181,16 @@ async function healCategoryIndex(db, limit = 100) {
             added++;
         }
         catch {
-            break; // embedding runtime down — caller's guard goes transient
+            if (!blocked)
+                blocked = 'embed'; // runtime down — caller's guard goes transient
+            break;
         }
     }
     // missingRemaining counts EVERY live category still without a vec row
     // (embed failures AND beyond-limit backlog): purge success must never be
     // mistaken for repair success — an incomplete candidate index means
     // classification would run with some live categories invisible.
-    return { added, purged, missingRemaining: missingAll.length - added, staleRemaining: staleAll.length - purged };
+    return { added, purged, missingRemaining: missingAll.length - added, staleRemaining: staleAll.length - purged, blocked };
 }
 /**
  * Top-K category hits for a fact (empty only when the index is empty).
@@ -280,8 +284,20 @@ async function categoryHits(db, fact, k) {
                 // Partial repair must NOT unlock classification: an unindexed live
                 // category is invisible to reuse (duplicate risk), and RESIDUAL
                 // stale rows dilute the top-k window with hits the search filters
-                // away (candidate slots silently lost). Progressive runs keep
-                // healing (bounded per call) until the index is fully reconciled.
+                // away (candidate slots silently lost).
+                //
+                // Distinguish HOW it is incomplete (fail-loud, no eternal-transient
+                // laundering):
+                // - progress was made, or the embedding runtime is down → transient:
+                //   progressive runs keep healing until reconciled / runtime returns.
+                // - ZERO progress because the vec table itself rejects writes/scans →
+                //   the index is unrepairable from here; a plain Error surfaces
+                //   loudly (worker batch-ERROR log + circuit breaker; insert path
+                //   ledgers it) instead of silently re-selecting forever.
+                const progress = heal.added + heal.purged;
+                if (progress === 0 && (heal.blocked === 'purge' || heal.blocked === 'scan')) {
+                    throw new Error(`ontology category index repair FAILED (${heal.blocked}: vec_categories unwritable/unscannable; missing ${heal.missingRemaining}, stale ${heal.staleRemaining}) — manual repair required (fact ${fact.id})`);
+                }
                 throw new TransientLlmError(`category index incomplete after heal (missing ${heal.missingRemaining}, stale ${heal.staleRemaining}) — refusing candidate-starved classification (fact ${fact.id})`);
             }
             if (heal.added + heal.purged > 0) {

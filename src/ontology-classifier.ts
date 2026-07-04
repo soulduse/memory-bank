@@ -177,7 +177,7 @@ function categoryEmbeddingText(name: string, description?: string | null): strin
 async function healCategoryIndex(
   db: Database.Database,
   limit: number = 100,
-): Promise<{ added: number; purged: number; missingRemaining: number; staleRemaining: number }> {
+): Promise<{ added: number; purged: number; missingRemaining: number; staleRemaining: number; blocked: 'embed' | 'purge' | 'scan' | null }> {
   let indexed: Set<string>;
   try {
     indexed = new Set((db.prepare('SELECT id FROM vec_categories').all() as Array<{ id: string }>).map((r) => r.id));
@@ -185,7 +185,7 @@ async function healCategoryIndex(
     // vec table unusable — nothing to heal here; report full missingness so
     // the caller refuses rather than classifying candidate-starved.
     const live = (db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get() as { n: number }).n;
-    return { added: 0, purged: 0, missingRemaining: live, staleRemaining: 0 };
+    return { added: 0, purged: 0, missingRemaining: live, staleRemaining: 0, blocked: 'scan' };
   }
   const liveRows = db.prepare('SELECT id, name, description FROM ontology_categories').all() as Array<{
     id: string;
@@ -203,12 +203,14 @@ async function healCategoryIndex(
   // filters into missing candidate slots).
   const staleAll = [...indexed].filter((id) => !liveIds.has(id));
   let purged = 0;
+  let blocked: 'embed' | 'purge' | 'scan' | null = null;
   for (const id of staleAll) {
     try {
       db.prepare('DELETE FROM vec_categories WHERE id = ?').run(id);
       purged++;
     } catch {
-      break; // vec table unusable mid-way — stop, guard decides
+      blocked = 'purge'; // vec table write-broken mid-way — stop, guard decides
+      break;
     }
     if (purged >= limit) break;
   }
@@ -222,14 +224,15 @@ async function healCategoryIndex(
       upsertCategoryEmbedding(db, c.id, emb);
       added++;
     } catch {
-      break; // embedding runtime down — caller's guard goes transient
+      if (!blocked) blocked = 'embed'; // runtime down — caller's guard goes transient
+      break;
     }
   }
   // missingRemaining counts EVERY live category still without a vec row
   // (embed failures AND beyond-limit backlog): purge success must never be
   // mistaken for repair success — an incomplete candidate index means
   // classification would run with some live categories invisible.
-  return { added, purged, missingRemaining: missingAll.length - added, staleRemaining: staleAll.length - purged };
+  return { added, purged, missingRemaining: missingAll.length - added, staleRemaining: staleAll.length - purged, blocked };
 }
 
 /**
@@ -328,8 +331,22 @@ async function categoryHits(
         // Partial repair must NOT unlock classification: an unindexed live
         // category is invisible to reuse (duplicate risk), and RESIDUAL
         // stale rows dilute the top-k window with hits the search filters
-        // away (candidate slots silently lost). Progressive runs keep
-        // healing (bounded per call) until the index is fully reconciled.
+        // away (candidate slots silently lost).
+        //
+        // Distinguish HOW it is incomplete (fail-loud, no eternal-transient
+        // laundering):
+        // - progress was made, or the embedding runtime is down → transient:
+        //   progressive runs keep healing until reconciled / runtime returns.
+        // - ZERO progress because the vec table itself rejects writes/scans →
+        //   the index is unrepairable from here; a plain Error surfaces
+        //   loudly (worker batch-ERROR log + circuit breaker; insert path
+        //   ledgers it) instead of silently re-selecting forever.
+        const progress = heal.added + heal.purged;
+        if (progress === 0 && (heal.blocked === 'purge' || heal.blocked === 'scan')) {
+          throw new Error(
+            `ontology category index repair FAILED (${heal.blocked}: vec_categories unwritable/unscannable; missing ${heal.missingRemaining}, stale ${heal.staleRemaining}) — manual repair required (fact ${fact.id})`,
+          );
+        }
         throw new TransientLlmError(
           `category index incomplete after heal (missing ${heal.missingRemaining}, stale ${heal.staleRemaining}) — refusing candidate-starved classification (fact ${fact.id})`,
         );
