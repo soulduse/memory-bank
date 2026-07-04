@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { initDatabase } from '../dist/db.js';
-import { backfillClassifyBatch, MAX_CLASSIFY_ATTEMPTS } from '../dist/ontology-classifier.js';
+import { backfillClassifyBatch, parkExhaustedFacts, MAX_CLASSIFY_ATTEMPTS } from '../dist/ontology-classifier.js';
 import { getIndexDir } from '../dist/paths.js';
 
 const maxArg = process.argv.indexOf('--max');
@@ -103,6 +103,12 @@ async function main() {
   let db;
   try {
     db = initDatabase();
+    // Self-heal ledger orphans first: a crash between the MAXth attempt
+    // increment and the fallback write leaves attempts>=MAX with a NULL
+    // category — excluded from selection below yet never parked.
+    const orphansParked = parkExhaustedFacts(db);
+    if (orphansParked > 0) log(`backfill-ontology: parked ${orphansParked} ledger orphan(s) into fallback`);
+
     // Attempt ledger filter: facts that already burned MAX_CLASSIFY_ATTEMPTS
     // are parked in General/Misc by the classifier and never re-selected —
     // without this, one permanently-failing fact wastes an LLM call in every
@@ -110,10 +116,10 @@ async function main() {
     const pending = db.prepare(`
       SELECT id FROM facts
       WHERE is_active = 1 AND ontology_category_id IS NULL
-        AND COALESCE(ontology_attempts, 0) < ${MAX_CLASSIFY_ATTEMPTS}
+        AND COALESCE(ontology_attempts, 0) < ?
       ORDER BY consolidated_count DESC, created_at DESC
       LIMIT ?
-    `).all(MAX_FACTS);
+    `).all(MAX_CLASSIFY_ATTEMPTS, MAX_FACTS);
     log(`backfill-ontology: ${pending.length} facts this run (batch ${BATCH_SIZE}, concurrency ${CONCURRENCY}, relations ${DETECT_RELATIONS ? 'on' : 'off'})`);
 
     // Chunk into batches — each batch is ONE LLM call (one headless spawn).
@@ -122,7 +128,7 @@ async function main() {
       batches.push(pending.slice(i, i + BATCH_SIZE).map((row) => row.id));
     }
 
-    const totals = { classified: 0, deterministic: 0, fallback: 0, failed: 0, processed: 0 };
+    const totals = { classified: 0, deterministic: 0, fallback: 0, failed: 0, transient: 0, processed: 0 };
     const queue = [...batches];
     const workers = Array.from({ length: CONCURRENCY }, async () => {
       while (queue.length > 0) {
@@ -134,16 +140,20 @@ async function main() {
           totals.deterministic += stats.deterministic;
           totals.fallback += stats.fallback;
           totals.failed += stats.failed;
+          totals.transient += stats.transient;
         } catch (error) {
-          totals.failed += batch.length;
+          // Unexpected (non-LLM) error: facts stay NULL with attempts
+          // untouched → re-selected next run. Transient LLM failures are
+          // already ledger-exempt inside classifyFactsBatch.
+          totals.transient += batch.length;
           log(`batch of ${batch.length}: ERROR ${error instanceof Error ? error.message : error}`);
         }
         totals.processed += batch.length;
-        log(`progress: ${totals.processed}/${pending.length} (llm ${totals.classified}, deterministic ${totals.deterministic}, fallback ${totals.fallback}, failed ${totals.failed})`);
+        log(`progress: ${totals.processed}/${pending.length} (llm ${totals.classified}, deterministic ${totals.deterministic}, fallback ${totals.fallback}, failed ${totals.failed}, transient ${totals.transient})`);
       }
     });
     await Promise.all(workers);
-    log(`backfill-ontology: done this run (llm ${totals.classified}, deterministic ${totals.deterministic}, fallback ${totals.fallback}, failed ${totals.failed})`);
+    log(`backfill-ontology: done this run (llm ${totals.classified}, deterministic ${totals.deterministic}, fallback ${totals.fallback}, failed ${totals.failed}, transient ${totals.transient})`);
   } catch (error) {
     log(`backfill-ontology: FATAL ${error instanceof Error ? error.message : error}`);
   } finally {

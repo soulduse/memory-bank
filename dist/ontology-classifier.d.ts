@@ -13,6 +13,10 @@ export declare function recordOntologyAttempt(db: Database.Database, factId: str
  * the fallback rows but never wrote the fact's ontology_category_id — leaving
  * it NULL and eternally re-selected), this PERSISTS the assignment. The fact
  * stays fully searchable via vector/FTS; ontology is an overlay.
+ *
+ * Conditional write: parking only applies while the fact is still
+ * unclassified — a concurrent path that classified it successfully must
+ * never be overwritten by the fallback.
  */
 export declare function persistFallbackClassification(db: Database.Database, factId: string): {
     domainId: string;
@@ -29,21 +33,30 @@ export declare function classifyFactToOntology(db: Database.Database, fact: Fact
  * the backfill drain both slow and noisy on the proxy; batching divides the
  * spawn count by the batch size.
  *
- * Returns fact-id lists per outcome. `failed` facts have NOT had their
- * attempt recorded — that's the caller's job (backfillClassifyBatch), so the
- * ledger stays in one place.
+ * Failure taxonomy (mirrors the external-probe 3-way classification):
+ * - `failed`    — the LLM RESPONDED but produced no usable item for the fact
+ *                 (unparseable array, missing/duplicate/out-of-range index).
+ *                 These are content failures: the caller counts an attempt.
+ * - `transient` — the CALL itself failed (SDK/network/spawn). The fact is not
+ *                 the problem, so NO attempt is burned — burning attempts on
+ *                 infrastructure downtime would park innocent facts in
+ *                 General/Misc after 3 outage windows.
+ * The ledger itself is the caller's job (backfillClassifyBatch) so attempt
+ * accounting stays in one place.
  */
 export declare function classifyFactsBatch(db: Database.Database, facts: Fact[]): Promise<{
     classified: string[];
     deterministic: string[];
     failed: string[];
+    transient: string[];
 }>;
 /**
- * Backfill-facing wrapper: load facts by id, classify them as one batch,
- * record attempts for failures, and park facts that exhausted their attempts
- * in General/Misc. Relations are OFF by default for backfill (each relation
- * probe costs another LLM call; the historic corpus already has ~29K
- * relations — new-fact inserts keep detecting them).
+ * Backfill-facing wrapper: load facts by id, classify them in sub-batches,
+ * record attempts for CONTENT failures (transient call failures burn no
+ * attempt — see classifyFactsBatch), and park facts that exhausted their
+ * attempts in General/Misc. Relations are OFF by default for backfill (each
+ * relation probe costs another LLM call; the historic corpus already has
+ * ~29K relations — new-fact inserts keep detecting them).
  */
 export declare function backfillClassifyBatch(db: Database.Database, factIds: string[], opts?: {
     detectRelationsToo?: boolean;
@@ -52,7 +65,16 @@ export declare function backfillClassifyBatch(db: Database.Database, factIds: st
     deterministic: number;
     fallback: number;
     failed: number;
+    transient: number;
 }>;
+/**
+ * Self-healing sweep for ledger orphans: a crash between the MAXth attempt
+ * increment and the fallback write leaves a fact with attempts ≥ MAX but a
+ * NULL category — excluded from selection yet never parked. Run at worker
+ * startup; the conditional write in persistFallbackClassification makes this
+ * safe against races with a concurrent successful classification.
+ */
+export declare function parkExhaustedFacts(db: Database.Database): number;
 export declare function detectRelations(db: Database.Database, newFact: Fact, topK?: number): Promise<void>;
 export declare function classifyAndLinkFact(db: Database.Database, factId: string, embedding?: number[]): Promise<void>;
 export { generateEmbedding };
