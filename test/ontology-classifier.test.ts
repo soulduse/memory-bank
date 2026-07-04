@@ -637,14 +637,15 @@ describe('ontology-classifier', () => {
       db.exec('DROP TABLE vec_categories');
 
       for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS; i++) {
-        await classifyAndLinkFact(db, 'ir-0', embeddingArr); // must not throw out, must not ledger
+        // Surfaces loudly at the caller boundary (no silent success)…
+        await expect(classifyAndLinkFact(db, 'ir-0', embeddingArr)).rejects.toThrow(/repair FAILED/);
       }
 
       const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('ir-0') as {
         ontology_category_id: string | null;
         ontology_attempts: number;
       };
-      expect(row.ontology_attempts).toBe(0); // infra corruption ≠ the fact's fault
+      expect(row.ontology_attempts).toBe(0); // …but infra corruption ≠ the fact's fault: no ledger burn
       expect(row.ontology_category_id).toBeNull(); // NOT parked in General/Misc
     });
 

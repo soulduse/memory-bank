@@ -845,10 +845,16 @@ export async function classifyAndLinkFact(
     // path: an outage is not the fact's fault, and mixing the two would let
     // one transient hiccup push a fact with prior content failures over the
     // parking cap.
-    if (!(error instanceof TransientLlmError) && !(error instanceof IndexRepairError)) {
-      // IndexRepairError is infra corruption — parking innocent facts in
-      // General/Misc because the INDEX is broken would misfile them; the
-      // error is already surfaced loudly above.
+    if (error instanceof IndexRepairError) {
+      // Infra corruption: no ledger burn (parking innocent facts in
+      // General/Misc because the INDEX is broken would misfile them), but it
+      // must not dissolve into silent success either — RETHROW so live
+      // insert callers see the failure at their boundary (fact-extractor
+      // logs it loudly and continues extraction; the overlay stays NULL and
+      // the backfill resumes once the index is repaired).
+      throw error;
+    }
+    if (!(error instanceof TransientLlmError)) {
       try {
         const attempts = recordOntologyAttempt(db, factId);
         if (attempts >= MAX_CLASSIFY_ATTEMPTS) {
