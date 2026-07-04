@@ -113,10 +113,36 @@ export function getFactsByDomain(db, domainId) {
 }
 // === Relation CRUD ===
 export function createRelation(db, sourceFactId, relationType, targetFactId, reasoning) {
+    // Idempotent on the directed PAIR (source, target), not just the triple:
+    // relation detection legitimately re-runs for the same fact
+    // (classification retries under a held-back IndexRepairError, backfill
+    // re-selection), and the LLM can flap between relation types across
+    // retries — keying on the triple would stack SUPPORTS + INFLUENCES edges
+    // for the same pair. First detection wins; later re-detections return it.
+    const existingPair = db
+        .prepare(`SELECT * FROM ontology_relations
+       WHERE source_fact_id = ? AND target_fact_id = ? LIMIT 1`)
+        .get(sourceFactId, targetFactId);
+    if (existingPair)
+        return existingPair;
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.prepare(`INSERT INTO ontology_relations (id, source_fact_id, relation_type, target_fact_id, reasoning, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`).run(id, sourceFactId, relationType, targetFactId, reasoning ?? null, now);
+    try {
+        db.prepare(`INSERT INTO ontology_relations (id, source_fact_id, relation_type, target_fact_id, reasoning, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`).run(id, sourceFactId, relationType, targetFactId, reasoning ?? null, now);
+    }
+    catch (error) {
+        // Cross-process race: another writer inserted the pair between our check
+        // and insert — the UNIQUE index (see db.ts migration) rejects ours;
+        // return the winner instead of surfacing a duplicate-key error.
+        const winner = db
+            .prepare(`SELECT * FROM ontology_relations
+         WHERE source_fact_id = ? AND target_fact_id = ? LIMIT 1`)
+            .get(sourceFactId, targetFactId);
+        if (winner)
+            return winner;
+        throw error;
+    }
     return {
         id,
         source_fact_id: sourceFactId,

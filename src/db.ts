@@ -410,6 +410,24 @@ export function initDatabase(): Database.Database {
     )
   `);
 
+  // Relation dedup + cross-process uniqueness (idempotent migration).
+  // App-level check-then-insert alone cannot stop two PROCESSES from
+  // double-writing the same directed pair; a UNIQUE index closes that race.
+  // Historic duplicates (same source/target pair written repeatedly by
+  // pre-idempotency retries) are collapsed to the earliest row first —
+  // derived LLM overlay data, rebuildable, so this is index hygiene rather
+  // than data destruction.
+  db.exec(`
+    DELETE FROM ontology_relations
+    WHERE rowid NOT IN (
+      SELECT MIN(rowid) FROM ontology_relations GROUP BY source_fact_id, target_fact_id
+    )
+  `);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_relations_pair
+    ON ontology_relations(source_fact_id, target_fact_id)
+  `);
+
   db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_source ON ontology_relations(source_fact_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_target ON ontology_relations(target_fact_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);

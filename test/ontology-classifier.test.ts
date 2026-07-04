@@ -637,12 +637,15 @@ describe('ontology-classifier', () => {
       createCategory(db, domain.id, 'Existing Cat', 'c');
       db.exec('DROP TABLE vec_categories');
 
-      // Relation detection must still run under category-index corruption
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      // Relation detection must still run under category-index corruption.
+      // Type FLAPS across retries (SUPPORTS → INFLUENCES → …): pair-level
+      // idempotency must still keep exactly one edge.
+      let flap = 0;
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockImplementation(() => ({
         has_relation: true,
-        relation_type: 'SUPPORTS',
+        relation_type: flap++ % 2 === 0 ? 'SUPPORTS' : 'INFLUENCES',
         reasoning: 'similar',
-      });
+      }));
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS; i++) {
@@ -656,8 +659,9 @@ describe('ontology-classifier', () => {
       };
       expect(row.ontology_attempts).toBe(0); // …but infra corruption ≠ the fact's fault: no ledger burn
       expect(row.ontology_category_id).toBeNull(); // NOT parked in General/Misc
-      // vec_facts is healthy → relation edges must NOT be lost to the category-index outage
-      expect(getRelationsForFact(db, 'ir-0').length).toBeGreaterThan(0);
+      // vec_facts is healthy → relation edges must NOT be lost to the category-index outage,
+      // and repeated retries must NOT stack duplicates (createRelation is idempotent)
+      expect(getRelationsForFact(db, 'ir-0').length).toBe(1);
     });
 
     it('vec table scans but rejects INSERT (wrong schema) → hard repair failure, not transient loop', async () => {
