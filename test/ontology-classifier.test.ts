@@ -444,6 +444,27 @@ describe('ontology-classifier', () => {
       expect(result.failed).toEqual([]);
     });
 
+    it('treats candidate-embedding failure as transient — no LLM call, nothing persisted', async () => {
+      const emb = null; // no stored embedding → on-the-fly generation required
+      insertTestFact(db, 'ce-0', 'Embedding model down', emb);
+      const domain = createDomain(db, 'Existing', 'e');
+      createCategory(db, domain.id, 'Existing Cat', 'c');
+
+      const { generateEmbedding } = await import('../src/embeddings.js');
+      (generateEmbedding as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('model load failed'));
+
+      const result = await classifyFactsBatch(db, [makeFact({ id: 'ce-0', fact: 'Embedding model down', embedding: null })]);
+
+      expect(result.transient).toEqual(['ce-0']); // starved candidates must NOT reach the LLM
+      expect(callHaiku).not.toHaveBeenCalled();
+      const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('ce-0') as {
+        ontology_category_id: string | null;
+        ontology_attempts: number;
+      };
+      expect(row.ontology_category_id).toBeNull();
+      expect(row.ontology_attempts).toBe(0);
+    });
+
     it('rejects control-character / oversized names as content failure (poisoning guard)', async () => {
       const emb = new Array(384).fill(0.1);
       insertTestFact(db, 'n-0', 'Name sanitize test', emb);

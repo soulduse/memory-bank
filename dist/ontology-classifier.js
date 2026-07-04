@@ -132,8 +132,14 @@ async function categoryHits(db, fact, k) {
             embedding = await generateEmbedding(fact.fact.slice(0, 2000), 'passage');
         }
         catch (error) {
-            console.error(`Candidate embedding failed for fact ${fact.id}:`, error);
-            return [];
+            // Candidate-starvation guard: with existing categories but no way to
+            // retrieve them, the LLM would recreate near-duplicate categories and
+            // its output would still be PERSISTED — silent taxonomy poisoning.
+            // Embedding-model unavailability is infrastructure, not the fact's
+            // fault → transient (no attempt burned, no classification persisted,
+            // retried next run). An EMPTY index with a working embedding path is
+            // different and allowed: that's the genuine cold-start bootstrap.
+            throw new TransientLlmError(`candidate embedding unavailable for fact ${fact.id}: ${error instanceof Error ? error.message : error}`);
         }
     }
     return searchSimilarCategories(db, embedding, k);
@@ -263,8 +269,19 @@ export async function classifyFactsBatch(db, facts) {
     const remaining = [];
     const hitsByFact = new Map();
     const assignments = new Map();
+    const preTransient = [];
     for (const fact of facts) {
-        const hits = await categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
+        let hits;
+        try {
+            hits = await categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
+        }
+        catch (error) {
+            // TransientLlmError from candidate retrieval: skip this fact entirely —
+            // no LLM call, no persistence, no attempt burned.
+            console.error(`Candidate retrieval transient for fact ${fact.id}:`, error);
+            preTransient.push(fact.id);
+            continue;
+        }
         const det = tryDeterministicAssign(db, fact, hits);
         if (det) {
             deterministic.push(fact.id);
@@ -275,7 +292,7 @@ export async function classifyFactsBatch(db, facts) {
         remaining.push(fact);
     }
     if (remaining.length === 0) {
-        return { classified: [], deterministic, failed: [], transient: [], assignments };
+        return { classified: [], deterministic, failed: [], transient: preTransient, assignments };
     }
     const domains = listDomains(db);
     // Structured JSON payload, NOT concatenated prose sections: fact text is a
@@ -306,13 +323,13 @@ export async function classifyFactsBatch(db, facts) {
     }
     catch (error) {
         console.error(`Batch classification call failed (transient, no attempt burned):`, error);
-        return { classified: [], deterministic, failed: [], transient: remaining.map((f) => f.id), assignments };
+        return { classified: [], deterministic, failed: [], transient: [...preTransient, ...remaining.map((f) => f.id)], assignments };
     }
     // The Agent SDK can end a stream without a result message, yielding '' —
     // that is a call-level (transient) failure, not the facts' fault.
     if (!response || response.trim() === '') {
         console.error('Batch classification returned an empty response (transient, no attempt burned)');
-        return { classified: [], deterministic, failed: [], transient: remaining.map((f) => f.id), assignments };
+        return { classified: [], deterministic, failed: [], transient: [...preTransient, ...remaining.map((f) => f.id)], assignments };
     }
     const parsed = parseJsonResponse(response);
     // Index the response items; tolerate partial/malformed arrays — every fact
@@ -366,7 +383,7 @@ export async function classifyFactsBatch(db, facts) {
             failed.push(fact.id);
         }
     }
-    return { classified, deterministic, failed, transient: [], assignments };
+    return { classified, deterministic, failed, transient: preTransient, assignments };
 }
 // Hard per-call ceiling for direct backfillClassifyBatch callers: the worker
 // already chunks to BACKFILL_BATCH_SIZE (≤50), but a future script calling
