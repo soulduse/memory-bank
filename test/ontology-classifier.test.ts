@@ -609,6 +609,26 @@ describe('ontology-classifier', () => {
       expect(vecIds).not.toContain('stale-x');
     });
 
+    it('stale residue beyond the bounded purge keeps refusing (staleRemaining guard)', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'sr-0', 'Stale residue', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const catA = createCategory(db, domain.id, 'Indexed Cat', 'a');
+      upsertCategoryEmbedding(db, catA.id, embeddingArr);
+      // 101 stale rows: bounded purge(100) leaves 1 → must still refuse
+      const stmt = db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)');
+      for (let i = 0; i < 101; i++) {
+        stmt.run(`stale-${i}`, Buffer.from(new Float32Array(new Array(384).fill(0.6)).buffer));
+      }
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'sr-0', fact: 'Stale residue', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.transient).toEqual(['sr-0']); // 1 stale left → refuse until fully reconciled
+      expect(callHaiku).not.toHaveBeenCalled();
+    });
+
     it('purge-only heal (missing add FAILED) must NOT unlock classification — transient', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'po-0', 'Purge only', embeddingArr);

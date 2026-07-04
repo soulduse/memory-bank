@@ -177,7 +177,7 @@ function categoryEmbeddingText(name: string, description?: string | null): strin
 async function healCategoryIndex(
   db: Database.Database,
   limit: number = 100,
-): Promise<{ added: number; purged: number; missingRemaining: number }> {
+): Promise<{ added: number; purged: number; missingRemaining: number; staleRemaining: number }> {
   let indexed: Set<string>;
   try {
     indexed = new Set((db.prepare('SELECT id FROM vec_categories').all() as Array<{ id: string }>).map((r) => r.id));
@@ -185,7 +185,7 @@ async function healCategoryIndex(
     // vec table unusable — nothing to heal here; report full missingness so
     // the caller refuses rather than classifying candidate-starved.
     const live = (db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get() as { n: number }).n;
-    return { added: 0, purged: 0, missingRemaining: live };
+    return { added: 0, purged: 0, missingRemaining: live, staleRemaining: 0 };
   }
   const liveRows = db.prepare('SELECT id, name, description FROM ontology_categories').all() as Array<{
     id: string;
@@ -197,10 +197,13 @@ async function healCategoryIndex(
   // Purge STALE vec rows (ids whose category was deleted): they are derived
   // index residue, and enough of them near a query crowd every live
   // candidate out of the LIMIT-k window — adding the missing row alone
-  // cannot fix retrieval. Bounded like the add side.
+  // cannot fix retrieval. Bounded like the add side; the REMAINDER is
+  // reported so the caller keeps refusing until the residue is gone (a
+  // partial purge can still dilute top-k with stale hits that the search
+  // filters into missing candidate slots).
+  const staleAll = [...indexed].filter((id) => !liveIds.has(id));
   let purged = 0;
-  for (const id of indexed) {
-    if (liveIds.has(id)) continue;
+  for (const id of staleAll) {
     try {
       db.prepare('DELETE FROM vec_categories WHERE id = ?').run(id);
       purged++;
@@ -226,7 +229,7 @@ async function healCategoryIndex(
   // (embed failures AND beyond-limit backlog): purge success must never be
   // mistaken for repair success — an incomplete candidate index means
   // classification would run with some live categories invisible.
-  return { added, purged, missingRemaining: missingAll.length - added };
+  return { added, purged, missingRemaining: missingAll.length - added, staleRemaining: staleAll.length - purged };
 }
 
 /**
@@ -321,13 +324,14 @@ async function categoryHits(
     }
     const healAndRefresh = async (): Promise<void> => {
       const heal = await healCategoryIndex(db);
-      if (heal.missingRemaining > 0) {
-        // Purge/partial-add success must NOT unlock classification: any live
-        // category still unindexed means the candidate list is incomplete
-        // and the LLM could recreate it as a duplicate. Progressive runs
-        // keep healing (bounded per call) until the index is whole.
+      if (heal.missingRemaining > 0 || heal.staleRemaining > 0) {
+        // Partial repair must NOT unlock classification: an unindexed live
+        // category is invisible to reuse (duplicate risk), and RESIDUAL
+        // stale rows dilute the top-k window with hits the search filters
+        // away (candidate slots silently lost). Progressive runs keep
+        // healing (bounded per call) until the index is fully reconciled.
         throw new TransientLlmError(
-          `category index incomplete after heal (${heal.missingRemaining} live categories unindexed) — refusing candidate-starved classification (fact ${fact.id})`,
+          `category index incomplete after heal (missing ${heal.missingRemaining}, stale ${heal.staleRemaining}) — refusing candidate-starved classification (fact ${fact.id})`,
         );
       }
       if (heal.added + heal.purged > 0) {
