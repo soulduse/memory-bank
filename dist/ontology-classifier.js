@@ -249,6 +249,19 @@ async function categoryHits(db, fact, k) {
             }
         }
         if (hits.length === 0) {
+            // Last-resort heal: the count trigger above can be fooled when STALE
+            // vec rows (ids whose category was deleted) numerically mask missing
+            // ones — searchSimilarCategories then filters the stale hits away and
+            // returns 0 while a live category still lacks its row. The heal
+            // itself computes the true set difference, so it is immune to stale
+            // masking; only if it repairs nothing (runtime down / vec unusable)
+            // do we refuse.
+            const healed = await healCategoryIndex(db);
+            if (healed > 0) {
+                hits = searchSimilarCategories(db, embedding, k);
+            }
+        }
+        if (hits.length === 0) {
             // Starvation guard: searchSimilarCategories swallows vec-table errors
             // into [] and an empty/unusable index also yields [] — classifying
             // with zero candidates while categories EXIST would let the LLM

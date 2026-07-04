@@ -529,6 +529,30 @@ describe('ontology-classifier', () => {
       expect(row.ontology_attempts).toBe(0);
     });
 
+    it('STALE vec rows masking a missing category still get healed (0-hit fallback)', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'sm-0', 'Stale mask', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const real = createCategory(db, domain.id, 'Real Cat', 'r'); // vec row MISSING
+      // Stale vec row: id not present in ontology_categories → counts equalize
+      db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)').run(
+        'stale-id', Buffer.from(new Float32Array(new Array(384).fill(0.9)).buffer),
+      );
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Existing', category: 'Real Cat', is_new_domain: false, is_new_category: false },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'sm-0', fact: 'Stale mask', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.classified).toEqual(['sm-0']); // fallback heal rebuilt Real Cat's row
+      const row = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('sm-0') as { ontology_category_id: string | null };
+      expect(row.ontology_category_id).toBe(real.id);
+    });
+
     it('PARTIAL index is healed by coverage check even when hits exist', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'pi-0', 'Partial index', embeddingArr);
