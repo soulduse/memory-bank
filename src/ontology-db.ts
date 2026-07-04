@@ -277,14 +277,22 @@ export function getRelatedFacts(
     const nextFrontier: string[] = [];
 
     for (const currentId of frontier) {
-      // Outgoing relations (source → target)
+      // Outgoing relations (source → target).
+      // Multiple relation TYPES may connect the same pair; the visited-set is
+      // keyed by fact id, so exactly ONE edge per neighbour is surfaced. The
+      // ORDER BY makes that choice DETERMINISTIC and belief-safety-first:
+      // CONTRADICTS/SUPERSEDES must never be silently hidden behind an
+      // affirmative SUPPORTS/INFLUENCES row that happened to come first.
       const outgoing = db
         .prepare(
           `SELECT r.*, f.*,
                   r.id as rel_id, r.created_at as rel_created_at
            FROM ontology_relations r
            JOIN facts f ON r.target_fact_id = f.id
-           WHERE r.source_fact_id = ? AND f.is_active = 1`,
+           WHERE r.source_fact_id = ? AND f.is_active = 1
+           ORDER BY CASE r.relation_type
+             WHEN 'CONTRADICTS' THEN 0 WHEN 'SUPERSEDES' THEN 1
+             WHEN 'SUPPORTS' THEN 2 ELSE 3 END, r.created_at`,
         )
         .all(currentId) as Array<Record<string, unknown>>;
 
@@ -317,7 +325,10 @@ export function getRelatedFacts(
                   r.id as rel_id, r.created_at as rel_created_at
            FROM ontology_relations r
            JOIN facts f ON r.source_fact_id = f.id
-           WHERE r.target_fact_id = ? AND f.is_active = 1`,
+           WHERE r.target_fact_id = ? AND f.is_active = 1
+           ORDER BY CASE r.relation_type
+             WHEN 'CONTRADICTS' THEN 0 WHEN 'SUPERSEDES' THEN 1
+             WHEN 'SUPPORTS' THEN 2 ELSE 3 END, r.created_at`,
         )
         .all(currentId) as Array<Record<string, unknown>>;
 

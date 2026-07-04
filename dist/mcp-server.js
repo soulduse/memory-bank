@@ -23715,7 +23715,10 @@ function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance = 0.2, 
                   r.id as rel_id, r.created_at as rel_created_at
            FROM ontology_relations r
            JOIN facts f ON r.target_fact_id = f.id
-           WHERE r.source_fact_id = ? AND f.is_active = 1`
+           WHERE r.source_fact_id = ? AND f.is_active = 1
+           ORDER BY CASE r.relation_type
+             WHEN 'CONTRADICTS' THEN 0 WHEN 'SUPERSEDES' THEN 1
+             WHEN 'SUPPORTS' THEN 2 ELSE 3 END, r.created_at`
       ).all(currentId);
       for (const row of outgoing) {
         const targetId = row["target_fact_id"];
@@ -23736,7 +23739,10 @@ function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance = 0.2, 
                   r.id as rel_id, r.created_at as rel_created_at
            FROM ontology_relations r
            JOIN facts f ON r.source_fact_id = f.id
-           WHERE r.target_fact_id = ? AND f.is_active = 1`
+           WHERE r.target_fact_id = ? AND f.is_active = 1
+           ORDER BY CASE r.relation_type
+             WHEN 'CONTRADICTS' THEN 0 WHEN 'SUPERSEDES' THEN 1
+             WHEN 'SUPPORTS' THEN 2 ELSE 3 END, r.created_at`
       ).all(currentId);
       for (const row of incoming) {
         const sourceId = row["source_fact_id"];

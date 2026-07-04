@@ -34,6 +34,8 @@ import {
   createCategory,
   getDomainByName,
   getRelationsForFact,
+  getRelatedFacts,
+  createRelation,
   upsertCategoryEmbedding,
 } from '../src/ontology-db.js';
 import type { Fact } from '../src/types.js';
@@ -861,6 +863,34 @@ describe('ontology-classifier', () => {
       const stats = await backfillClassifyBatch(db, ['sk-0', 'nonexistent']);
       expect(stats.classified + stats.deterministic + stats.fallback + stats.failed).toBe(0);
       expect(callHaiku).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('multi-typed edge traversal', () => {
+    it('surfaces CONTRADICTS over SUPPORTS when both connect the same pair (deterministic)', () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'g-a', 'Fact A', emb);
+      insertTestFact(db, 'g-b', 'Fact B', emb);
+      createRelation(db, 'g-a', 'SUPPORTS', 'g-b', 'affirms');
+      createRelation(db, 'g-a', 'CONTRADICTS', 'g-b', 'conflicts');
+
+      const related = getRelatedFacts(db, 'g-a', 1);
+
+      expect(related.length).toBe(1); // one edge per neighbour (visited-set contract)
+      expect(related[0].relation.relation_type).toBe('CONTRADICTS'); // belief-safety edge wins, not insertion luck
+    });
+
+    it('createRelation stays idempotent per triple but preserves distinct types', () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'g-c', 'Fact C', emb);
+      insertTestFact(db, 'g-d', 'Fact D', emb);
+      const first = createRelation(db, 'g-c', 'SUPPORTS', 'g-d', 'one');
+      const dup = createRelation(db, 'g-c', 'SUPPORTS', 'g-d', 'two'); // same triple → same row
+      const other = createRelation(db, 'g-c', 'INFLUENCES', 'g-d', 'three'); // distinct type → new row
+
+      expect(dup.id).toBe(first.id);
+      expect(other.id).not.toBe(first.id);
+      expect(getRelationsForFact(db, 'g-c').length).toBe(2);
     });
   });
 
