@@ -142,7 +142,10 @@ async function healCategoryIndex(db, limit = 100) {
         indexed = new Set(db.prepare('SELECT id FROM vec_categories').all().map((r) => r.id));
     }
     catch {
-        return 0; // vec table unusable — nothing to heal here
+        // vec table unusable — nothing to heal here; report full missingness so
+        // the caller refuses rather than classifying candidate-starved.
+        const live = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
+        return { added: 0, purged: 0, missingRemaining: live };
     }
     const liveRows = db.prepare('SELECT id, name, description FROM ontology_categories').all();
     const liveIds = new Set(liveRows.map((r) => r.id));
@@ -164,19 +167,24 @@ async function healCategoryIndex(db, limit = 100) {
         if (purged >= limit)
             break;
     }
-    const missing = liveRows.filter((c) => !indexed.has(c.id)).slice(0, limit);
-    let healed = 0;
+    const missingAll = liveRows.filter((c) => !indexed.has(c.id));
+    const missing = missingAll.slice(0, limit);
+    let added = 0;
     for (const c of missing) {
         try {
             const emb = await generateEmbedding(categoryEmbeddingText(c.name, c.description), 'passage');
             upsertCategoryEmbedding(db, c.id, emb);
-            healed++;
+            added++;
         }
         catch {
             break; // embedding runtime down — caller's guard goes transient
         }
     }
-    return healed + purged;
+    // missingRemaining counts EVERY live category still without a vec row
+    // (embed failures AND beyond-limit backlog): purge success must never be
+    // mistaken for repair success — an incomplete candidate index means
+    // classification would run with some live categories invisible.
+    return { added, purged, missingRemaining: missingAll.length - added };
 }
 /**
  * Top-K category hits for a fact (empty only when the index is empty).
@@ -260,11 +268,21 @@ async function categoryHits(db, fact, k) {
                 vecCount = 0;
             }
         }
-        if (vecCount < catCount) {
-            const healed = await healCategoryIndex(db);
-            if (healed > 0) {
-                hits = searchSimilarCategories(db, embedding, k); // re-rank with healed rows
+        const healAndRefresh = async () => {
+            const heal = await healCategoryIndex(db);
+            if (heal.missingRemaining > 0) {
+                // Purge/partial-add success must NOT unlock classification: any live
+                // category still unindexed means the candidate list is incomplete
+                // and the LLM could recreate it as a duplicate. Progressive runs
+                // keep healing (bounded per call) until the index is whole.
+                throw new TransientLlmError(`category index incomplete after heal (${heal.missingRemaining} live categories unindexed) — refusing candidate-starved classification (fact ${fact.id})`);
             }
+            if (heal.added + heal.purged > 0) {
+                hits = searchSimilarCategories(db, embedding, k); // re-rank with reconciled index
+            }
+        };
+        if (vecCount < catCount) {
+            await healAndRefresh();
         }
         if (hits.length === 0) {
             // Last-resort heal: the count trigger above can be fooled when STALE
@@ -272,12 +290,9 @@ async function categoryHits(db, fact, k) {
             // ones — searchSimilarCategories then filters the stale hits away and
             // returns 0 while a live category still lacks its row. The heal
             // itself computes the true set difference, so it is immune to stale
-            // masking; only if it repairs nothing (runtime down / vec unusable)
-            // do we refuse.
-            const healed = await healCategoryIndex(db);
-            if (healed > 0) {
-                hits = searchSimilarCategories(db, embedding, k);
-            }
+            // masking; only if it leaves the index complete yet retrieval still
+            // yields nothing usable do we refuse below.
+            await healAndRefresh();
         }
         if (hits.length === 0) {
             // Starvation guard: searchSimilarCategories swallows vec-table errors

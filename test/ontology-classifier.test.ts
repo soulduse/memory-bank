@@ -581,6 +581,37 @@ describe('ontology-classifier', () => {
       expect(row.ontology_category_id).toBe(real.id);
     });
 
+    it('purge-only heal (missing add FAILED) must NOT unlock classification — transient', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'po-0', 'Purge only', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const catA = createCategory(db, domain.id, 'Indexed Cat', 'a');
+      upsertCategoryEmbedding(db, catA.id, new Array(384).fill(0.5)); // A indexed
+      createCategory(db, domain.id, 'Missing Cat', 'b'); // B unindexed
+      for (let i = 0; i < 8; i++) {
+        db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)').run(
+          `stale-${i}`, Buffer.from(new Float32Array(embeddingArr).buffer),
+        );
+      }
+
+      const { generateEmbedding } = await import('../src/embeddings.js');
+      // Fact has a stored embedding → only the heal's category-embed call fails
+      (generateEmbedding as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('embed down'));
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'po-0', fact: 'Purge only', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.transient).toEqual(['po-0']); // incomplete index → refuse, don't classify with partial candidates
+      expect(callHaiku).not.toHaveBeenCalled();
+      const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('po-0') as {
+        ontology_category_id: string | null;
+        ontology_attempts: number;
+      };
+      expect(row.ontology_category_id).toBeNull();
+      expect(row.ontology_attempts).toBe(0);
+    });
+
     it('PARTIAL index is healed by coverage check even when hits exist', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'pi-0', 'Partial index', embeddingArr);
