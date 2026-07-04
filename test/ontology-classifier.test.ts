@@ -18,12 +18,22 @@ vi.mock('../src/embeddings.js', () => ({
 }));
 
 import { callHaiku, parseJsonResponse } from '../src/llm.js';
-import { classifyFactToOntology, detectRelations, classifyAndLinkFact } from '../src/ontology-classifier.js';
+import {
+  classifyFactToOntology,
+  detectRelations,
+  classifyAndLinkFact,
+  classifyFactsBatch,
+  backfillClassifyBatch,
+  recordOntologyAttempt,
+  persistFallbackClassification,
+  MAX_CLASSIFY_ATTEMPTS,
+} from '../src/ontology-classifier.js';
 import {
   createDomain,
   createCategory,
   getDomainByName,
   getRelationsForFact,
+  upsertCategoryEmbedding,
 } from '../src/ontology-db.js';
 import type { Fact } from '../src/types.js';
 
@@ -45,9 +55,15 @@ function initTestSchema(db: Database.Database) {
       is_active BOOLEAN DEFAULT 1,
       ontology_category_id TEXT,
       fact_kr TEXT,
-      embedding_version INTEGER NOT NULL DEFAULT 2
+      embedding_version INTEGER NOT NULL DEFAULT 2,
+      ontology_attempts INTEGER NOT NULL DEFAULT 0,
+      ontology_last_attempt_at TEXT
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
+      id TEXT PRIMARY KEY,
+      embedding float[384]
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
       embedding float[384]
     );
@@ -195,16 +211,219 @@ describe('ontology-classifier', () => {
       expect(result.categoryId).toBe(category.id);
     });
 
-    it('should fallback to General/Misc on LLM parse failure', async () => {
+    it('should THROW on LLM parse failure (attempt ledger handles fallback, not silent return)', async () => {
+      // Old behaviour built General/Misc but never persisted the fact's
+      // assignment — leaving it NULL and eternally re-selected by backfill.
       (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue(null);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('invalid response');
 
       const fact = makeFact();
-      const result = await classifyFactToOntology(db, fact);
+      await expect(classifyFactToOntology(db, fact)).rejects.toThrow(/unparseable/);
+    });
 
+    it('should assign deterministically (no LLM call) when the gate is OPTED IN and cleared', async () => {
+      process.env.MEMORY_BANK_ONTOLOGY_DET_GATE = '0.93';
+      try {
+        const embeddingArr = new Array(384).fill(0.1);
+        insertTestFact(db, 'fact-det', 'Use Riverpod for Flutter state', embeddingArr);
+        const domain = createDomain(db, 'Frontend', 'Frontend dev');
+        const category = createCategory(db, domain.id, 'State Management', 'State patterns');
+        // Identical embedding → L2 distance 0 → cosine 1.0 ≥ gate
+        upsertCategoryEmbedding(db, category.id, embeddingArr);
+
+        const fact = makeFact({ id: 'fact-det', embedding: new Float32Array(embeddingArr) });
+        const result = await classifyFactToOntology(db, fact);
+
+        expect(result.categoryId).toBe(category.id);
+        expect(callHaiku).not.toHaveBeenCalled();
+        const row = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('fact-det') as { ontology_category_id: string };
+        expect(row.ontology_category_id).toBe(category.id);
+      } finally {
+        delete process.env.MEMORY_BANK_ONTOLOGY_DET_GATE;
+      }
+    });
+
+    it('should NOT fire the gate by default (measurement rejected auto-assign)', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'fact-nogate', 'Use Riverpod for Flutter state', embeddingArr);
+      const domain = createDomain(db, 'Frontend', 'Frontend dev');
+      const category = createCategory(db, domain.id, 'State Management', 'State patterns');
+      upsertCategoryEmbedding(db, category.id, embeddingArr); // identical → sim 1.0, still must not fire
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        domain: 'Frontend',
+        category: 'State Management',
+        is_new_domain: false,
+        is_new_category: false,
+      });
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
+
+      const fact = makeFact({ id: 'fact-nogate', embedding: new Float32Array(embeddingArr) });
+      await classifyFactToOntology(db, fact);
+
+      expect(callHaiku).toHaveBeenCalledTimes(1); // went through the LLM, not the gate
+    });
+  });
+
+  describe('attempt ledger', () => {
+    it('recordOntologyAttempt increments and stamps the attempt', () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'fact-ledger', 'Ledger test', embeddingArr);
+
+      expect(recordOntologyAttempt(db, 'fact-ledger')).toBe(1);
+      expect(recordOntologyAttempt(db, 'fact-ledger')).toBe(2);
+      const row = db.prepare('SELECT ontology_attempts, ontology_last_attempt_at FROM facts WHERE id = ?').get('fact-ledger') as {
+        ontology_attempts: number;
+        ontology_last_attempt_at: string | null;
+      };
+      expect(row.ontology_attempts).toBe(2);
+      expect(row.ontology_last_attempt_at).toBeTruthy();
+    });
+
+    it('persistFallbackClassification actually writes ontology_category_id', () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'fact-fb', 'Fallback test', embeddingArr);
+
+      persistFallbackClassification(db, 'fact-fb');
+
+      const row = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('fact-fb') as { ontology_category_id: string | null };
+      expect(row.ontology_category_id).toBeTruthy();
       const domain = getDomainByName(db, 'General');
       expect(domain).toBeTruthy();
-      expect(result.domainId).toBe(domain!.id);
+    });
+
+    it('classifyAndLinkFact parks a fact in General/Misc after MAX attempts', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'fact-max', 'Max attempts test', embeddingArr);
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('garbage');
+
+      for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS; i++) {
+        await classifyAndLinkFact(db, 'fact-max', embeddingArr);
+      }
+
+      const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('fact-max') as {
+        ontology_category_id: string | null;
+        ontology_attempts: number;
+      };
+      expect(row.ontology_attempts).toBe(MAX_CLASSIFY_ATTEMPTS);
+      expect(row.ontology_category_id).toBeTruthy(); // parked in General/Misc
+    });
+  });
+
+  describe('classifyFactsBatch', () => {
+    it('classifies every fact from one batched LLM response', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'b-0', 'Use Vitest', emb);
+      insertTestFact(db, 'b-1', 'Use PostgreSQL', emb);
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Testing', category: 'Framework', is_new_domain: true, is_new_category: true },
+        { index: 1, domain: 'Database', category: 'Postgres', is_new_domain: true, is_new_category: true },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const facts = [
+        makeFact({ id: 'b-0', fact: 'Use Vitest' }),
+        makeFact({ id: 'b-1', fact: 'Use PostgreSQL' }),
+      ];
+      const result = await classifyFactsBatch(db, facts);
+
+      expect(result.classified.sort()).toEqual(['b-0', 'b-1']);
+      expect(result.failed).toEqual([]);
+      expect(callHaiku).toHaveBeenCalledTimes(1); // ONE spawn for the whole batch
+      const c0 = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('b-0') as { ontology_category_id: string | null };
+      const c1 = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('b-1') as { ontology_category_id: string | null };
+      expect(c0.ontology_category_id).toBeTruthy();
+      expect(c1.ontology_category_id).toBeTruthy();
+    });
+
+    it('reports facts missing from the response as failed (no silent skip)', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'p-0', 'Fact zero', emb);
+      insertTestFact(db, 'p-1', 'Fact one', emb);
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Testing', category: 'Framework', is_new_domain: true, is_new_category: true },
+        // index 1 missing entirely
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'p-0', fact: 'Fact zero' }),
+        makeFact({ id: 'p-1', fact: 'Fact one' }),
+      ]);
+
+      expect(result.classified).toEqual(['p-0']);
+      expect(result.failed).toEqual(['p-1']);
+    });
+
+    it('reports ALL facts failed when the whole response is unparseable', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'u-0', 'Fact A', emb);
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('garbage');
+
+      const result = await classifyFactsBatch(db, [makeFact({ id: 'u-0', fact: 'Fact A' })]);
+      expect(result.failed).toEqual(['u-0']);
+      expect(result.classified).toEqual([]);
+    });
+
+    it('routes gate-clearing facts through the deterministic path without LLM (opt-in)', async () => {
+      process.env.MEMORY_BANK_ONTOLOGY_DET_GATE = '0.93';
+      try {
+        const embeddingArr = new Array(384).fill(0.1);
+        insertTestFact(db, 'd-0', 'State management fact', embeddingArr);
+        const domain = createDomain(db, 'Frontend', 'FE');
+        const category = createCategory(db, domain.id, 'State Management', 'State');
+        upsertCategoryEmbedding(db, category.id, embeddingArr);
+
+        const result = await classifyFactsBatch(db, [
+          makeFact({ id: 'd-0', embedding: new Float32Array(embeddingArr) }),
+        ]);
+
+        expect(result.deterministic).toEqual(['d-0']);
+        expect(callHaiku).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.MEMORY_BANK_ONTOLOGY_DET_GATE;
+      }
+    });
+  });
+
+  describe('backfillClassifyBatch', () => {
+    it('records attempts for failures and parks exhausted facts in fallback', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'bf-0', 'Backfill fail test', emb);
+      // Pre-burn attempts so this failure is the MAXth
+      db.prepare('UPDATE facts SET ontology_attempts = ? WHERE id = ?').run(MAX_CLASSIFY_ATTEMPTS - 1, 'bf-0');
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('garbage');
+
+      const stats = await backfillClassifyBatch(db, ['bf-0']);
+
+      expect(stats.fallback).toBe(1);
+      expect(stats.failed).toBe(0); // counted as fallback, not lingering failure
+      const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('bf-0') as {
+        ontology_category_id: string | null;
+        ontology_attempts: number;
+      };
+      expect(row.ontology_attempts).toBe(MAX_CLASSIFY_ATTEMPTS);
+      expect(row.ontology_category_id).toBeTruthy();
+    });
+
+    it('skips already-classified and inactive facts', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'sk-0', 'Already classified', emb);
+      const domain = createDomain(db, 'X', 'x');
+      const category = createCategory(db, domain.id, 'Y', 'y');
+      db.prepare('UPDATE facts SET ontology_category_id = ? WHERE id = ?').run(category.id, 'sk-0');
+
+      const stats = await backfillClassifyBatch(db, ['sk-0', 'nonexistent']);
+      expect(stats.classified + stats.deterministic + stats.fallback + stats.failed).toBe(0);
+      expect(callHaiku).not.toHaveBeenCalled();
     });
   });
 

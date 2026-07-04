@@ -23,6 +23,37 @@ import {
 // topic under the right domain.
 const CATEGORY_CANDIDATES = 20;
 
+// Candidates per fact in BATCH classification prompts — smaller than the
+// single-fact list so a 20-fact batch stays a few KB instead of 20×20 lines.
+const BATCH_CATEGORY_CANDIDATES = 8;
+
+// Max classification attempts before a fact is permanently parked in the
+// General/Misc fallback. Without this cap, a fact that deterministically
+// fails (unparseable output, degenerate content) is re-selected by every
+// backfill run forever — one wasted LLM call per run per stuck fact.
+export const MAX_CLASSIFY_ATTEMPTS = 3;
+
+// Deterministic reuse gate: when the nearest existing category is at least
+// this cosine-similar to the fact embedding, assign it WITHOUT an LLM call.
+//
+// DISABLED BY DEFAULT — live measurement rejected it (scripts/measure-det-gate.mjs,
+// 2026-07-05, n=800): top-1-category agreement with the actual LLM assignment
+// was only 72% at sim≥0.93 (2.3% of facts) and 89% at ≥0.94 (n=9, 1.1%).
+// Too little volume to matter and too much misfile risk to auto-assign.
+// Batching delivers the spawn reduction instead. Set
+// MEMORY_BANK_ONTOLOGY_DET_GATE to a value in (0,1) to opt in after
+// re-measuring (e.g. once the taxonomy is consolidated).
+function detGate(): number {
+  const raw = process.env.MEMORY_BANK_ONTOLOGY_DET_GATE;
+  const v = raw ? Number(raw) : NaN;
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : Number.POSITIVE_INFINITY;
+}
+
+/** vec0 L2 distance on normalized embeddings → cosine similarity. */
+function l2ToCosine(distance: number): number {
+  return 1 - (distance * distance) / 2;
+}
+
 interface ClassifyResponse {
   domain: string;
   category: string;
@@ -59,6 +90,32 @@ Given a fact and a list of existing domains/categories, classify the fact.
   "category_description": "only if is_new_category is true"
 }`;
 
+const BATCH_CLASSIFY_SYSTEM_PROMPT = `You are an ontology classifier for technical decision facts.
+You will receive SEVERAL facts. Classify EACH fact independently against the shared domain list and that fact's own candidate categories.
+
+## Domains represent broad areas (e.g., "Architecture", "Frontend", "Backend", "DevOps", "Testing", "Database")
+## Categories are specific topics within a domain (e.g., "State Management", "API Design", "Authentication")
+
+## Rules
+- Reuse existing domains/categories when appropriate (prefer reuse over creation)
+- Create new domain/category only when no existing one fits
+- domain and category names must be in English, concise (1-3 words)
+- Return EXACTLY one result object per fact, copying that fact's "index" verbatim
+- Do not skip any fact
+
+## Output format (JSON array only, no markdown)
+[
+  {
+    "index": 0,
+    "domain": "existing or new domain name",
+    "category": "existing or new category name",
+    "is_new_domain": false,
+    "is_new_category": false,
+    "domain_description": "only if is_new_domain is true",
+    "category_description": "only if is_new_category is true"
+  }
+]`;
+
 const DETECT_RELATION_SYSTEM_PROMPT = `You are analyzing relationships between technical decision facts.
 Given a new fact and an existing fact, determine if there is a meaningful relationship.
 
@@ -84,22 +141,116 @@ function categoryEmbeddingText(name: string, description?: string | null): strin
   return description ? `${name}: ${description}` : name;
 }
 
+/** Top-K category hits for a fact embedding (empty when no embedding/index). */
+function categoryHits(
+  db: Database.Database,
+  fact: Fact,
+  k: number,
+): Array<{ category: { id: string; domain_id: string; name: string; description: string | null }; domainName: string; distance: number }> {
+  if (!fact.embedding) return [];
+  return searchSimilarCategories(db, Array.from(fact.embedding), k);
+}
+
+/**
+ * Deterministic reuse gate: if the nearest existing category clears the
+ * measured similarity threshold, persist it directly — no LLM call. Returns
+ * the assignment or null when the gate doesn't fire.
+ */
+function tryDeterministicAssign(
+  db: Database.Database,
+  fact: Fact,
+  hits: ReturnType<typeof categoryHits>,
+): { domainId: string; categoryId: string } | null {
+  const top = hits[0];
+  if (!top) return null;
+  if (l2ToCosine(top.distance) < detGate()) return null;
+  classifyFact(db, fact.id, top.category.id);
+  return { domainId: top.category.domain_id, categoryId: top.category.id };
+}
+
+/**
+ * Resolve a parsed LLM classification into (domain, category) rows — creating
+ * and embedding-indexing new ones — and persist the fact's assignment.
+ * Shared by the single and batch classification paths.
+ */
+async function applyClassification(
+  db: Database.Database,
+  factId: string,
+  parsed: ClassifyResponse,
+): Promise<{ domainId: string; categoryId: string }> {
+  // Resolve or create domain
+  let domain = getDomainByName(db, parsed.domain);
+  if (!domain) {
+    domain = createDomain(db, parsed.domain, parsed.domain_description);
+  }
+
+  // Resolve or create category
+  let category = getCategoryByName(db, parsed.category, domain.id);
+  if (!category) {
+    category = createCategory(db, domain.id, parsed.category, parsed.category_description);
+    // Index the new category so future facts can retrieve it as a candidate
+    // (without this the candidate list could never grow → category sprawl).
+    try {
+      const emb = await generateEmbedding(categoryEmbeddingText(category.name, category.description), 'passage');
+      upsertCategoryEmbedding(db, category.id, emb);
+    } catch (error) {
+      console.error(`Category embedding failed for ${category.id}:`, error);
+    }
+  }
+
+  classifyFact(db, factId, category.id);
+  return { domainId: domain.id, categoryId: category.id };
+}
+
+/**
+ * Record one failed classification attempt; returns the new attempt count.
+ * When the count reaches MAX_CLASSIFY_ATTEMPTS the caller should persist the
+ * fallback so the fact permanently leaves the backfill queue.
+ */
+export function recordOntologyAttempt(db: Database.Database, factId: string): number {
+  db.prepare(
+    `UPDATE facts SET ontology_attempts = COALESCE(ontology_attempts, 0) + 1, ontology_last_attempt_at = ? WHERE id = ?`,
+  ).run(new Date().toISOString(), factId);
+  const row = db.prepare(`SELECT COALESCE(ontology_attempts, 0) AS n FROM facts WHERE id = ?`).get(factId) as
+    | { n: number }
+    | undefined;
+  return row?.n ?? 0;
+}
+
+/**
+ * Park a fact in General/Misc. Unlike the pre-2026-07 behaviour (which built
+ * the fallback rows but never wrote the fact's ontology_category_id — leaving
+ * it NULL and eternally re-selected), this PERSISTS the assignment. The fact
+ * stays fully searchable via vector/FTS; ontology is an overlay.
+ */
+export function persistFallbackClassification(db: Database.Database, factId: string): { domainId: string; categoryId: string } {
+  const fallback = ensureFallbackCategory(db);
+  classifyFact(db, factId, fallback.categoryId);
+  return fallback;
+}
+
 export async function classifyFactToOntology(
   db: Database.Database,
   fact: Fact,
 ): Promise<{ domainId: string; categoryId: string }> {
-  const domains = listDomains(db);
-  const domainList = domains.map((d) => `- ${d.name}: ${d.description ?? '(no description)'}`).join('\n');
-
   // Candidate retrieval: present only the top-K nearest existing categories
   // (by fact embedding) instead of all categories. Falls back to the full list
   // when there is no fact embedding or the category index is still empty
   // (e.g. before the one-time backfill), so behaviour degrades gracefully.
-  let candidates: Array<{ name: string; domainName: string; description?: string | null }> = [];
-  if (fact.embedding) {
-    const hits = searchSimilarCategories(db, Array.from(fact.embedding), CATEGORY_CANDIDATES);
-    candidates = hits.map((h) => ({ name: h.category.name, domainName: h.domainName, description: h.category.description }));
-  }
+  const hits = categoryHits(db, fact, CATEGORY_CANDIDATES);
+
+  // Deterministic reuse gate — obvious matches never reach the LLM.
+  const deterministic = tryDeterministicAssign(db, fact, hits);
+  if (deterministic) return deterministic;
+
+  const domains = listDomains(db);
+  const domainList = domains.map((d) => `- ${d.name}: ${d.description ?? '(no description)'}`).join('\n');
+
+  let candidates: Array<{ name: string; domainName: string; description?: string | null }> = hits.map((h) => ({
+    name: h.category.name,
+    domainName: h.domainName,
+    description: h.category.description,
+  }));
   if (candidates.length === 0) {
     const all = listCategories(db);
     candidates = all.map((c) => ({
@@ -128,34 +279,165 @@ export async function classifyFactToOntology(
   const parsed = parseJsonResponse<ClassifyResponse>(response);
 
   if (!parsed) {
-    // Fallback: use a generic domain/category
-    return ensureFallbackCategory(db);
+    // Unparseable output is a FAILED attempt, not a fallback: silently
+    // parking on first failure would misfile transient noise, and the old
+    // behaviour (returning fallback ids WITHOUT persisting) left the fact
+    // NULL forever. Callers count the attempt via recordOntologyAttempt and
+    // persist the fallback only at MAX_CLASSIFY_ATTEMPTS.
+    throw new Error('ontology classify: unparseable LLM response');
   }
 
-  // Resolve or create domain
-  let domain = getDomainByName(db, parsed.domain);
-  if (!domain) {
-    domain = createDomain(db, parsed.domain, parsed.domain_description);
+  return applyClassification(db, fact.id, parsed);
+}
+
+interface BatchClassifyItem extends ClassifyResponse {
+  index: number;
+}
+
+/**
+ * Classify a batch of facts with ONE LLM call (plus zero-cost deterministic
+ * assignments). Each callHaiku() spawns a full headless Claude session
+ * (~10-14s + a transcript + auxiliary calls), so per-fact single calls made
+ * the backfill drain both slow and noisy on the proxy; batching divides the
+ * spawn count by the batch size.
+ *
+ * Returns fact-id lists per outcome. `failed` facts have NOT had their
+ * attempt recorded — that's the caller's job (backfillClassifyBatch), so the
+ * ledger stays in one place.
+ */
+export async function classifyFactsBatch(
+  db: Database.Database,
+  facts: Fact[],
+): Promise<{ classified: string[]; deterministic: string[]; failed: string[] }> {
+  const deterministic: string[] = [];
+  const remaining: Fact[] = [];
+  const hitsByFact = new Map<string, ReturnType<typeof categoryHits>>();
+
+  for (const fact of facts) {
+    const hits = categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
+    if (tryDeterministicAssign(db, fact, hits)) {
+      deterministic.push(fact.id);
+      continue;
+    }
+    hitsByFact.set(fact.id, hits);
+    remaining.push(fact);
   }
 
-  // Resolve or create category
-  let category = getCategoryByName(db, parsed.category, domain.id);
-  if (!category) {
-    category = createCategory(db, domain.id, parsed.category, parsed.category_description);
-    // Index the new category so future facts can retrieve it as a candidate
-    // (without this the candidate list could never grow → category sprawl).
-    try {
-      const emb = await generateEmbedding(categoryEmbeddingText(category.name, category.description), 'passage');
-      upsertCategoryEmbedding(db, category.id, emb);
-    } catch (error) {
-      console.error(`Category embedding failed for ${category.id}:`, error);
+  if (remaining.length === 0) {
+    return { classified: [], deterministic, failed: [] };
+  }
+
+  const domains = listDomains(db);
+  const domainList = domains.map((d) => `- ${d.name}: ${d.description ?? '(no description)'}`).join('\n');
+
+  const sections = remaining.map((fact, i) => {
+    const hits = hitsByFact.get(fact.id) ?? [];
+    const candidateList = hits
+      .map((h) => `- ${h.domainName} / ${h.category.name}: ${h.category.description ?? '(no description)'}`)
+      .join('\n');
+    return [
+      `### Fact ${i}`,
+      // Bound each fact's contribution so a 20-fact batch stays a few KB.
+      `Fact: "${fact.fact.length > 400 ? `${fact.fact.slice(0, 400)}…` : fact.fact}"`,
+      `Fact category: ${fact.category}`,
+      'Candidate categories (most similar existing — reuse one of these if it fits):',
+      candidateList || '(none)',
+    ].join('\n');
+  });
+
+  const prompt = ['Existing domains:', domainList || '(none)', '', ...sections].join('\n\n');
+  const response = await callHaiku(BATCH_CLASSIFY_SYSTEM_PROMPT, prompt, 256 * remaining.length + 512);
+  const parsed = parseJsonResponse<BatchClassifyItem[]>(response);
+
+  // Index the response items; tolerate partial/malformed arrays — every fact
+  // without a usable item is reported as failed (attempt counting is the
+  // caller's responsibility, and honest failure counts matter: the previous
+  // pipeline swallowed errors and logged "failed 0" regardless).
+  const byIndex = new Map<number, BatchClassifyItem>();
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) {
+      if (
+        item &&
+        typeof item.index === 'number' &&
+        typeof item.domain === 'string' &&
+        item.domain.trim() !== '' &&
+        typeof item.category === 'string' &&
+        item.category.trim() !== ''
+      ) {
+        byIndex.set(item.index, item);
+      }
     }
   }
 
-  // Apply classification
-  classifyFact(db, fact.id, category.id);
+  const classified: string[] = [];
+  const failed: string[] = [];
+  for (let i = 0; i < remaining.length; i++) {
+    const fact = remaining[i];
+    const item = byIndex.get(i);
+    if (!item) {
+      failed.push(fact.id);
+      continue;
+    }
+    try {
+      await applyClassification(db, fact.id, item);
+      classified.push(fact.id);
+    } catch (error) {
+      console.error(`Batch classification apply failed for fact ${fact.id}:`, error);
+      failed.push(fact.id);
+    }
+  }
 
-  return { domainId: domain.id, categoryId: category.id };
+  return { classified, deterministic, failed };
+}
+
+/**
+ * Backfill-facing wrapper: load facts by id, classify them as one batch,
+ * record attempts for failures, and park facts that exhausted their attempts
+ * in General/Misc. Relations are OFF by default for backfill (each relation
+ * probe costs another LLM call; the historic corpus already has ~29K
+ * relations — new-fact inserts keep detecting them).
+ */
+export async function backfillClassifyBatch(
+  db: Database.Database,
+  factIds: string[],
+  opts: { detectRelationsToo?: boolean } = {},
+): Promise<{ classified: number; deterministic: number; fallback: number; failed: number }> {
+  const rows = factIds
+    .map((id) => db.prepare(`SELECT * FROM facts WHERE id = ? AND is_active = 1 AND ontology_category_id IS NULL`).get(id))
+    .filter((r): r is Record<string, unknown> => Boolean(r));
+  const facts = rows.map((r) => rowToFact(r));
+
+  const result = facts.length > 0
+    ? await classifyFactsBatch(db, facts)
+    : { classified: [] as string[], deterministic: [] as string[], failed: [] as string[] };
+
+  let fallback = 0;
+  for (const id of result.failed) {
+    const attempts = recordOntologyAttempt(db, id);
+    if (attempts >= MAX_CLASSIFY_ATTEMPTS) {
+      persistFallbackClassification(db, id);
+      fallback++;
+    }
+  }
+
+  if (opts.detectRelationsToo) {
+    const succeeded = new Set([...result.classified, ...result.deterministic]);
+    for (const fact of facts) {
+      if (!succeeded.has(fact.id)) continue;
+      try {
+        await detectRelations(db, fact);
+      } catch (error) {
+        console.error(`Relation detection failed for fact ${fact.id}:`, error);
+      }
+    }
+  }
+
+  return {
+    classified: result.classified.length,
+    deterministic: result.deterministic.length,
+    fallback,
+    failed: result.failed.length - fallback,
+  };
 }
 
 export async function detectRelations(
@@ -216,6 +498,17 @@ export async function classifyAndLinkFact(
     await classifyFactToOntology(db, fact);
   } catch (error) {
     console.error(`Ontology classification failed for fact ${factId}:`, error);
+    // Non-fatal for the insert path, but every failure is LEDGERED so the
+    // backfill can't re-burn LLM calls on a permanently failing fact; after
+    // MAX attempts it is parked in General/Misc (still fully searchable).
+    try {
+      const attempts = recordOntologyAttempt(db, factId);
+      if (attempts >= MAX_CLASSIFY_ATTEMPTS) {
+        persistFallbackClassification(db, factId);
+      }
+    } catch (ledgerError) {
+      console.error(`Ontology attempt ledger failed for fact ${factId}:`, ledgerError);
+    }
   }
 
   try {
