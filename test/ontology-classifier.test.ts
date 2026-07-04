@@ -529,6 +529,28 @@ describe('ontology-classifier', () => {
       expect(row.ontology_attempts).toBe(0);
     });
 
+    it('PARTIAL index is healed by coverage check even when hits exist', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'pi-0', 'Partial index', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const catA = createCategory(db, domain.id, 'Indexed Cat', 'a');
+      upsertCategoryEmbedding(db, catA.id, new Array(384).fill(0.5)); // A indexed
+      createCategory(db, domain.id, 'Unindexed Cat', 'b'); // B NOT indexed — hits would still return A
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Existing', category: 'Indexed Cat', is_new_domain: false, is_new_category: false },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'pi-0', fact: 'Partial index', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.classified).toEqual(['pi-0']);
+      const vecCount = (db.prepare('SELECT COUNT(*) AS n FROM vec_categories').get() as { n: number }).n;
+      expect(vecCount).toBe(2); // B was healed despite A producing hits
+    });
+
     it('unindexed categories (post-cold-start) are SELF-HEALED — no permanent deadlock', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'sh-0', 'Self heal', embeddingArr);

@@ -218,25 +218,42 @@ async function categoryHits(db, fact, k) {
             }
         }
     }
-    const hits = searchSimilarCategories(db, embedding, k);
-    if (hits.length === 0) {
-        // Starvation guard for the RETRIEVAL side: searchSimilarCategories
-        // swallows vec-table errors into [] and an empty/dropped vec_categories
-        // index also yields [] — in every such case, classifying with zero
-        // candidates while categories EXIST would let the LLM persist duplicate
-        // taxonomy. (vec0 MATCH returns nearest rows regardless of distance, so
-        // a non-empty usable index cannot yield 0.) Before refusing, try to
-        // SELF-HEAL: categories created while the embedding runtime was down
-        // have no vec rows (applyClassification logs-and-continues), and without
-        // repair the guard would dead-lock classification permanently.
-        const catCount = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
-        if (catCount > 0) {
+    let hits = searchSimilarCategories(db, embedding, k);
+    const catCount = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
+    if (catCount > 0) {
+        // Index-coverage self-heal — triggered by COUNTS, not by empty hits: a
+        // PARTIAL index (category created while the embedding runtime was down;
+        // applyClassification logs-and-continues) still returns hits for the
+        // indexed subset, which would leave the unindexed rest invisible as
+        // reuse candidates forever. Counts come from the plain rowids shadow
+        // table (cheap); a few stale vec rows can mask an equal number of
+        // missing ones — accepted: stale rows are removed via
+        // deleteCategoryEmbedding, and the one-time backfill script remains the
+        // full-repair path.
+        let vecCount = 0;
+        try {
+            vecCount = db.prepare('SELECT COUNT(*) AS n FROM vec_categories_rowids').get().n;
+        }
+        catch {
+            try {
+                vecCount = db.prepare('SELECT COUNT(*) AS n FROM vec_categories').get().n;
+            }
+            catch {
+                vecCount = 0;
+            }
+        }
+        if (vecCount < catCount) {
             const healed = await healCategoryIndex(db);
             if (healed > 0) {
-                const retry = searchSimilarCategories(db, embedding, k);
-                if (retry.length > 0)
-                    return retry;
+                hits = searchSimilarCategories(db, embedding, k); // re-rank with healed rows
             }
+        }
+        if (hits.length === 0) {
+            // Starvation guard: searchSimilarCategories swallows vec-table errors
+            // into [] and an empty/unusable index also yields [] — classifying
+            // with zero candidates while categories EXIST would let the LLM
+            // persist duplicate taxonomy. (vec0 MATCH returns nearest rows
+            // regardless of distance, so a non-empty usable index cannot yield 0.)
             throw new TransientLlmError(`category index unavailable/empty while ${catCount} categories exist — refusing candidate-starved classification (fact ${fact.id})`);
         }
     }
