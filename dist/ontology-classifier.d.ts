@@ -12,6 +12,15 @@ export declare class TransientLlmError extends Error {
     constructor(message: string);
 }
 /**
+ * The fact's own content deterministically breaks a processing step (e.g.
+ * its text crashes the local embedder every time). Counts as a CONTENT
+ * failure: the attempt ledger burns one, and the fact is eventually parked —
+ * unlike transient failures, retrying will never succeed.
+ */
+export declare class FactContentError extends Error {
+    constructor(message: string);
+}
+/**
  * Record one failed classification attempt; returns the new attempt count.
  * When the count reaches MAX_CLASSIFY_ATTEMPTS the caller should persist the
  * fallback so the fact permanently leaves the backfill queue.

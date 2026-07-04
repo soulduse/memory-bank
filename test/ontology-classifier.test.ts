@@ -444,14 +444,15 @@ describe('ontology-classifier', () => {
       expect(result.failed).toEqual([]);
     });
 
-    it('treats candidate-embedding failure as transient — no LLM call, nothing persisted', async () => {
-      const emb = null; // no stored embedding → on-the-fly generation required
-      insertTestFact(db, 'ce-0', 'Embedding model down', emb);
+    it('embedding runtime DOWN (probe also fails) + categories exist → transient, no LLM', async () => {
+      insertTestFact(db, 'ce-0', 'Embedding model down', null);
       const domain = createDomain(db, 'Existing', 'e');
       createCategory(db, domain.id, 'Existing Cat', 'c');
 
       const { generateEmbedding } = await import('../src/embeddings.js');
-      (generateEmbedding as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('model load failed'));
+      (generateEmbedding as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('model load failed')) // fact embed
+        .mockRejectedValueOnce(new Error('model load failed')); // health probe
 
       const result = await classifyFactsBatch(db, [makeFact({ id: 'ce-0', fact: 'Embedding model down', embedding: null })]);
 
@@ -463,6 +464,44 @@ describe('ontology-classifier', () => {
       };
       expect(row.ontology_category_id).toBeNull();
       expect(row.ontology_attempts).toBe(0);
+    });
+
+    it('fact TEXT breaks the embedder (probe succeeds) → content failure, ledger burns', async () => {
+      insertTestFact(db, 'cx-0', 'Cursed text', null);
+      const domain = createDomain(db, 'Existing', 'e');
+      createCategory(db, domain.id, 'Existing Cat', 'c');
+
+      const { generateEmbedding } = await import('../src/embeddings.js');
+      (generateEmbedding as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('tokenizer crash'));
+      // next call (probe) uses the default mockResolvedValue → succeeds
+
+      const stats = await backfillClassifyBatch(db, ['cx-0']);
+
+      expect(stats.failed).toBe(1); // content failure → attempt burned (no eternal transient loop)
+      expect(callHaiku).not.toHaveBeenCalled();
+      const row = db.prepare('SELECT ontology_attempts FROM facts WHERE id = ?').get('cx-0') as { ontology_attempts: number };
+      expect(row.ontology_attempts).toBe(1);
+    });
+
+    it('cold-start: empty taxonomy + embedding down → proceeds with empty candidates (LLM bootstrap)', async () => {
+      insertTestFact(db, 'cs-0', 'First ever fact', null);
+      // NO categories exist — starvation impossible
+
+      const { generateEmbedding } = await import('../src/embeddings.js');
+      (generateEmbedding as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('model down')) // fact embed
+        .mockRejectedValueOnce(new Error('model down')); // probe
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Genesis', category: 'Bootstrap', is_new_domain: true, is_new_category: true },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [makeFact({ id: 'cs-0', fact: 'First ever fact', embedding: null })]);
+
+      expect(result.classified).toEqual(['cs-0']);
+      expect(callHaiku).toHaveBeenCalledTimes(1);
+      expect(getDomainByName(db, 'Genesis')).toBeTruthy();
     });
 
     it('rejects control-character / oversized names as content failure (poisoning guard)', async () => {

@@ -62,6 +62,19 @@ export class TransientLlmError extends Error {
   }
 }
 
+/**
+ * The fact's own content deterministically breaks a processing step (e.g.
+ * its text crashes the local embedder every time). Counts as a CONTENT
+ * failure: the attempt ledger burns one, and the fact is eventually parked —
+ * unlike transient failures, retrying will never succeed.
+ */
+export class FactContentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FactContentError';
+  }
+}
+
 // Prompt-surface sanitizer for DB-sourced strings (category/domain names and
 // descriptions are PAST LLM OUTPUT — a poisoned description would otherwise
 // be re-injected into every future prompt that retrieves it as a candidate,
@@ -174,11 +187,31 @@ async function categoryHits(
     } catch (error) {
       // Candidate-starvation guard: with existing categories but no way to
       // retrieve them, the LLM would recreate near-duplicate categories and
-      // its output would still be PERSISTED — silent taxonomy poisoning.
-      // Embedding-model unavailability is infrastructure, not the fact's
-      // fault → transient (no attempt burned, no classification persisted,
-      // retried next run). An EMPTY index with a working embedding path is
-      // different and allowed: that's the genuine cold-start bootstrap.
+      // its output would still be PERSISTED — silent taxonomy poisoning, so
+      // classification must not proceed blind. Discriminate WHY embedding
+      // failed with a canonical probe (deterministic, local):
+      //   probe embeds fine  → this fact's TEXT breaks the embedder every
+      //                        time → content failure (ledger → parked;
+      //                        marking it transient would re-select it
+      //                        forever).
+      //   probe fails too    → embedding runtime is down → transient (no
+      //                        attempt burned, retried next run)...
+      //   ...unless the taxonomy is EMPTY: cold-start has no candidates to
+      //   starve, so bootstrap may proceed with an empty candidate list.
+      let probeOk = false;
+      try {
+        await generateEmbedding('embedding health probe', 'passage');
+        probeOk = true;
+      } catch {
+        /* runtime down */
+      }
+      if (probeOk) {
+        throw new FactContentError(
+          `fact text breaks the embedder (fact ${fact.id}): ${error instanceof Error ? error.message : error}`,
+        );
+      }
+      const catCount = (db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get() as { n: number }).n;
+      if (catCount === 0) return []; // cold-start bootstrap: nothing to starve
       throw new TransientLlmError(
         `candidate embedding unavailable for fact ${fact.id}: ${error instanceof Error ? error.message : error}`,
       );
@@ -351,16 +384,26 @@ export async function classifyFactsBatch(
   const assignments = new Map<string, { domainId: string; categoryId: string }>();
 
   const preTransient: string[] = [];
+  const preFailed: string[] = [];
   for (const fact of facts) {
     let hits: Awaited<ReturnType<typeof categoryHits>>;
     try {
       hits = await categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
     } catch (error) {
-      // TransientLlmError from candidate retrieval: skip this fact entirely —
-      // no LLM call, no persistence, no attempt burned.
-      console.error(`Candidate retrieval transient for fact ${fact.id}:`, error);
-      preTransient.push(fact.id);
-      continue;
+      // ONLY the typed outcomes are absorbed here; anything else (DB/schema/
+      // vector corruption from the lookup itself) must surface loudly — a
+      // catch-all would silently launder real corruption into "retry later".
+      if (error instanceof TransientLlmError) {
+        console.error(`Candidate retrieval transient for fact ${fact.id}:`, error);
+        preTransient.push(fact.id);
+        continue;
+      }
+      if (error instanceof FactContentError) {
+        console.error(`Candidate retrieval content failure for fact ${fact.id}:`, error);
+        preFailed.push(fact.id);
+        continue;
+      }
+      throw error;
     }
     const det = tryDeterministicAssign(db, fact, hits);
     if (det) {
@@ -373,7 +416,7 @@ export async function classifyFactsBatch(
   }
 
   if (remaining.length === 0) {
-    return { classified: [], deterministic, failed: [], transient: preTransient, assignments };
+    return { classified: [], deterministic, failed: preFailed, transient: preTransient, assignments };
   }
 
   const domains = listDomains(db);
@@ -406,13 +449,13 @@ export async function classifyFactsBatch(
     response = await callHaiku(BATCH_CLASSIFY_SYSTEM_PROMPT, JSON.stringify(payload), 256 * remaining.length + 512);
   } catch (error) {
     console.error(`Batch classification call failed (transient, no attempt burned):`, error);
-    return { classified: [], deterministic, failed: [], transient: [...preTransient, ...remaining.map((f) => f.id)], assignments };
+    return { classified: [], deterministic, failed: preFailed, transient: [...preTransient, ...remaining.map((f) => f.id)], assignments };
   }
   // The Agent SDK can end a stream without a result message, yielding '' —
   // that is a call-level (transient) failure, not the facts' fault.
   if (!response || response.trim() === '') {
     console.error('Batch classification returned an empty response (transient, no attempt burned)');
-    return { classified: [], deterministic, failed: [], transient: [...preTransient, ...remaining.map((f) => f.id)], assignments };
+    return { classified: [], deterministic, failed: preFailed, transient: [...preTransient, ...remaining.map((f) => f.id)], assignments };
   }
   const parsed = parseJsonResponse<BatchClassifyItem[]>(response);
 
@@ -469,7 +512,7 @@ export async function classifyFactsBatch(
     }
   }
 
-  return { classified, deterministic, failed, transient: preTransient, assignments };
+  return { classified, deterministic, failed: [...preFailed, ...failed], transient: preTransient, assignments };
 }
 
 // Hard per-call ceiling for direct backfillClassifyBatch callers: the worker
