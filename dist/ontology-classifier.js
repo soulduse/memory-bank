@@ -144,9 +144,27 @@ async function healCategoryIndex(db, limit = 100) {
     catch {
         return 0; // vec table unusable — nothing to heal here
     }
-    const missing = db.prepare('SELECT id, name, description FROM ontology_categories').all()
-        .filter((c) => !indexed.has(c.id))
-        .slice(0, limit);
+    const liveRows = db.prepare('SELECT id, name, description FROM ontology_categories').all();
+    const liveIds = new Set(liveRows.map((r) => r.id));
+    // Purge STALE vec rows (ids whose category was deleted): they are derived
+    // index residue, and enough of them near a query crowd every live
+    // candidate out of the LIMIT-k window — adding the missing row alone
+    // cannot fix retrieval. Bounded like the add side.
+    let purged = 0;
+    for (const id of indexed) {
+        if (liveIds.has(id))
+            continue;
+        try {
+            db.prepare('DELETE FROM vec_categories WHERE id = ?').run(id);
+            purged++;
+        }
+        catch {
+            break; // vec table unusable mid-way — stop, guard decides
+        }
+        if (purged >= limit)
+            break;
+    }
+    const missing = liveRows.filter((c) => !indexed.has(c.id)).slice(0, limit);
     let healed = 0;
     for (const c of missing) {
         try {
@@ -158,7 +176,7 @@ async function healCategoryIndex(db, limit = 100) {
             break; // embedding runtime down — caller's guard goes transient
         }
     }
-    return healed;
+    return healed + purged;
 }
 /**
  * Top-K category hits for a fact (empty only when the index is empty).

@@ -553,6 +553,34 @@ describe('ontology-classifier', () => {
       expect(row.ontology_category_id).toBe(real.id);
     });
 
+    it('>=k stale rows crowding out the live candidate are PURGED by heal (reviewer repro)', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'cr-0', 'Crowded stale', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const real = createCategory(db, domain.id, 'Real Cat', 'r'); // vec row MISSING
+      // 9 stale rows with the SAME embedding as the fact — they win every LIMIT-k slot
+      for (let i = 0; i < 9; i++) {
+        db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)').run(
+          `stale-${i}`, Buffer.from(new Float32Array(embeddingArr).buffer),
+        );
+      }
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Existing', category: 'Real Cat', is_new_domain: false, is_new_category: false },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'cr-0', fact: 'Crowded stale', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.classified).toEqual(['cr-0']); // stale purged + live healed → retrieval works
+      const staleLeft = (db.prepare("SELECT COUNT(*) AS n FROM vec_categories WHERE id LIKE 'stale-%'").get() as { n: number }).n;
+      expect(staleLeft).toBe(0);
+      const row = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('cr-0') as { ontology_category_id: string | null };
+      expect(row.ontology_category_id).toBe(real.id);
+    });
+
     it('PARTIAL index is healed by coverage check even when hits exist', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'pi-0', 'Partial index', embeddingArr);
