@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-07-04
+
+### Added
+- **Injection observability (fail-loud)**: the UserPromptSubmit context-injection
+  pipeline now records every run as a JSONL entry
+  (`<config>/conversation-index/logs/inject-context.jsonl` — status
+  injected/no-match/skipped/error, candidate/injected counts, duration), and the
+  hook wrapper routes node-level crash output to `logs/inject-context.err.log`
+  instead of discarding it. A silently broken install (stale plugin, missing
+  `node_modules`) is now measurable instead of invisible — the previous
+  silent-failure mode went unnoticed for months.
+
+### Fixed
+- Injection error paths now log the failure reason (truncated to 300 chars)
+  alongside the existing stderr message.
+
 ## [1.2.0] - 2026-07-03
 
 ### Added
