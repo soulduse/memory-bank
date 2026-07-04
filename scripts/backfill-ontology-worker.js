@@ -19,8 +19,29 @@ import { classifyAndLinkFact } from '../dist/ontology-classifier.js';
 import { getIndexDir } from '../dist/paths.js';
 
 const maxArg = process.argv.indexOf('--max');
-const MAX_FACTS = maxArg > -1 ? parseInt(process.argv[maxArg + 1], 10) : Infinity;
-const CONCURRENCY = parseInt(process.env.BACKFILL_CONCURRENCY || '4', 10);
+// Per-run cap (env-overridable). Bounded by DEFAULT — NOT Infinity — so a single
+// run (including a detached run whose session has ended) can never flood the LLM
+// proxy: it processes at most this many facts, then exits cleanly. The
+// SessionStart hook re-spawns to drain the rest across sessions (resumable via
+// the NULL ontology_category_id marker). Garbage --max/env values must not
+// silently fall back to unbounded, so validate to a finite non-negative integer.
+// (def, cap): validate to a finite non-negative int, then clamp to an absolute
+// per-run ceiling so NO invocation path — explicit --max, hook-inherited env, or
+// default — can exceed `cap` and flood the proxy.
+function boundedInt(raw, def, cap) {
+  // Strict: only an all-digits string is a valid override; malformed input
+  // ('', '1e9', '200.9', '999abc', undefined) falls back to the default rather
+  // than being partially parsed by parseInt. Then clamp to the absolute ceiling.
+  const s = raw == null ? '' : String(raw);
+  const v = /^\d+$/.test(s) ? parseInt(s, 10) : def;
+  return Math.min(v, cap);
+}
+const MAX_FACTS = maxArg > -1
+  ? boundedInt(process.argv[maxArg + 1], 200, 1000)
+  : boundedInt(process.env.BACKFILL_ONTOLOGY_MAX, 200, 1000);
+// Strict + clamped to [1, 8]: BACKFILL_CONCURRENCY=0/'abc'/'-1' must not yield
+// zero workers (silent no-op) or overspawn.
+const CONCURRENCY = Math.max(1, boundedInt(process.env.BACKFILL_CONCURRENCY, 4, 8));
 
 const LOCK = path.join(getIndexDir(), 'backfill-ontology.lock');
 const LOG = path.join(getIndexDir(), 'backfill-ontology.log');
@@ -83,7 +104,7 @@ async function main() {
       WHERE is_active = 1 AND ontology_category_id IS NULL
       ORDER BY consolidated_count DESC, created_at DESC
       LIMIT ?
-    `).all(Number.isFinite(MAX_FACTS) ? MAX_FACTS : 1000000);
+    `).all(MAX_FACTS);
     log(`backfill-ontology: ${pending.length} facts this run (concurrency ${CONCURRENCY})`);
 
     let done = 0, failed = 0;
