@@ -508,11 +508,12 @@ describe('ontology-classifier', () => {
       expect(row.ontology_attempts).toBe(0);
     });
 
-    it('categories exist but vec index is empty → refuses starved classification (transient)', async () => {
+    it('vec index unusable(dropped) while categories exist → refuses starved classification (transient)', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'st-0', 'Starved', embeddingArr);
       const domain = createDomain(db, 'Existing', 'e');
-      createCategory(db, domain.id, 'Existing Cat', 'c'); // NO vec_categories row
+      createCategory(db, domain.id, 'Existing Cat', 'c');
+      db.exec('DROP TABLE vec_categories'); // swallowed-error path: lookup AND heal both impossible
 
       const result = await classifyFactsBatch(db, [
         makeFact({ id: 'st-0', fact: 'Starved', embedding: new Float32Array(embeddingArr) }),
@@ -526,6 +527,28 @@ describe('ontology-classifier', () => {
       };
       expect(row.ontology_category_id).toBeNull();
       expect(row.ontology_attempts).toBe(0);
+    });
+
+    it('unindexed categories (post-cold-start) are SELF-HEALED — no permanent deadlock', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'sh-0', 'Self heal', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const category = createCategory(db, domain.id, 'Existing Cat', 'c'); // vec row MISSING (runtime was down at creation)
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Existing', category: 'Existing Cat', is_new_domain: false, is_new_category: false },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'sh-0', fact: 'Self heal', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.classified).toEqual(['sh-0']); // healed index → candidates → normal LLM path
+      const vecCount = (db.prepare('SELECT COUNT(*) AS n FROM vec_categories').get() as { n: number }).n;
+      expect(vecCount).toBeGreaterThan(0); // the missing row was rebuilt
+      const row = db.prepare('SELECT ontology_category_id FROM facts WHERE id = ?').get('sh-0') as { ontology_category_id: string | null };
+      expect(row.ontology_category_id).toBe(category.id);
     });
 
     it('cold-start: empty taxonomy + embedding down → proceeds with empty candidates (LLM bootstrap)', async () => {

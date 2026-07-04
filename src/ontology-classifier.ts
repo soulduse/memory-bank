@@ -167,6 +167,41 @@ function categoryEmbeddingText(name: string, description?: string | null): strin
 }
 
 /**
+ * Bounded self-repair of the category vec index: embed categories that lack
+ * a vec_categories row (created while the embedding runtime was down —
+ * applyClassification logs-and-continues on index failure). Without this,
+ * the starvation guard below would dead-lock all future classification
+ * behind a manual backfill-category-embeddings run. Local embeddings only,
+ * no LLM cost; stops at the first failure (runtime still down).
+ */
+async function healCategoryIndex(db: Database.Database, limit: number = 100): Promise<number> {
+  let indexed: Set<string>;
+  try {
+    indexed = new Set((db.prepare('SELECT id FROM vec_categories').all() as Array<{ id: string }>).map((r) => r.id));
+  } catch {
+    return 0; // vec table unusable — nothing to heal here
+  }
+  const missing = (db.prepare('SELECT id, name, description FROM ontology_categories').all() as Array<{
+    id: string;
+    name: string;
+    description: string | null;
+  }>)
+    .filter((c) => !indexed.has(c.id))
+    .slice(0, limit);
+  let healed = 0;
+  for (const c of missing) {
+    try {
+      const emb = await generateEmbedding(categoryEmbeddingText(c.name, c.description), 'passage');
+      upsertCategoryEmbedding(db, c.id, emb);
+      healed++;
+    } catch {
+      break; // embedding runtime down — caller's guard goes transient
+    }
+  }
+  return healed;
+}
+
+/**
  * Top-K category hits for a fact (empty only when the index is empty).
  * A fact without a stored embedding gets one generated on the fly (local
  * model, zero LLM cost) — this preserves the old single-path contract of
@@ -233,10 +268,18 @@ async function categoryHits(
     // swallows vec-table errors into [] and an empty/dropped vec_categories
     // index also yields [] — in every such case, classifying with zero
     // candidates while categories EXIST would let the LLM persist duplicate
-    // taxonomy. Refuse and retry later. (vec0 MATCH returns nearest rows
-    // regardless of distance, so a non-empty usable index cannot yield 0.)
+    // taxonomy. (vec0 MATCH returns nearest rows regardless of distance, so
+    // a non-empty usable index cannot yield 0.) Before refusing, try to
+    // SELF-HEAL: categories created while the embedding runtime was down
+    // have no vec rows (applyClassification logs-and-continues), and without
+    // repair the guard would dead-lock classification permanently.
     const catCount = (db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get() as { n: number }).n;
     if (catCount > 0) {
+      const healed = await healCategoryIndex(db);
+      if (healed > 0) {
+        const retry = searchSimilarCategories(db, embedding, k);
+        if (retry.length > 0) return retry;
+      }
       throw new TransientLlmError(
         `category index unavailable/empty while ${catCount} categories exist — refusing candidate-starved classification (fact ${fact.id})`,
       );
