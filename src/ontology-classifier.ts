@@ -75,6 +75,20 @@ export class FactContentError extends Error {
   }
 }
 
+/**
+ * The category vec index is broken in a way self-heal cannot fix (table
+ * unscannable / rejects writes). Neither the fact's fault (no ledger burn —
+ * parking innocents in General/Misc under corruption would be wrong) nor
+ * transient (retry won't fix it): it must surface LOUDLY — worker logs a
+ * batch ERROR and circuit-breaks; manual repair is required.
+ */
+export class IndexRepairError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IndexRepairError';
+  }
+}
+
 // Prompt-surface sanitizer for DB-sourced strings (category/domain names and
 // descriptions are PAST LLM OUTPUT — a poisoned description would otherwise
 // be re-injected into every future prompt that retrieves it as a candidate,
@@ -177,7 +191,7 @@ function categoryEmbeddingText(name: string, description?: string | null): strin
 async function healCategoryIndex(
   db: Database.Database,
   limit: number = 100,
-): Promise<{ added: number; purged: number; missingRemaining: number; staleRemaining: number; blocked: 'embed' | 'purge' | 'scan' | null }> {
+): Promise<{ added: number; purged: number; missingRemaining: number; staleRemaining: number; blocked: 'embed' | 'write' | 'purge' | 'scan' | null }> {
   let indexed: Set<string>;
   try {
     indexed = new Set((db.prepare('SELECT id FROM vec_categories').all() as Array<{ id: string }>).map((r) => r.id));
@@ -203,7 +217,7 @@ async function healCategoryIndex(
   // filters into missing candidate slots).
   const staleAll = [...indexed].filter((id) => !liveIds.has(id));
   let purged = 0;
-  let blocked: 'embed' | 'purge' | 'scan' | null = null;
+  let blocked: 'embed' | 'write' | 'purge' | 'scan' | null = null;
   for (const id of staleAll) {
     try {
       db.prepare('DELETE FROM vec_categories WHERE id = ?').run(id);
@@ -219,12 +233,20 @@ async function healCategoryIndex(
   const missing = missingAll.slice(0, limit);
   let added = 0;
   for (const c of missing) {
+    let emb: number[];
     try {
-      const emb = await generateEmbedding(categoryEmbeddingText(c.name, c.description), 'passage');
+      emb = await generateEmbedding(categoryEmbeddingText(c.name, c.description), 'passage');
+    } catch {
+      if (!blocked) blocked = 'embed'; // runtime down — caller's guard goes transient
+      break;
+    }
+    try {
       upsertCategoryEmbedding(db, c.id, emb);
       added++;
     } catch {
-      if (!blocked) blocked = 'embed'; // runtime down — caller's guard goes transient
+      // vec INSERT rejected while the table scans: index corruption, NOT an
+      // embedding-runtime problem — must escalate hard, not loop transient.
+      blocked = 'write';
       break;
     }
   }
@@ -342,8 +364,8 @@ async function categoryHits(
         //   loudly (worker batch-ERROR log + circuit breaker; insert path
         //   ledgers it) instead of silently re-selecting forever.
         const progress = heal.added + heal.purged;
-        if (progress === 0 && (heal.blocked === 'purge' || heal.blocked === 'scan')) {
-          throw new Error(
+        if (progress === 0 && (heal.blocked === 'purge' || heal.blocked === 'scan' || heal.blocked === 'write')) {
+          throw new IndexRepairError(
             `ontology category index repair FAILED (${heal.blocked}: vec_categories unwritable/unscannable; missing ${heal.missingRemaining}, stale ${heal.staleRemaining}) — manual repair required (fact ${fact.id})`,
           );
         }
@@ -823,7 +845,10 @@ export async function classifyAndLinkFact(
     // path: an outage is not the fact's fault, and mixing the two would let
     // one transient hiccup push a fact with prior content failures over the
     // parking cap.
-    if (!(error instanceof TransientLlmError)) {
+    if (!(error instanceof TransientLlmError) && !(error instanceof IndexRepairError)) {
+      // IndexRepairError is infra corruption — parking innocent facts in
+      // General/Misc because the INDEX is broken would misfile them; the
+      // error is already surfaced loudly above.
       try {
         const attempts = recordOntologyAttempt(db, factId);
         if (attempts >= MAX_CLASSIFY_ATTEMPTS) {

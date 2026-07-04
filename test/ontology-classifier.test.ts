@@ -629,6 +629,39 @@ describe('ontology-classifier', () => {
       expect(callHaiku).not.toHaveBeenCalled();
     });
 
+    it('insert path does NOT ledger IndexRepairError — corruption cannot park innocent facts', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'ir-0', 'Corruption victim', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      createCategory(db, domain.id, 'Existing Cat', 'c');
+      db.exec('DROP TABLE vec_categories');
+
+      for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS; i++) {
+        await classifyAndLinkFact(db, 'ir-0', embeddingArr); // must not throw out, must not ledger
+      }
+
+      const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('ir-0') as {
+        ontology_category_id: string | null;
+        ontology_attempts: number;
+      };
+      expect(row.ontology_attempts).toBe(0); // infra corruption ≠ the fact's fault
+      expect(row.ontology_category_id).toBeNull(); // NOT parked in General/Misc
+    });
+
+    it('vec table scans but rejects INSERT (wrong schema) → hard repair failure, not transient loop', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'wr-0', 'Write broken', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      createCategory(db, domain.id, 'Existing Cat', 'c'); // unindexed → heal must add
+      db.exec('DROP TABLE vec_categories');
+      db.exec('CREATE TABLE vec_categories (id TEXT PRIMARY KEY)'); // scanable, but INSERT(id, embedding) fails
+
+      await expect(
+        classifyFactsBatch(db, [makeFact({ id: 'wr-0', fact: 'Write broken', embedding: new Float32Array(embeddingArr) })]),
+      ).rejects.toThrow(/repair FAILED \(write/);
+      expect(callHaiku).not.toHaveBeenCalled();
+    });
+
     it('purge-only heal (missing add FAILED) must NOT unlock classification — transient', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'po-0', 'Purge only', embeddingArr);
