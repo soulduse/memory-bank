@@ -116,11 +116,27 @@ Given a new fact and an existing fact, determine if there is a meaningful relati
 function categoryEmbeddingText(name, description) {
     return description ? `${name}: ${description}` : name;
 }
-/** Top-K category hits for a fact embedding (empty when no embedding/index). */
-function categoryHits(db, fact, k) {
-    if (!fact.embedding)
-        return [];
-    return searchSimilarCategories(db, Array.from(fact.embedding), k);
+/**
+ * Top-K category hits for a fact (empty only when the index is empty).
+ * A fact without a stored embedding gets one generated on the fly (local
+ * model, zero LLM cost) — this preserves the old single-path contract of
+ * "no hits → still show existing categories" without dumping 3K+ category
+ * lines into a batch prompt: with the vec index fully populated, the top-K
+ * IS the reuse-candidate list, and starving the LLM of candidates would
+ * regrow taxonomy sprawl.
+ */
+async function categoryHits(db, fact, k) {
+    let embedding = fact.embedding ? Array.from(fact.embedding) : null;
+    if (!embedding) {
+        try {
+            embedding = await generateEmbedding(fact.fact.slice(0, 2000), 'passage');
+        }
+        catch (error) {
+            console.error(`Candidate embedding failed for fact ${fact.id}:`, error);
+            return [];
+        }
+    }
+    return searchSimilarCategories(db, embedding, k);
 }
 /**
  * Deterministic reuse gate: if the nearest existing category clears the
@@ -248,7 +264,7 @@ export async function classifyFactsBatch(db, facts) {
     const hitsByFact = new Map();
     const assignments = new Map();
     for (const fact of facts) {
-        const hits = categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
+        const hits = await categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
         const det = tryDeterministicAssign(db, fact, hits);
         if (det) {
             deterministic.push(fact.id);

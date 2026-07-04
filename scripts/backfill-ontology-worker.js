@@ -135,7 +135,12 @@ async function main() {
     // of doomed calls — a slow-motion flood, every SessionStart. After this
     // many consecutive all-transient batches the run aborts; the facts stay
     // NULL + attempts-untouched and drain resumes when the LLM path is back.
-    const TRANSIENT_TRIP = 3;
+    // Threshold ≥ CONCURRENCY+1: with N workers, N batches can be in flight
+    // when transients start landing — requiring a full wave plus one to be
+    // all-transient prevents a late-completing successful batch from being
+    // pre-empted by 3 fast failures (the residual race is benign: facts are
+    // preserved untouched and the next run resumes).
+    const TRANSIENT_TRIP = Math.max(3, CONCURRENCY + 1);
     let consecutiveTransient = 0;
     let circuitOpen = false;
     const workers = Array.from({ length: CONCURRENCY }, async () => {

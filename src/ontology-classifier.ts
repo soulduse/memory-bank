@@ -153,14 +153,30 @@ function categoryEmbeddingText(name: string, description?: string | null): strin
   return description ? `${name}: ${description}` : name;
 }
 
-/** Top-K category hits for a fact embedding (empty when no embedding/index). */
-function categoryHits(
+/**
+ * Top-K category hits for a fact (empty only when the index is empty).
+ * A fact without a stored embedding gets one generated on the fly (local
+ * model, zero LLM cost) — this preserves the old single-path contract of
+ * "no hits → still show existing categories" without dumping 3K+ category
+ * lines into a batch prompt: with the vec index fully populated, the top-K
+ * IS the reuse-candidate list, and starving the LLM of candidates would
+ * regrow taxonomy sprawl.
+ */
+async function categoryHits(
   db: Database.Database,
   fact: Fact,
   k: number,
-): Array<{ category: { id: string; domain_id: string; name: string; description: string | null }; domainName: string; distance: number }> {
-  if (!fact.embedding) return [];
-  return searchSimilarCategories(db, Array.from(fact.embedding), k);
+): Promise<Array<{ category: { id: string; domain_id: string; name: string; description: string | null }; domainName: string; distance: number }>> {
+  let embedding: number[] | null = fact.embedding ? Array.from(fact.embedding) : null;
+  if (!embedding) {
+    try {
+      embedding = await generateEmbedding(fact.fact.slice(0, 2000), 'passage');
+    } catch (error) {
+      console.error(`Candidate embedding failed for fact ${fact.id}:`, error);
+      return [];
+    }
+  }
+  return searchSimilarCategories(db, embedding, k);
 }
 
 /**
@@ -171,7 +187,7 @@ function categoryHits(
 function tryDeterministicAssign(
   db: Database.Database,
   fact: Fact,
-  hits: ReturnType<typeof categoryHits>,
+  hits: Awaited<ReturnType<typeof categoryHits>>,
 ): { domainId: string; categoryId: string } | null {
   const top = hits[0];
   if (!top) return null;
@@ -323,11 +339,11 @@ export async function classifyFactsBatch(
 }> {
   const deterministic: string[] = [];
   const remaining: Fact[] = [];
-  const hitsByFact = new Map<string, ReturnType<typeof categoryHits>>();
+  const hitsByFact = new Map<string, Awaited<ReturnType<typeof categoryHits>>>();
   const assignments = new Map<string, { domainId: string; categoryId: string }>();
 
   for (const fact of facts) {
-    const hits = categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
+    const hits = await categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
     const det = tryDeterministicAssign(db, fact, hits);
     if (det) {
       deterministic.push(fact.id);
