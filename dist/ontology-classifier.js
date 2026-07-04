@@ -1,15 +1,12 @@
 import { callHaiku, parseJsonResponse } from './llm.js';
 import { generateEmbedding } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
-import { listDomains, listCategories, getDomainByName, getCategoryByName, createDomain, createCategory, classifyFact, createRelation, searchSimilarCategories, upsertCategoryEmbedding, } from './ontology-db.js';
-// Number of nearest existing categories to present to the classifier LLM as
-// reuse candidates. Replaces dumping ALL categories (measured 1,612 ≈ 95K
-// tokens) with an embedding top-K (≈ a few hundred tokens). The full domain
-// list (small) is always included so the LLM can still place a genuinely new
-// topic under the right domain.
-const CATEGORY_CANDIDATES = 20;
-// Candidates per fact in BATCH classification prompts — smaller than the
-// single-fact list so a 20-fact batch stays a few KB instead of 20×20 lines.
+import { listDomains, getDomainByName, getCategoryByName, createDomain, createCategory, classifyFact, createRelation, searchSimilarCategories, upsertCategoryEmbedding, } from './ontology-db.js';
+// Nearest existing categories presented per fact as reuse candidates —
+// embedding top-K instead of dumping ALL categories (measured 1,612 ≈ 95K
+// tokens); kept small so a 20-fact batch stays a few KB. The full domain
+// list (small) is always included so the LLM can still place a genuinely
+// new topic under the right domain.
 const BATCH_CATEGORY_CANDIDATES = 8;
 // Max classification attempts before a fact is permanently parked in the
 // General/Misc fallback. Without this cap, a fact that deterministically
@@ -35,26 +32,40 @@ function detGate() {
 function l2ToCosine(distance) {
     return 1 - (distance * distance) / 2;
 }
-const CLASSIFY_SYSTEM_PROMPT = `You are an ontology classifier for technical decision facts.
-Given a fact and a list of existing domains/categories, classify the fact.
-
-## Domains represent broad areas (e.g., "Architecture", "Frontend", "Backend", "DevOps", "Testing", "Database")
-## Categories are specific topics within a domain (e.g., "State Management", "API Design", "Authentication")
-
-## Rules
-- Reuse existing domains/categories when appropriate (prefer reuse over creation)
-- Create new domain/category only when no existing one fits
-- domain and category names must be in English, concise (1-3 words)
-
-## Output format (JSON only, no markdown)
-{
-  "domain": "existing or new domain name",
-  "category": "existing or new category name",
-  "is_new_domain": false,
-  "is_new_category": false,
-  "domain_description": "only if is_new_domain is true",
-  "category_description": "only if is_new_category is true"
-}`;
+/**
+ * The LLM CALL itself failed (SDK/network/spawn/empty stream) — the fact is
+ * not the problem. Callers must NOT burn a classification attempt on these;
+ * burning attempts during an outage would park innocent facts in
+ * General/Misc after 3 outage windows.
+ */
+export class TransientLlmError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'TransientLlmError';
+    }
+}
+// Prompt-surface sanitizer for DB-sourced strings (category/domain names and
+// descriptions are PAST LLM OUTPUT — a poisoned description would otherwise
+// be re-injected into every future prompt that retrieves it as a candidate,
+// and re-persisted via applyClassification: a self-sustaining poisoning
+// loop). Single line + hard length cap bounds that surface; it cannot fully
+// eliminate semantic injection (LLM-in-the-loop), but the system prompt
+// pins all payload fields as data and this keeps the carrier small.
+function oneLine(value, max) {
+    return value.replace(/\s+/g, ' ').trim().slice(0, max);
+}
+const MAX_NAME_LEN = 60;
+const MAX_DESCRIPTION_LEN = 200;
+/** Validate + normalize an LLM-proposed domain/category name; null if unusable. */
+function sanitizeName(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const name = oneLine(raw, MAX_NAME_LEN);
+    // Non-empty and free of control characters — "English, concise" contract.
+    if (name === '' || /[\u0000-\u001f\u007f]/.test(name))
+        return null;
+    return name;
+}
 const BATCH_CLASSIFY_SYSTEM_PROMPT = `You are an ontology classifier for technical decision facts.
 The user message is ONE JSON object: { "domains": [...], "facts": [ { "index", "fact", "fact_category", "candidates" } ] }.
 Classify EACH entry of "facts" independently against the shared "domains" list and that entry's own "candidates".
@@ -131,15 +142,26 @@ function tryDeterministicAssign(db, fact, hits) {
  * Shared by the single and batch classification paths.
  */
 async function applyClassification(db, factId, parsed) {
+    // Sanitize LLM-proposed names/descriptions BEFORE persisting: whatever is
+    // stored here is re-injected into every future classification prompt that
+    // retrieves it as a candidate (taxonomy poisoning loop). An unusable name
+    // is a content failure — the caller's attempt ledger handles it.
+    const domainName = sanitizeName(parsed.domain);
+    const categoryName = sanitizeName(parsed.category);
+    if (!domainName || !categoryName) {
+        throw new Error('ontology classify: unusable domain/category name in LLM response');
+    }
+    const domainDescription = typeof parsed.domain_description === 'string' ? oneLine(parsed.domain_description, MAX_DESCRIPTION_LEN) : undefined;
+    const categoryDescription = typeof parsed.category_description === 'string' ? oneLine(parsed.category_description, MAX_DESCRIPTION_LEN) : undefined;
     // Resolve or create domain
-    let domain = getDomainByName(db, parsed.domain);
+    let domain = getDomainByName(db, domainName);
     if (!domain) {
-        domain = createDomain(db, parsed.domain, parsed.domain_description);
+        domain = createDomain(db, domainName, domainDescription);
     }
     // Resolve or create category
-    let category = getCategoryByName(db, parsed.category, domain.id);
+    let category = getCategoryByName(db, categoryName, domain.id);
     if (!category) {
-        category = createCategory(db, domain.id, parsed.category, parsed.category_description);
+        category = createCategory(db, domain.id, categoryName, categoryDescription);
         // Index the new category so future facts can retrieve it as a candidate
         // (without this the candidate list could never grow → category sprawl).
         try {
@@ -178,55 +200,29 @@ export function persistFallbackClassification(db, factId) {
     db.prepare(`UPDATE facts SET ontology_category_id = ?, updated_at = ? WHERE id = ? AND ontology_category_id IS NULL`).run(fallback.categoryId, new Date().toISOString(), factId);
     return fallback;
 }
+/**
+ * Single-fact classification — a thin wrapper over the batch core so the
+ * insert-time path shares the SAME structured-JSON prompt, index validation,
+ * and transient/content failure taxonomy (an earlier revision kept a raw
+ * prose prompt here, which re-opened the section-spoofing surface the batch
+ * path had just closed).
+ *
+ * Throws TransientLlmError when the call itself failed (caller must not burn
+ * an attempt) and a plain Error on content failures (caller ledgers it).
+ */
 export async function classifyFactToOntology(db, fact) {
-    // Candidate retrieval: present only the top-K nearest existing categories
-    // (by fact embedding) instead of all categories. Falls back to the full list
-    // when there is no fact embedding or the category index is still empty
-    // (e.g. before the one-time backfill), so behaviour degrades gracefully.
-    const hits = categoryHits(db, fact, CATEGORY_CANDIDATES);
-    // Deterministic reuse gate — obvious matches never reach the LLM.
-    const deterministic = tryDeterministicAssign(db, fact, hits);
-    if (deterministic)
-        return deterministic;
-    const domains = listDomains(db);
-    const domainList = domains.map((d) => `- ${d.name}: ${d.description ?? '(no description)'}`).join('\n');
-    let candidates = hits.map((h) => ({
-        name: h.category.name,
-        domainName: h.domainName,
-        description: h.category.description,
-    }));
-    if (candidates.length === 0) {
-        const all = listCategories(db);
-        candidates = all.map((c) => ({
-            name: c.name,
-            domainName: domains.find((d) => d.id === c.domain_id)?.name ?? '?',
-            description: c.description,
-        }));
+    const result = await classifyFactsBatch(db, [fact]);
+    const assigned = result.assignments.get(fact.id);
+    if (assigned)
+        return assigned;
+    if (result.transient.includes(fact.id)) {
+        throw new TransientLlmError('ontology classify: LLM call failed');
     }
-    const categoryList = candidates
-        .map((c) => `- ${c.domainName} / ${c.name}: ${c.description ?? '(no description)'}`)
-        .join('\n');
-    const prompt = [
-        `Fact: "${fact.fact}"`,
-        `Fact category: ${fact.category}`,
-        '',
-        'Existing domains:',
-        domainList || '(none)',
-        '',
-        'Candidate categories (most similar existing — reuse one of these if it fits):',
-        categoryList || '(none)',
-    ].join('\n');
-    const response = await callHaiku(CLASSIFY_SYSTEM_PROMPT, prompt, 512);
-    const parsed = parseJsonResponse(response);
-    if (!parsed) {
-        // Unparseable output is a FAILED attempt, not a fallback: silently
-        // parking on first failure would misfile transient noise, and the old
-        // behaviour (returning fallback ids WITHOUT persisting) left the fact
-        // NULL forever. Callers count the attempt via recordOntologyAttempt and
-        // persist the fallback only at MAX_CLASSIFY_ATTEMPTS.
-        throw new Error('ontology classify: unparseable LLM response');
-    }
-    return applyClassification(db, fact.id, parsed);
+    // Unparseable/unusable output is a FAILED attempt, not a silent fallback:
+    // the pre-2026-07 behaviour returned fallback ids WITHOUT persisting them,
+    // leaving the fact NULL forever. Callers count the attempt and park at
+    // MAX_CLASSIFY_ATTEMPTS.
+    throw new Error('ontology classify: unparseable LLM response');
 }
 /**
  * Classify a batch of facts with ONE LLM call (plus zero-cost deterministic
@@ -250,33 +246,41 @@ export async function classifyFactsBatch(db, facts) {
     const deterministic = [];
     const remaining = [];
     const hitsByFact = new Map();
+    const assignments = new Map();
     for (const fact of facts) {
         const hits = categoryHits(db, fact, BATCH_CATEGORY_CANDIDATES);
-        if (tryDeterministicAssign(db, fact, hits)) {
+        const det = tryDeterministicAssign(db, fact, hits);
+        if (det) {
             deterministic.push(fact.id);
+            assignments.set(fact.id, det);
             continue;
         }
         hitsByFact.set(fact.id, hits);
         remaining.push(fact);
     }
     if (remaining.length === 0) {
-        return { classified: [], deterministic, failed: [], transient: [] };
+        return { classified: [], deterministic, failed: [], transient: [], assignments };
     }
     const domains = listDomains(db);
     // Structured JSON payload, NOT concatenated prose sections: fact text is a
     // JSON string literal, so a fact containing "### Fact 3" / fake JSON cannot
-    // spoof section boundaries and shift the index mapping.
+    // spoof section boundaries and shift the index mapping. DB-sourced names /
+    // descriptions (past LLM output) are single-lined and length-capped — see
+    // oneLine() for the poisoning-loop rationale.
     const payload = {
-        domains: domains.map((d) => ({ name: d.name, description: d.description ?? undefined })),
+        domains: domains.map((d) => ({
+            name: oneLine(d.name, MAX_NAME_LEN),
+            description: d.description ? oneLine(d.description, MAX_DESCRIPTION_LEN) : undefined,
+        })),
         facts: remaining.map((fact, i) => ({
             index: i,
             // Bound each fact's contribution so a 20-fact batch stays a few KB.
             fact: fact.fact.length > 400 ? `${fact.fact.slice(0, 400)}…` : fact.fact,
             fact_category: fact.category,
             candidates: (hitsByFact.get(fact.id) ?? []).map((h) => ({
-                domain: h.domainName,
-                category: h.category.name,
-                description: h.category.description ?? undefined,
+                domain: oneLine(h.domainName, MAX_NAME_LEN),
+                category: oneLine(h.category.name, MAX_NAME_LEN),
+                description: h.category.description ? oneLine(h.category.description, MAX_DESCRIPTION_LEN) : undefined,
             })),
         })),
     };
@@ -286,27 +290,43 @@ export async function classifyFactsBatch(db, facts) {
     }
     catch (error) {
         console.error(`Batch classification call failed (transient, no attempt burned):`, error);
-        return { classified: [], deterministic, failed: [], transient: remaining.map((f) => f.id) };
+        return { classified: [], deterministic, failed: [], transient: remaining.map((f) => f.id), assignments };
+    }
+    // The Agent SDK can end a stream without a result message, yielding '' —
+    // that is a call-level (transient) failure, not the facts' fault.
+    if (!response || response.trim() === '') {
+        console.error('Batch classification returned an empty response (transient, no attempt burned)');
+        return { classified: [], deterministic, failed: [], transient: remaining.map((f) => f.id), assignments };
     }
     const parsed = parseJsonResponse(response);
     // Index the response items; tolerate partial/malformed arrays — every fact
     // without a usable item is reported as failed (attempt counting is the
     // caller's responsibility, and honest failure counts matter: the previous
     // pipeline swallowed errors and logged "failed 0" regardless).
-    // index must be an in-range integer; duplicates are FIRST-wins so a stray
-    // repeated index cannot overwrite an earlier fact's classification.
+    // index must be an in-range integer; a DUPLICATED index means the model got
+    // confused about item identity, so ALL claimants for that index are
+    // distrusted and dropped (first-wins would let a fabricated early item
+    // pre-empt the authentic one). The fact takes a content failure and is
+    // retried in a later — differently composed — batch.
     const byIndex = new Map();
+    const conflicted = new Set();
     if (Array.isArray(parsed)) {
         for (const item of parsed) {
             if (item &&
                 Number.isInteger(item.index) &&
                 item.index >= 0 &&
                 item.index < remaining.length &&
-                !byIndex.has(item.index) &&
                 typeof item.domain === 'string' &&
                 item.domain.trim() !== '' &&
                 typeof item.category === 'string' &&
                 item.category.trim() !== '') {
+                if (conflicted.has(item.index))
+                    continue;
+                if (byIndex.has(item.index)) {
+                    byIndex.delete(item.index);
+                    conflicted.add(item.index);
+                    continue;
+                }
                 byIndex.set(item.index, item);
             }
         }
@@ -321,7 +341,8 @@ export async function classifyFactsBatch(db, facts) {
             continue;
         }
         try {
-            await applyClassification(db, fact.id, item);
+            const applied = await applyClassification(db, fact.id, item);
+            assignments.set(fact.id, applied);
             classified.push(fact.id);
         }
         catch (error) {
@@ -329,7 +350,7 @@ export async function classifyFactsBatch(db, facts) {
             failed.push(fact.id);
         }
     }
-    return { classified, deterministic, failed, transient: [] };
+    return { classified, deterministic, failed, transient: [], assignments };
 }
 // Hard per-call ceiling for direct backfillClassifyBatch callers: the worker
 // already chunks to BACKFILL_BATCH_SIZE (≤50), but a future script calling
@@ -390,14 +411,16 @@ export async function backfillClassifyBatch(db, factIds, opts = {}) {
  * safe against races with a concurrent successful classification.
  */
 export function parkExhaustedFacts(db) {
-    const rows = db
-        .prepare(`SELECT id FROM facts
+    const fallback = ensureFallbackCategory(db);
+    // Single conditional UPDATE: atomic (no select-then-write window against a
+    // concurrent successful classification) and the returned count is the
+    // number of rows ACTUALLY parked — not the number selected, which would
+    // over-report whenever a concurrent path won the race.
+    const result = db
+        .prepare(`UPDATE facts SET ontology_category_id = ?, updated_at = ?
        WHERE is_active = 1 AND ontology_category_id IS NULL AND COALESCE(ontology_attempts, 0) >= ?`)
-        .all(MAX_CLASSIFY_ATTEMPTS);
-    for (const row of rows) {
-        persistFallbackClassification(db, row.id);
-    }
-    return rows.length;
+        .run(fallback.categoryId, new Date().toISOString(), MAX_CLASSIFY_ATTEMPTS);
+    return result.changes;
 }
 export async function detectRelations(db, newFact, 
 // 2 (was 5): each candidate costs one Haiku call, so per-fact ontology cost
@@ -446,17 +469,23 @@ export async function classifyAndLinkFact(db, factId, embedding) {
     }
     catch (error) {
         console.error(`Ontology classification failed for fact ${factId}:`, error);
-        // Non-fatal for the insert path, but every failure is LEDGERED so the
+        // Non-fatal for the insert path, but CONTENT failures are LEDGERED so the
         // backfill can't re-burn LLM calls on a permanently failing fact; after
         // MAX attempts it is parked in General/Misc (still fully searchable).
-        try {
-            const attempts = recordOntologyAttempt(db, factId);
-            if (attempts >= MAX_CLASSIFY_ATTEMPTS) {
-                persistFallbackClassification(db, factId);
+        // Transient call failures burn no attempt — same taxonomy as the batch
+        // path: an outage is not the fact's fault, and mixing the two would let
+        // one transient hiccup push a fact with prior content failures over the
+        // parking cap.
+        if (!(error instanceof TransientLlmError)) {
+            try {
+                const attempts = recordOntologyAttempt(db, factId);
+                if (attempts >= MAX_CLASSIFY_ATTEMPTS) {
+                    persistFallbackClassification(db, factId);
+                }
             }
-        }
-        catch (ledgerError) {
-            console.error(`Ontology attempt ledger failed for fact ${factId}:`, ledgerError);
+            catch (ledgerError) {
+                console.error(`Ontology attempt ledger failed for fact ${factId}:`, ledgerError);
+            }
         }
     }
     try {

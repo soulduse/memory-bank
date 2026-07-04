@@ -3,6 +3,15 @@ import type { Fact } from './types.js';
 import { generateEmbedding } from './embeddings.js';
 export declare const MAX_CLASSIFY_ATTEMPTS = 3;
 /**
+ * The LLM CALL itself failed (SDK/network/spawn/empty stream) — the fact is
+ * not the problem. Callers must NOT burn a classification attempt on these;
+ * burning attempts during an outage would park innocent facts in
+ * General/Misc after 3 outage windows.
+ */
+export declare class TransientLlmError extends Error {
+    constructor(message: string);
+}
+/**
  * Record one failed classification attempt; returns the new attempt count.
  * When the count reaches MAX_CLASSIFY_ATTEMPTS the caller should persist the
  * fallback so the fact permanently leaves the backfill queue.
@@ -22,6 +31,16 @@ export declare function persistFallbackClassification(db: Database.Database, fac
     domainId: string;
     categoryId: string;
 };
+/**
+ * Single-fact classification — a thin wrapper over the batch core so the
+ * insert-time path shares the SAME structured-JSON prompt, index validation,
+ * and transient/content failure taxonomy (an earlier revision kept a raw
+ * prose prompt here, which re-opened the section-spoofing surface the batch
+ * path had just closed).
+ *
+ * Throws TransientLlmError when the call itself failed (caller must not burn
+ * an attempt) and a plain Error on content failures (caller ledgers it).
+ */
 export declare function classifyFactToOntology(db: Database.Database, fact: Fact): Promise<{
     domainId: string;
     categoryId: string;
@@ -49,6 +68,11 @@ export declare function classifyFactsBatch(db: Database.Database, facts: Fact[])
     deterministic: string[];
     failed: string[];
     transient: string[];
+    /** fact id → persisted assignment, for callers that need the ids (single path). */
+    assignments: Map<string, {
+        domainId: string;
+        categoryId: string;
+    }>;
 }>;
 /**
  * Backfill-facing wrapper: load facts by id, classify them in sub-batches,

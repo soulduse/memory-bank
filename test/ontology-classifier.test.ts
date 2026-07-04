@@ -155,14 +155,15 @@ describe('ontology-classifier', () => {
 
   describe('classifyFactToOntology', () => {
     it('should create new domain and category from LLM response', async () => {
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
+        index: 0,
         domain: 'Frontend',
         category: 'TypeScript',
         is_new_domain: true,
         is_new_category: true,
         domain_description: 'Frontend development',
         category_description: 'TypeScript usage patterns',
-      });
+      }]);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{"domain":"Frontend"}');
 
       const fact = makeFact();
@@ -178,13 +179,14 @@ describe('ontology-classifier', () => {
 
     it('should reuse existing domain', async () => {
       const existingDomain = createDomain(db, 'Frontend', 'Frontend development');
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
+        index: 0,
         domain: 'Frontend',
         category: 'React',
         is_new_domain: false,
         is_new_category: true,
         category_description: 'React patterns',
-      });
+      }]);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       const fact = makeFact();
@@ -197,12 +199,13 @@ describe('ontology-classifier', () => {
       const domain = createDomain(db, 'Frontend', 'Frontend dev');
       const category = createCategory(db, domain.id, 'TypeScript', 'TS patterns');
 
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
+        index: 0,
         domain: 'Frontend',
         category: 'TypeScript',
         is_new_domain: false,
         is_new_category: false,
-      });
+      }]);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       const fact = makeFact();
@@ -251,12 +254,13 @@ describe('ontology-classifier', () => {
       const category = createCategory(db, domain.id, 'State Management', 'State patterns');
       upsertCategoryEmbedding(db, category.id, embeddingArr); // identical → sim 1.0, still must not fire
 
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
+        index: 0,
         domain: 'Frontend',
         category: 'State Management',
         is_new_domain: false,
         is_new_category: false,
-      });
+      }]);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       const fact = makeFact({ id: 'fact-nogate', embedding: new Float32Array(embeddingArr) });
@@ -403,14 +407,15 @@ describe('ontology-classifier', () => {
       expect(payload.facts[0].fact).toContain('### Fact 1'); // data, safely escaped inside a JSON string
     });
 
-    it('ignores duplicate/out-of-range/non-integer indexes (first-wins, no overwrite)', async () => {
+    it('drops ALL claimants of a duplicated index (pre-emption distrust) + out-of-range/non-integer', async () => {
       const emb = new Array(384).fill(0.1);
       insertTestFact(db, 'i-0', 'Fact zero', emb);
       insertTestFact(db, 'i-1', 'Fact one', emb);
 
       (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
         { index: 0, domain: 'First', category: 'Win', is_new_domain: true, is_new_category: true },
-        { index: 0, domain: 'Second', category: 'Overwrite', is_new_domain: true, is_new_category: true }, // dup — ignored
+        { index: 0, domain: 'Second', category: 'Overwrite', is_new_domain: true, is_new_category: true }, // dup → BOTH dropped
+        { index: 1, domain: 'Valid', category: 'Answer', is_new_domain: true, is_new_category: true },
         { index: 5, domain: 'Range', category: 'Out', is_new_domain: true, is_new_category: true }, // out of range
         { index: 1.5 as unknown as number, domain: 'Float', category: 'Bad', is_new_domain: true, is_new_category: true }, // non-integer
       ]);
@@ -421,10 +426,35 @@ describe('ontology-classifier', () => {
         makeFact({ id: 'i-1', fact: 'Fact one' }),
       ]);
 
-      expect(result.classified).toEqual(['i-0']);
-      expect(result.failed).toEqual(['i-1']); // index 1 never validly answered
-      expect(getDomainByName(db, 'First')).toBeTruthy();
-      expect(getDomainByName(db, 'Second')).toBeNull(); // duplicate did not apply
+      expect(result.classified).toEqual(['i-1']); // untainted index applies
+      expect(result.failed).toEqual(['i-0']); // duplicated index → all claimants distrusted
+      expect(getDomainByName(db, 'First')).toBeNull(); // neither duplicate applied
+      expect(getDomainByName(db, 'Second')).toBeNull();
+      expect(getDomainByName(db, 'Valid')).toBeTruthy();
+    });
+
+    it('treats an EMPTY LLM response as transient (SDK stream ended without result)', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'e-0', 'Empty response test', emb);
+
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('');
+
+      const result = await classifyFactsBatch(db, [makeFact({ id: 'e-0', fact: 'Empty response test' })]);
+      expect(result.transient).toEqual(['e-0']);
+      expect(result.failed).toEqual([]);
+    });
+
+    it('rejects control-character / oversized names as content failure (poisoning guard)', async () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'n-0', 'Name sanitize test', emb);
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Bad\u0000Domain', category: 'Cat', is_new_domain: true, is_new_category: true },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [makeFact({ id: 'n-0', fact: 'Name sanitize test' })]);
+      expect(result.failed).toEqual(['n-0']); // unusable name = content failure → ledger
     });
 
     it('routes gate-clearing facts through the deterministic path without LLM (opt-in)', async () => {
@@ -610,14 +640,15 @@ describe('ontology-classifier', () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'fact-classify', 'Use Vitest for testing', embeddingArr);
 
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
+        index: 0,
         domain: 'Testing',
         category: 'Framework',
         is_new_domain: true,
         is_new_category: true,
         domain_description: 'Testing tools',
         category_description: 'Test frameworks',
-      });
+      }]);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       await classifyAndLinkFact(db, 'fact-classify', embeddingArr);
@@ -634,12 +665,13 @@ describe('ontology-classifier', () => {
         'fact-no-emb', 'Use ESLint', now, now
       );
 
-      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
+        index: 0,
         domain: 'Quality',
         category: 'Linting',
         is_new_domain: true,
         is_new_category: true,
-      });
+      }]);
       (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       const embeddingArr = new Array(384).fill(0.2);

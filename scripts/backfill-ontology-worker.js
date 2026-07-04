@@ -130,8 +130,16 @@ async function main() {
 
     const totals = { classified: 0, deterministic: 0, fallback: 0, failed: 0, transient: 0, processed: 0 };
     const queue = [...batches];
+    // Circuit breaker: transient failures burn no attempts (by design), so a
+    // dead proxy/SDK would otherwise let every run re-spawn batch after batch
+    // of doomed calls — a slow-motion flood, every SessionStart. After this
+    // many consecutive all-transient batches the run aborts; the facts stay
+    // NULL + attempts-untouched and drain resumes when the LLM path is back.
+    const TRANSIENT_TRIP = 3;
+    let consecutiveTransient = 0;
+    let circuitOpen = false;
     const workers = Array.from({ length: CONCURRENCY }, async () => {
-      while (queue.length > 0) {
+      while (queue.length > 0 && !circuitOpen) {
         const batch = queue.shift();
         if (!batch) break;
         try {
@@ -141,14 +149,22 @@ async function main() {
           totals.fallback += stats.fallback;
           totals.failed += stats.failed;
           totals.transient += stats.transient;
+          const anyProgress = stats.classified + stats.deterministic + stats.fallback + stats.failed > 0;
+          consecutiveTransient = !anyProgress && stats.transient > 0 ? consecutiveTransient + 1 : 0;
         } catch (error) {
           // Unexpected (non-LLM) error: facts stay NULL with attempts
           // untouched → re-selected next run. Transient LLM failures are
           // already ledger-exempt inside classifyFactsBatch.
           totals.transient += batch.length;
+          consecutiveTransient += 1;
           log(`batch of ${batch.length}: ERROR ${error instanceof Error ? error.message : error}`);
         }
         totals.processed += batch.length;
+        if (consecutiveTransient >= TRANSIENT_TRIP && !circuitOpen) {
+          circuitOpen = true;
+          log(`circuit breaker OPEN: ${consecutiveTransient} consecutive all-transient batches — aborting run (${queue.length} batches unprocessed, resume next run)`);
+          queue.length = 0;
+        }
         log(`progress: ${totals.processed}/${pending.length} (llm ${totals.classified}, deterministic ${totals.deterministic}, fallback ${totals.fallback}, failed ${totals.failed}, transient ${totals.transient})`);
       }
     });
