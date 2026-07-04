@@ -632,9 +632,18 @@ describe('ontology-classifier', () => {
     it('insert path does NOT ledger IndexRepairError — corruption cannot park innocent facts', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'ir-0', 'Corruption victim', embeddingArr);
+      insertTestFact(db, 'ir-similar', 'Corruption neighbour', embeddingArr); // relation candidate via healthy vec_facts
       const domain = createDomain(db, 'Existing', 'e');
       createCategory(db, domain.id, 'Existing Cat', 'c');
       db.exec('DROP TABLE vec_categories');
+
+      // Relation detection must still run under category-index corruption
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        has_relation: true,
+        relation_type: 'SUPPORTS',
+        reasoning: 'similar',
+      });
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{}');
 
       for (let i = 0; i < MAX_CLASSIFY_ATTEMPTS; i++) {
         // Surfaces loudly at the caller boundary (no silent success)…
@@ -647,6 +656,8 @@ describe('ontology-classifier', () => {
       };
       expect(row.ontology_attempts).toBe(0); // …but infra corruption ≠ the fact's fault: no ledger burn
       expect(row.ontology_category_id).toBeNull(); // NOT parked in General/Misc
+      // vec_facts is healthy → relation edges must NOT be lost to the category-index outage
+      expect(getRelationsForFact(db, 'ir-0').length).toBeGreaterThan(0);
     });
 
     it('vec table scans but rejects INSERT (wrong schema) → hard repair failure, not transient loop', async () => {

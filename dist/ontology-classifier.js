@@ -713,6 +713,12 @@ export async function classifyAndLinkFact(db, factId, embedding) {
     if (embedding && !fact.embedding) {
         fact.embedding = new Float32Array(embedding);
     }
+    // Held-back repair failure: it must surface to the caller (fail-loud), but
+    // NOT before relation detection has run — relations use the fact index
+    // (vec_facts), which can be perfectly healthy while vec_categories is
+    // corrupt, and skipping them here would permanently lose live relation
+    // edges (backfill has relations off by default).
+    let repairError = null;
     try {
         await classifyFactToOntology(db, fact);
     }
@@ -728,13 +734,13 @@ export async function classifyAndLinkFact(db, factId, embedding) {
         if (error instanceof IndexRepairError) {
             // Infra corruption: no ledger burn (parking innocent facts in
             // General/Misc because the INDEX is broken would misfile them), but it
-            // must not dissolve into silent success either — RETHROW so live
-            // insert callers see the failure at their boundary (fact-extractor
-            // logs it loudly and continues extraction; the overlay stays NULL and
-            // the backfill resumes once the index is repaired).
-            throw error;
+            // must not dissolve into silent success either — rethrown below, AFTER
+            // relation detection, so live insert callers see the failure at their
+            // boundary (fact-extractor logs it loudly and continues extraction;
+            // the overlay stays NULL and the backfill resumes once repaired).
+            repairError = error;
         }
-        if (!(error instanceof TransientLlmError)) {
+        else if (!(error instanceof TransientLlmError)) {
             try {
                 const attempts = recordOntologyAttempt(db, factId);
                 if (attempts >= MAX_CLASSIFY_ATTEMPTS) {
@@ -752,6 +758,8 @@ export async function classifyAndLinkFact(db, factId, embedding) {
     catch (error) {
         console.error(`Relation detection failed for fact ${factId}:`, error);
     }
+    if (repairError)
+        throw repairError;
 }
 function ensureFallbackCategory(db) {
     let domain = getDomainByName(db, 'General');
