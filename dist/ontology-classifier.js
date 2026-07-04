@@ -247,26 +247,30 @@ async function categoryHits(db, fact, k) {
     let hits = searchSimilarCategories(db, embedding, k);
     const catCount = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
     if (catCount > 0) {
-        // Index-coverage self-heal — triggered by COUNTS, not by empty hits: a
-        // PARTIAL index (category created while the embedding runtime was down;
-        // applyClassification logs-and-continues) still returns hits for the
-        // indexed subset, which would leave the unindexed rest invisible as
-        // reuse candidates forever. Counts come from the plain rowids shadow
-        // table (cheap); a few stale vec rows can mask an equal number of
-        // missing ones — accepted: stale rows are removed via
-        // deleteCategoryEmbedding, and the one-time backfill script remains the
-        // full-repair path.
-        let vecCount = 0;
+        // Index-coverage self-heal — triggered by EXACT id-set reconciliation,
+        // not by counts and not by empty hits: counts are gamed by stale rows
+        // numerically masking missing ones (in both directions), and a PARTIAL
+        // index still returns hits for the indexed subset while leaving the
+        // unindexed rest invisible as reuse candidates forever. The id scan is
+        // a few ms at the current scale (~3K categories); revisit with a dirty
+        // flag if the taxonomy grows orders of magnitude.
+        let needHeal = false;
         try {
-            vecCount = db.prepare('SELECT COUNT(*) AS n FROM vec_categories_rowids').get().n;
+            const vecIds = new Set(db.prepare('SELECT id FROM vec_categories').all().map((r) => r.id));
+            const liveIds = db.prepare('SELECT id FROM ontology_categories').all().map((r) => r.id);
+            const liveSet = new Set(liveIds);
+            const missingExists = liveIds.some((id) => !vecIds.has(id));
+            let staleExists = false;
+            for (const id of vecIds) {
+                if (!liveSet.has(id)) {
+                    staleExists = true;
+                    break;
+                }
+            }
+            needHeal = missingExists || staleExists;
         }
         catch {
-            try {
-                vecCount = db.prepare('SELECT COUNT(*) AS n FROM vec_categories').get().n;
-            }
-            catch {
-                vecCount = 0;
-            }
+            needHeal = true; // vec table unusable — heal reports full missingness → refusal
         }
         const healAndRefresh = async () => {
             const heal = await healCategoryIndex(db);
@@ -281,7 +285,7 @@ async function categoryHits(db, fact, k) {
                 hits = searchSimilarCategories(db, embedding, k); // re-rank with reconciled index
             }
         };
-        if (vecCount < catCount) {
+        if (needHeal) {
             await healAndRefresh();
         }
         if (hits.length === 0) {

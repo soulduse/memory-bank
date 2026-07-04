@@ -581,6 +581,34 @@ describe('ontology-classifier', () => {
       expect(row.ontology_category_id).toBe(real.id);
     });
 
+    it('stale row masking counts WHILE a live hit exists still triggers heal (exact set-diff)', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'xm-0', 'Exact match trigger', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      const catA = createCategory(db, domain.id, 'Indexed Cat', 'a');
+      upsertCategoryEmbedding(db, catA.id, embeddingArr); // A indexed → search WILL return a live hit
+      const catB = createCategory(db, domain.id, 'Missing Cat', 'b'); // B unindexed
+      // 1 stale row equalizes counts (2 live vs 2 vec) — count-based trigger would skip
+      db.prepare('INSERT INTO vec_categories (id, embedding) VALUES (?, ?)').run(
+        'stale-x', Buffer.from(new Float32Array(new Array(384).fill(0.7)).buffer),
+      );
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Existing', category: 'Missing Cat', is_new_domain: false, is_new_category: false },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'xm-0', fact: 'Exact match trigger', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.classified).toEqual(['xm-0']);
+      // heal ran despite live hit + equalized counts: B indexed, stale purged
+      const vecIds = (db.prepare('SELECT id FROM vec_categories').all() as Array<{ id: string }>).map((r) => r.id);
+      expect(vecIds).toContain(catB.id);
+      expect(vecIds).not.toContain('stale-x');
+    });
+
     it('purge-only heal (missing add FAILED) must NOT unlock classification — transient', async () => {
       const embeddingArr = new Array(384).fill(0.1);
       insertTestFact(db, 'po-0', 'Purge only', embeddingArr);
