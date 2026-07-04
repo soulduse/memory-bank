@@ -198,6 +198,7 @@ describe('ontology-classifier', () => {
     it('should reuse existing category within domain', async () => {
       const domain = createDomain(db, 'Frontend', 'Frontend dev');
       const category = createCategory(db, domain.id, 'TypeScript', 'TS patterns');
+      upsertCategoryEmbedding(db, category.id, new Array(384).fill(0.2)); // indexed — starvation guard requires a usable index
 
       (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([{
         index: 0,
@@ -466,14 +467,16 @@ describe('ontology-classifier', () => {
       expect(row.ontology_attempts).toBe(0);
     });
 
-    it('fact TEXT breaks the embedder (probe succeeds) → content failure, ledger burns', async () => {
+    it('fact TEXT deterministically breaks the embedder (probe+retry confirm) → content failure, ledger burns', async () => {
       insertTestFact(db, 'cx-0', 'Cursed text', null);
       const domain = createDomain(db, 'Existing', 'e');
       createCategory(db, domain.id, 'Existing Cat', 'c');
 
       const { generateEmbedding } = await import('../src/embeddings.js');
-      (generateEmbedding as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('tokenizer crash'));
-      // next call (probe) uses the default mockResolvedValue → succeeds
+      // Deterministic per-text failure: the cursed text ALWAYS crashes, the probe succeeds.
+      (generateEmbedding as ReturnType<typeof vi.fn>).mockImplementation((text: string) =>
+        text.includes('Cursed') ? Promise.reject(new Error('tokenizer crash')) : Promise.resolve(new Array(384).fill(0.1)),
+      );
 
       const stats = await backfillClassifyBatch(db, ['cx-0']);
 
@@ -481,6 +484,48 @@ describe('ontology-classifier', () => {
       expect(callHaiku).not.toHaveBeenCalled();
       const row = db.prepare('SELECT ontology_attempts FROM facts WHERE id = ?').get('cx-0') as { ontology_attempts: number };
       expect(row.ontology_attempts).toBe(1);
+
+      (generateEmbedding as ReturnType<typeof vi.fn>).mockResolvedValue(new Array(384).fill(0.1)); // restore default
+    });
+
+    it('ONE-OFF embedding flake (retry succeeds) is absorbed — no attempt burned', async () => {
+      insertTestFact(db, 'fl-0', 'Flaky once', null);
+      // no categories → empty candidates fine after recovery
+
+      const { generateEmbedding } = await import('../src/embeddings.js');
+      (generateEmbedding as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('init race'));
+      // probe + retry use the default mockResolvedValue → succeed
+
+      (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue([
+        { index: 0, domain: 'Recovered', category: 'Flake', is_new_domain: true, is_new_category: true },
+      ]);
+      (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('[]');
+
+      const result = await classifyFactsBatch(db, [makeFact({ id: 'fl-0', fact: 'Flaky once', embedding: null })]);
+
+      expect(result.classified).toEqual(['fl-0']); // flake absorbed, classification proceeded
+      const row = db.prepare('SELECT ontology_attempts FROM facts WHERE id = ?').get('fl-0') as { ontology_attempts: number };
+      expect(row.ontology_attempts).toBe(0);
+    });
+
+    it('categories exist but vec index is empty → refuses starved classification (transient)', async () => {
+      const embeddingArr = new Array(384).fill(0.1);
+      insertTestFact(db, 'st-0', 'Starved', embeddingArr);
+      const domain = createDomain(db, 'Existing', 'e');
+      createCategory(db, domain.id, 'Existing Cat', 'c'); // NO vec_categories row
+
+      const result = await classifyFactsBatch(db, [
+        makeFact({ id: 'st-0', fact: 'Starved', embedding: new Float32Array(embeddingArr) }),
+      ]);
+
+      expect(result.transient).toEqual(['st-0']); // no starved LLM call, no persistence
+      expect(callHaiku).not.toHaveBeenCalled();
+      const row = db.prepare('SELECT ontology_category_id, ontology_attempts FROM facts WHERE id = ?').get('st-0') as {
+        ontology_category_id: string | null;
+        ontology_attempts: number;
+      };
+      expect(row.ontology_category_id).toBeNull();
+      expect(row.ontology_attempts).toBe(0);
     });
 
     it('cold-start: empty taxonomy + embedding down → proceeds with empty candidates (LLM bootstrap)', async () => {

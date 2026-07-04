@@ -166,15 +166,40 @@ async function categoryHits(db, fact, k) {
                 /* runtime down */
             }
             if (probeOk) {
-                throw new FactContentError(`fact text breaks the embedder (fact ${fact.id}): ${error instanceof Error ? error.message : error}`);
+                // Probe success alone doesn't prove the CONTENT is at fault — the
+                // first failure could be a one-off (init race, timeout, OOM burp).
+                // Confirm determinism with a retry of the SAME text: absorb a flake,
+                // and only a repeat failure (while the runtime is demonstrably
+                // healthy) becomes a content failure that burns a ledger attempt.
+                try {
+                    embedding = await generateEmbedding(fact.fact.slice(0, 2000), 'passage');
+                }
+                catch (again) {
+                    throw new FactContentError(`fact text breaks the embedder (fact ${fact.id}, reproduced on retry): ${again instanceof Error ? again.message : again}`);
+                }
             }
-            const catCount = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
-            if (catCount === 0)
-                return []; // cold-start bootstrap: nothing to starve
-            throw new TransientLlmError(`candidate embedding unavailable for fact ${fact.id}: ${error instanceof Error ? error.message : error}`);
+            else {
+                const catCount = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
+                if (catCount === 0)
+                    return []; // cold-start bootstrap: nothing to starve
+                throw new TransientLlmError(`candidate embedding unavailable for fact ${fact.id}: ${error instanceof Error ? error.message : error}`);
+            }
         }
     }
-    return searchSimilarCategories(db, embedding, k);
+    const hits = searchSimilarCategories(db, embedding, k);
+    if (hits.length === 0) {
+        // Starvation guard for the RETRIEVAL side: searchSimilarCategories
+        // swallows vec-table errors into [] and an empty/dropped vec_categories
+        // index also yields [] — in every such case, classifying with zero
+        // candidates while categories EXIST would let the LLM persist duplicate
+        // taxonomy. Refuse and retry later. (vec0 MATCH returns nearest rows
+        // regardless of distance, so a non-empty usable index cannot yield 0.)
+        const catCount = db.prepare('SELECT COUNT(*) AS n FROM ontology_categories').get().n;
+        if (catCount > 0) {
+            throw new TransientLlmError(`category index unavailable/empty while ${catCount} categories exist — refusing candidate-starved classification (fact ${fact.id})`);
+        }
+    }
+    return hits;
 }
 /**
  * Deterministic reuse gate: if the nearest existing category clears the
