@@ -297,6 +297,11 @@ describe('consolidateAllPending', () => {
     expect(isTransientLlmError(Object.assign(new Error('nope'), { status: 401 }))).toBe(true);
     expect(isTransientLlmError(new Error('ETIMEDOUT'))).toBe(true);
     expect(isTransientLlmError(new Error('something weird'))).toBe(true);
+    // Incidental digits in a message must NOT be read as a status number.
+    expect(isTransientLlmError(new Error('429 rate limit exceeded; retry after 400 ms'))).toBe(true);
+    expect(isTransientLlmError(new Error('503 upstream error after 400 ms'))).toBe(true);
+    // Structured status always wins over message text.
+    expect(isTransientLlmError(Object.assign(new Error('retry after 400ms'), { status: 429 }))).toBe(true);
   });
 
   it('an UNKNOWN error is treated as transient (held, not skipped)', async () => {
