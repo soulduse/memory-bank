@@ -322,17 +322,45 @@ describe('consolidateAllPending', () => {
     expect(cursor).toBeNull(); // 503 → transient → held, never silently skipped during an outage
   });
 
-  it('an UNKNOWN error is BOUNDED — advances after MAX attempts, never wedges forever', async () => {
+  it('an UNKNOWN provider error HOLDS (unrecognized outage shapes must not drain)', async () => {
     addFact(db, 'mystery A', 'global', null);
     addFact(db, 'mystery B', 'global', null);
-    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('something weird happened'));
+    // "API Error: 500 Internal Server Error" classifies as unknown (no labelled
+    // status, no phrase). Only DETERMINISTIC rejections skip — unknown holds so a
+    // weird outage shape never silently drains the backlog.
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('API Error: 500 Internal Server Error'));
 
     let cursor: { createdAt: string; id: string } | null = null;
     for (let r = 0; r < 8; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
 
-    // Unknown is bounded: after MAX_CONSOLIDATION_ATTEMPTS retries the cursor
-    // advances past the poison fact, so the backlog is not wedged forever.
+    expect(cursor).toBeNull(); // unknown → held, never advanced
+  });
+
+  it('a DETERMINISTIC per-request rejection is bounded — advances after MAX attempts', async () => {
+    addFact(db, 'mystery A', 'global', null);
+    addFact(db, 'mystery B', 'global', null);
+    // status 400 → deterministic → the fact itself is at fault → bounded skip.
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('bad request'), { status: 400 }));
+
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 8; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+
+    // After MAX_CONSOLIDATION_ATTEMPTS the cursor advances past the un-processable
+    // fact so it can't wedge the backlog forever.
     expect(cursor).not.toBeNull();
+  });
+
+  it('a NON-LLM internal error HOLDS (never advances the cursor on a code bug)', async () => {
+    addFact(db, 'mystery A', 'global', null);
+    addFact(db, 'mystery B', 'global', null);
+    // callHaiku resolves; the failure is in parsing (an internal bug, NOT an
+    // LlmCallError) → must hold, never be treated as a skippable "bad fact".
+    (parseJsonResponse as ReturnType<typeof vi.fn>).mockImplementation(() => { throw new Error('parser boom'); });
+
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 8; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+
+    expect(cursor).toBeNull(); // internal bug → held, not skipped
   });
 
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {

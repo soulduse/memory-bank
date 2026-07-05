@@ -45,6 +45,25 @@ export function buildConsolidationPrompt(existingFact: string, newFact: string):
 export type LlmErrorClass = 'transient' | 'deterministic' | 'unknown';
 
 /**
+ * Wraps a rejection from the LLM provider call (callHaiku) so the drain loop can
+ * tell a provider error apart from an internal bug (parser/DB/mutation). ONLY a
+ * provider error is eligible for classification + bounded skip; an internal
+ * error must hold, never advance the cursor.
+ */
+export class LlmCallError extends Error {
+  readonly reason: unknown;
+  readonly status?: number;
+  constructor(reason: unknown) {
+    const r = reason as { message?: string; status?: number; statusCode?: number } | undefined;
+    super(r?.message ?? String(reason));
+    this.name = 'LlmCallError';
+    this.reason = reason;
+    this.status = typeof r?.status === 'number' ? r.status
+      : typeof r?.statusCode === 'number' ? r.statusCode : undefined;
+  }
+}
+
+/**
  * Classify a callHaiku rejection into three states so the drain loop can satisfy
  * BOTH "an outage must never silently skip the backlog" AND "one un-processable
  * fact must never wedge the cursor forever" — a binary flag cannot do both under
@@ -71,7 +90,8 @@ export type LlmErrorClass = 'transient' | 'deterministic' | 'unknown';
  * phrase matching or 'unknown'.
  */
 export function classifyLlmError(err: unknown): LlmErrorClass {
-  const e = err as { status?: number; statusCode?: number; message?: string } | undefined;
+  // Classify the underlying provider rejection, not the wrapper.
+  const e = (err instanceof LlmCallError ? err.reason : err) as { status?: number; statusCode?: number; message?: string } | undefined;
   const byCode = (code: number): LlmErrorClass => {
     if (code === 401 || code === 403 || code === 404) return 'transient'; // systemic/config — hold, resumes on fix
     if (code === 429 || code >= 500) return 'transient';                  // rate limit / server error
@@ -140,7 +160,16 @@ async function consolidateOne(
   if (candidates.length === 0) return { called: false, verdict: 'none' };
 
   const closest = candidates[0];
-  const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, buildConsolidationPrompt(closest.fact.fact, newFact.fact));
+  // Tag ONLY the provider call's rejection as an LlmCallError. Anything after
+  // this (parseJsonResponse, applyConsolidationResult DB writes) throws as a
+  // plain error, so the drain loop can hold on an internal bug instead of
+  // treating it as a skippable "bad fact".
+  let response: string;
+  try {
+    response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, buildConsolidationPrompt(closest.fact.fact, newFact.fact));
+  } catch (e) {
+    throw new LlmCallError(e);
+  }
   const result = parseJsonResponse<ConsolidationResult>(response);
   // Unparseable output = the call happened (budget spent) but produced no usable
   // verdict. Treated as a no-op ('none'), NOT an error: consolidation is a
@@ -245,21 +274,31 @@ export async function consolidateAllPending(
         haikuCalls++;
         console.error(`Consolidation call failed for fact ${newFact.id}:`, error);
 
-        if (classifyLlmError(error) === 'transient') {
-          // Recognized provider outage/auth (503/429/timeout/401...): HOLD the
-          // cursor and stop. No attempt is burned — the fact is not at fault — so
-          // the drain resumes here when the provider recovers, never silently
-          // skipping the backlog during an outage (however long it lasts).
+        // A non-LLM error (parser/DB/internal bug, NOT an LlmCallError) must NEVER
+        // advance the cursor — hold so the bug surfaces instead of silently
+        // marking the fact processed and draining the backlog.
+        if (!(error instanceof LlmCallError)) {
           break;
         }
 
-        // Deterministic per-fact rejection (400/oversized/...) OR an UNRECOGNIZED
-        // error: ledger it and, after MAX attempts, SKIP (advance past it) so one
-        // un-processable — or unclassifiable — fact can't wedge the cursor
-        // forever. Below MAX, hold so a mis-classified blip still gets a couple of
+        // SKIP is reserved for a RECOGNIZED deterministic per-request rejection
+        // (400/413/422, too-long, max_tokens...) — the one case where the fact
+        // ITSELF is provably at fault. Transient (outage/auth) AND unknown both
+        // HOLD: an unrecognized provider error ("HTTP 500", "Error code: 503") is
+        // far more likely an unusual outage shape than a poison fact, so holding
+        // never drains the backlog during an outage. (Residual: a per-fact poison
+        // that never presents as a recognized deterministic error holds — but the
+        // global lock + budget mean it just stops, no flood, and the repeated
+        // fact id in the log makes it diagnosable.)
+        if (classifyLlmError(error) !== 'deterministic') {
+          break;
+        }
+
+        // Deterministic per-fact rejection: ledger it and, after MAX attempts,
+        // SKIP (advance past it) so one un-processable fact can't wedge the
+        // cursor. Below MAX, hold so a mis-classified blip still gets a couple of
         // retries. Advancing is safe: the fact stays active/searchable, it just
-        // isn't consolidated — strictly better than an unbounded hold that would
-        // halt ALL future consolidation.
+        // isn't consolidated.
         const attempts = (db.prepare(
           'UPDATE facts SET consolidation_attempts = COALESCE(consolidation_attempts, 0) + 1 WHERE id = ? RETURNING consolidation_attempts'
         ).get(newFact.id) as { consolidation_attempts: number } | undefined)?.consolidation_attempts ?? 0;
