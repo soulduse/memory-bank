@@ -4,14 +4,14 @@
 
 ![Memory Bank](docs/memory-bank.gif)
 
-## What's New in v1.2.0
+## What's New in v1.3.0
 
-- 🆕 **`analyzing-all-conversations` skill** — new plugin skill that analyzes and organizes your ENTIRE indexed conversation history into one report, and kicks off backfill for unanalyzed sessions
-- 🆕 **`memory-bank analyze` command** — the deterministic engine behind the skill: coverage, per-project rollups, fact/domain breakdowns, monthly timeline, backfill recommendations
-- 🆕 **Transparent `.jsonl.zst` archive support** — archives compressed out-of-band keep working across every read path (no extra dependency; requires Node >= 22.15 for built-in zstd)
-- ⚡ **FTS5 text search** — BM25-ranked full-text search replaces the LIKE full scan (recall@10 0.93 → 1.00, FTS index 2.9GB → 407MB)
-- ⚡ **Search-path performance** — cached DB connection, int8 vector quantization (dual-dtype), query-embedding memoization
-- 🧹 **Fact extraction quality/cost controls** — trivial-exchange filtering, in-session dedup, strict confidence gating, per-session LLM call budget
+- ⚡ **Ontology backfill batching (20 facts per LLM call)** — the backfill worker used to spawn one headless Claude session *per fact* (~10–14s each, plus auxiliary calls and hook cascades). It now classifies in batches: measured 40 facts in 19s vs ~8min before (~25× wall-clock, 20× fewer spawns). Relation detection during backfill is off by default (`BACKFILL_RELATIONS=1` to opt in)
+- 🔇 **Headless LLM spawn isolation** — worker LLM calls run with `maxTurns: 1`, `settingSources: []`, and a dedicated tmp cwd, so they no longer fire your SessionStart/End hooks (which used to re-spawn sync/backfill workers on every call) and no longer drop transcripts into your project dirs where `claude --resume` could pick one up
+- 📒 **Classification attempt ledger** — failures are counted per fact (`ontology_attempts`); after 3 content failures the fact is parked in General/Misc and permanently leaves the backfill queue (it stays fully searchable — ontology is an overlay). Fixes the old bug where unparseable LLM output left facts NULL and re-selected (re-billed) forever. Failure taxonomy is typed: transient (runtime down — no attempt burned), content (the fact's own text — ledgered), index-repair-failed (surfaces loudly, never parks innocent facts)
+- 🛠️ **Category vec-index self-heal** — exact id set-diff reconciliation (add missing + purge stale rows, bounded per call) with candidate-starvation refusal: classification never runs blind against an incomplete index, so duplicate-taxonomy sprawl can't silently regrow. Relation edges are idempotent per (source, type, target) with a DB UNIQUE index; graph traversal deterministically prefers belief-safety edges (CONTRADICTS/SUPERSEDES) without hiding qualifying neighbours or leaking pruned paths
+- 🚱 **Per-run worker caps hardened** — detached backfill workers have finite per-run defaults + absolute ceilings + strict integer env parsing + a transient circuit breaker, so an orphaned worker can never flood the LLM proxy again
+- Earlier releases: see [CHANGELOG](CHANGELOG.md) — v1.2.2 documented Context Injection + fail-loud injection observability; v1.2.0 added the `analyze` command, transparent `.jsonl.zst` archives, and FTS5 (BM25) text search
 
 ## Features
 
@@ -19,6 +19,7 @@
 - **RAG Search** -- Search results auto-enriched with related facts and ontology context
 - **Conversation Search** -- Semantic vector search + FTS5 (BM25) full-text search across all past conversations
 - **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the entire conversation *index* (projects, facts, domains, timeline, backfill gaps) — run `memory-bank sync` first so new conversations are indexed
+- **Context Injection** -- Related past decisions are automatically prepended to every prompt (UserPromptSubmit hook): baseline-margin relevance gate + 1-hop ontology expansion, with fail-loud JSONL observability logs
 - **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations (trivial-exchange filtering, in-session dedup, confidence gating, LLM call budgeting)
 - **Fact Consolidation** -- Duplicate detection, contradiction handling, evolution tracking
 - **Graph Traversal** -- Multi-hop exploration (up to 3 hops) to trace decision chains
@@ -67,6 +68,8 @@ graph LR
     L[Query] -->|search| D
     L -->|RAG| F
     L -->|traverse| H
+
+    M[User Prompt] -->|inject related facts 📌| F
 ```
 
 ![Architecture](docs/architecture.svg)
@@ -93,6 +96,28 @@ memory-bank search "React auth"  # Semantic search
 memory-bank stats     # Index statistics
 memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
 ```
+
+## Context Injection
+
+Every user prompt (≥20 chars) triggers the `UserPromptSubmit` hook, which vector-searches your facts and prepends relevant past decisions to the prompt:
+
+```
+📌 관련 과거 결정:
+- [decision] Use keyset pagination for PostgREST list reads (2026-06-23)
+- [SUPPORTS] [constraint] All tables require RLS policies, no exceptions (2026-05-18)
+```
+
+- **Relevance gate** — a fact is injected only when its similarity to the query exceeds the query's own background baseline by a margin (absolute thresholds cannot separate relevant from irrelevant on compressed e5 scores)
+- **1-hop expansion** — top matches pull in related facts via typed ontology relations (max 8 facts total)
+- **Observability (v1.2.1)** — every run appends one JSONL line to `~/.config/superpowers/conversation-index/logs/inject-context.jsonl`:
+
+  ```json
+  {"ts":"2026-07-04T10:31:56Z","status":"injected","prompt_len":49,"candidates":5,"injected":8,"duration_ms":478}
+  ```
+
+  Node-level crashes (missing `node_modules`, import failures) land in `logs/inject-context.err.log` instead of being discarded.
+
+**Troubleshooting**: if injection never fires, check those two files — an empty/absent JSONL log means the hook isn't running at all (stale plugin install, restart pending), while `"status":"error"` entries or err.log content pinpoint the failure.
 
 ## Full-History Analysis
 
@@ -282,6 +307,18 @@ export MEMORY_BANK_MAX_EXTRACT_CALLS=12
 
 # Decompression cap for .zst archives (bytes; lowering only, default 256 MiB)
 export MEMORY_BANK_MAX_DECOMPRESSED_BYTES=268435456
+
+# Ontology backfill worker (per-run caps; absolute ceilings apply regardless)
+export BACKFILL_ONTOLOGY_MAX=200      # facts per run (ceiling 1000; 0 disables)
+export BACKFILL_EXTRACT_MAX=40        # sessions per run (ceiling 200; 0 disables)
+export BACKFILL_BATCH_SIZE=20         # facts per LLM call (ceiling 50)
+export BACKFILL_CONCURRENCY=4         # concurrent batch calls (clamped to [1, 8])
+export BACKFILL_RELATIONS=0           # 1 = also detect relations during backfill
+
+# Deterministic category-reuse gate (DISABLED by default — live measurement
+# showed only 72% top-1 agreement at sim>=0.93; opt in after re-measuring
+# with scripts/measure-det-gate.mjs)
+# export MEMORY_BANK_ONTOLOGY_DET_GATE=0.94
 ```
 
 ## 3D Knowledge Graph
