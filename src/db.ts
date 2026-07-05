@@ -389,15 +389,6 @@ export function initDatabase(): Database.Database {
   if (!factColumnNames.has('ontology_attempts')) {
     db.prepare('ALTER TABLE facts ADD COLUMN ontology_attempts INTEGER NOT NULL DEFAULT 0').run();
   }
-  // Consolidation attempt ledger: a driver fact whose comparison deterministically
-  // fails (LLM returns non-JSON every time — e.g. a prompt-injected fact) must not
-  // hold the consolidation cursor forever and starve the rest of the backlog.
-  // After MAX attempts the consolidator advances past it (skip/dead-letter) — the
-  // fact stays fully active/searchable, and a future similar fact can still pick
-  // it up as a candidate.
-  if (!factColumnNames.has('consolidation_attempts')) {
-    db.prepare('ALTER TABLE facts ADD COLUMN consolidation_attempts INTEGER NOT NULL DEFAULT 0').run();
-  }
   if (!factColumnNames.has('ontology_last_attempt_at')) {
     db.prepare('ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT').run();
   }

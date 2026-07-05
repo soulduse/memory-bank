@@ -27,9 +27,6 @@ const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relat
 }`;
 
 const MAX_HAIKU_CALLS = 10;
-// Retries for a driver fact whose comparison returns unparseable output before
-// the consolidator gives up (advances past it) so it can't starve the backlog.
-const MAX_CONSOLIDATION_ATTEMPTS = 3;
 // e5 passage-passage scale (measured): near-dup 0.99, paraphrase 0.97,
 // related-but-distinct ~0.91, unrelated <=0.86. 0.95 selects dup candidates.
 const SIMILARITY_THRESHOLD = 0.95;
@@ -47,10 +44,6 @@ export function buildConsolidationPrompt(existingFact: string, newFact: string):
  * malformed/unparseable text still consumed the budget even though its verdict
  * is 'none'. Throws only on a transient LLM failure the caller should retry.
  */
-class UnparseableConsolidationError extends Error {
-  constructor() { super('consolidation: unparseable LLM response'); this.name = 'UnparseableConsolidationError'; }
-}
-
 async function consolidateOne(
   db: Database.Database,
   newFact: Fact,
@@ -73,12 +66,14 @@ async function consolidateOne(
   const closest = candidates[0];
   const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, buildConsolidationPrompt(closest.fact.fact, newFact.fact));
   const result = parseJsonResponse<ConsolidationResult>(response);
-  // Unparseable output = the call happened but produced no usable verdict.
-  // Throw so the caller treats it like a failed attempt (counts budget, holds
-  // the cursor for retry) rather than silently advancing past a comparison that
-  // never actually resolved — a fact whose output is momentarily non-JSON must
-  // still get another chance to consolidate.
-  if (!result) throw new UnparseableConsolidationError();
+  // Unparseable output = the call happened (budget spent) but produced no usable
+  // verdict. Treated as a no-op ('none'), NOT an error: consolidation is a
+  // best-effort background dedup, so we advance past this comparison rather than
+  // hold the cursor. The pair is not lost — both facts stay active, and the
+  // comparison re-triggers whenever either is a driver/candidate for a future
+  // fact. This also means no single fact (a transiently non-JSON response, or a
+  // deliberately "poison" candidate) can hold the cursor and starve the backlog.
+  if (!result) return { called: true, verdict: 'none' };
   applyConsolidationResult(db, closest.fact, newFact, result);
   return { called: true, verdict: result.relation };
 }
@@ -168,31 +163,12 @@ export async function consolidateAllPending(
         else if (verdict === 'CONTRADICTION') contradictions++;
         else if (verdict === 'EVOLUTION') evolutions++;
       } catch (error) {
-        haikuCalls++; // the call was reached and failed — still spent budget
-
-        if (error instanceof UnparseableConsolidationError) {
-          // CONTENT failure (the LLM deterministically can't produce JSON for
-          // this pair — e.g. a prompt-injected fact). Ledger the attempt; retry
-          // it up to MAX, then SKIP past it (advance the cursor) so one poison
-          // fact can't hold the cursor and starve the whole backlog forever.
-          const attempts = (db.prepare(
-            'UPDATE facts SET consolidation_attempts = COALESCE(consolidation_attempts, 0) + 1 WHERE id = ? RETURNING consolidation_attempts'
-          ).get(newFact.id) as { consolidation_attempts: number } | undefined)?.consolidation_attempts ?? 0;
-          if (attempts >= MAX_CONSOLIDATION_ATTEMPTS) {
-            console.error(`Consolidation dead-letter fact ${newFact.id} after ${attempts} unparseable attempts — skipping`);
-            processed++;
-            lastExaminedAt = newFact.created_at; // advance past the poison fact
-            continue;
-          }
-          console.error(`Consolidation unparseable for fact ${newFact.id} (attempt ${attempts}) — will retry`);
-          brokeAt = newFact.created_at;
-          break;
-        }
-
-        // TRANSIENT failure (callHaiku rejected — infra down). Hold the cursor
-        // and stop; the next run retries from here. No attempt is burned (an
-        // outage is not the fact's fault), and if infra is down every fact
-        // would fail anyway so there is nothing to starve.
+        // A throw here is a TRANSIENT call failure (callHaiku rejected — infra
+        // down); unparseable output is handled as a no-op inside consolidateOne,
+        // not a throw. Count the spent attempt, hold the cursor, and stop; the
+        // next run retries from here. No poison-fact starvation is possible
+        // because content-level failures never reach this catch.
+        haikuCalls++;
         console.error(`Consolidation failed for fact ${newFact.id}:`, error);
         brokeAt = newFact.created_at;
         break;
