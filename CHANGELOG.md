@@ -23,12 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep the fact active) and could starve a project whose only pending work was an old
   fact matching a new global one. Same orphan-flood class fixed for the backfill workers
   in v1.3.0; the consolidate worker was the last detached worker missing a lock.
-- **Same-scope-only consolidation**: a fact is compared ONLY within its own scope — a
-  project fact against its own project's facts, a global fact against other global facts.
-  This closes a cross-scope data-leak/mutation path in both directions: a global driver
-  reaching into a project's private rows, AND a project-private driver rewriting a shared
-  global fact via EVOLUTION (leaking private text to every project) or deactivating it via
-  CONTRADICTION.
+- **Same-scope-only consolidation** (`searchSimilarFactsSameScope`): a fact is compared
+  ONLY within its own scope — a project fact against its own project's facts, a global
+  fact against other global facts — with the scope gate applied to the full candidate
+  overfetch BEFORE truncation, so an in-scope match is never starved out by closer
+  out-of-scope rows. This closes a cross-scope data-leak/mutation path in both directions:
+  a global driver reaching into a project's private rows, AND a project-private driver
+  rewriting a shared global fact via EVOLUTION (leaking private text to every project) or
+  deactivating it via CONTRADICTION. The old per-project `consolidateFacts()` (which used
+  a project-scoped search that still included globals) was removed — all consolidation
+  now goes through the single-pass, scope-isolated `consolidateAllPending`.
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

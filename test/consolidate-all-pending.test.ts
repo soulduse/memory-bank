@@ -151,6 +151,23 @@ describe('consolidateAllPending', () => {
     }
   });
 
+  it('searchSimilarFactsSameScope is not starved by many out-of-scope rows (scope gate before limit)', async () => {
+    // HIGH guard: the scope filter runs on the FULL overfetch, not after
+    // truncation — so a same-project match survives a crowd of closer globals.
+    const { searchSimilarFactsSameScope } = await import('../src/fact-db.js');
+    for (let i = 0; i < 40; i++) addFact(db, `global crowd ${i}`, 'global', null);
+    addFact(db, 'proj target', 'project', '/projX');
+
+    const projHits = searchSimilarFactsSameScope(db, EMB, { type: 'project', project: '/projX' }, 5, 0.5);
+    expect(projHits.length).toBe(1);
+    expect(projHits[0].fact.fact).toBe('proj target');
+    expect(projHits.every((h) => h.fact.scope_type === 'project')).toBe(true);
+
+    // Global scope search returns only globals (never the project fact).
+    const globalHits = searchSimilarFactsSameScope(db, EMB, { type: 'global' }, 5, 0.5);
+    expect(globalHits.every((h) => h.fact.scope_type === 'global')).toBe(true);
+  });
+
   it('does NOT advance the cursor past a fact whose comparison errored (retryable)', async () => {
     addFact(db, 'errdriver one', 'global', null);
     addFact(db, 'errdriver two', 'global', null); // similar → triggers a call

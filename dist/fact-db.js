@@ -149,6 +149,66 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
     return results;
 }
 /**
+ * Nearest active facts restricted to EXACTLY one scope — used by consolidation
+ * so a project-private fact and a global fact can never be compared/merged
+ * across the boundary (which would leak private text into global memory or let
+ * one project mutate shared global facts). The scope filter is applied to the
+ * FULL overfetched candidate list BEFORE truncation, so a same-scope match is
+ * not starved out by closer out-of-scope rows (which the general
+ * searchSimilarFacts truncates first).
+ *
+ * scope: { type:'global' } → global facts only.
+ *        { type:'project', project } → that project's own facts only (no global).
+ */
+export function searchSimilarFactsSameScope(db, embedding, scope, limit = 5, threshold = 0.85) {
+    const canonProject = scope.type === 'project' ? canonicalizeProject(db, scope.project) : null;
+    const buf = Buffer.from(new Float32Array(embedding).buffer);
+    // Overfetch generously: we filter hard to a single scope, so a shallow fetch
+    // could return only out-of-scope neighbours and miss an in-scope match.
+    const candidateFetch = Math.max(limit * 20, 200);
+    const fetch = (table) => {
+        try {
+            return db.prepare(`
+        SELECT id, distance FROM ${table}
+        WHERE embedding MATCH ? ORDER BY distance LIMIT ?
+      `).all(buf, candidateFetch);
+        }
+        catch {
+            return [];
+        }
+    };
+    const best = new Map();
+    for (const vr of [...fetch('vec_facts'), ...fetch('vec_facts_kr')]) {
+        const cur = best.get(vr.id);
+        if (cur === undefined || vr.distance < cur)
+            best.set(vr.id, vr.distance);
+    }
+    const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b) => a.distance - b.distance);
+    const results = [];
+    for (const vr of merged) {
+        const similarity = 1 - (vr.distance * vr.distance) / 2;
+        if (similarity < threshold)
+            continue;
+        const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?').get(vr.id, EMBEDDING_VERSION);
+        if (!row)
+            continue;
+        const fact = rowToFact(row);
+        // Exact-scope gate (applied BEFORE the limit break):
+        if (scope.type === 'global') {
+            if (fact.scope_type !== 'global')
+                continue;
+        }
+        else {
+            if (fact.scope_type !== 'project' || fact.scope_project !== canonProject)
+                continue;
+        }
+        results.push({ fact, distance: vr.distance });
+        if (results.length >= limit)
+            break;
+    }
+    return results;
+}
+/**
  * Get top facts using a relevance score that combines:
  * - Confirmation count (consolidated_count) — how established is this fact
  * - Recency (updated_at) — how recent is this fact

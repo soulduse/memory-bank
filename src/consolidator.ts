@@ -2,9 +2,8 @@ import Database from 'better-sqlite3';
 import type { Fact, ConsolidationResult } from './types.js';
 import { callHaiku, parseJsonResponse } from './llm.js';
 import {
-  getNewFactsSince,
   getAllNewFactsSince,
-  searchSimilarFacts,
+  searchSimilarFactsSameScope,
   updateFact,
   deactivateFact,
   insertRevision,
@@ -35,57 +34,11 @@ export function buildConsolidationPrompt(existingFact: string, newFact: string):
   return `Existing fact: "${existingFact}"\nNew fact: "${newFact}"`;
 }
 
-export async function consolidateFacts(
-  db: Database.Database,
-  project: string,
-  lastConsolidatedAt: string,
-): Promise<{ processed: number; merged: number; contradictions: number; evolutions: number }> {
-  await initEmbeddings();
-
-  const newFacts = getNewFactsSince(db, project, lastConsolidatedAt);
-  if (newFacts.length === 0) {
-    return { processed: 0, merged: 0, contradictions: 0, evolutions: 0 };
-  }
-
-  let haikuCalls = 0;
-  let merged = 0;
-  let contradictions = 0;
-  let evolutions = 0;
-
-  for (const newFact of newFacts) {
-    if (haikuCalls >= MAX_HAIKU_CALLS) break;
-    if (!newFact.embedding) continue;
-
-    // Convert Float32Array back to number[] for searchSimilarFacts
-    const embeddingArray = Array.from(newFact.embedding);
-    const similar = searchSimilarFacts(db, embeddingArray, project, 5, SIMILARITY_THRESHOLD);
-    const candidates = similar.filter(s => s.fact.id !== newFact.id);
-    if (candidates.length === 0) continue;
-
-    const closest = candidates[0];
-    const prompt = buildConsolidationPrompt(closest.fact.fact, newFact.fact);
-
-    try {
-      const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, prompt);
-      haikuCalls++;
-
-      const result = parseJsonResponse<ConsolidationResult>(response);
-      if (!result) continue;
-
-      applyConsolidationResult(db, closest.fact, newFact, result);
-
-      switch (result.relation) {
-        case 'DUPLICATE': merged++; break;
-        case 'CONTRADICTION': contradictions++; break;
-        case 'EVOLUTION': evolutions++; break;
-      }
-    } catch (error) {
-      console.error(`Consolidation failed for fact ${newFact.id}:`, error);
-    }
-  }
-
-  return { processed: newFacts.length, merged, contradictions, evolutions };
-}
+// NOTE: the former per-project `consolidateFacts()` was removed — it selected
+// candidates with searchSimilarFacts(project), which includes GLOBAL facts, so
+// a project-private driver could rewrite/deactivate a shared global fact
+// (cross-scope leak). All consolidation now goes through consolidateAllPending
+// below, which searches strictly within a single scope.
 
 /**
  * Consolidate the ENTIRE backlog in one pass: every new fact (any scope, any
@@ -134,16 +87,18 @@ export async function consolidateAllPending(
       // fact must never merge across the boundary: an EVOLUTION would rewrite
       // the global row with project-private text (leaking it to every project),
       // and a CONTRADICTION would let one project deactivate shared global
-      // memory. So a project fact is compared ONLY against its own project's
-      // facts, and a global fact only against other global facts.
-      const canonProject = newFact.scope_project;
-      const candidates = searchSimilarFacts(db, embeddingArray, canonProject, 20, SIMILARITY_THRESHOLD)
-        .filter((s) => {
-          if (s.fact.id === newFact.id) return false;
-          if (newFact.scope_type === 'global') return s.fact.scope_type === 'global';
-          return s.fact.scope_type === 'project' && s.fact.scope_project === newFact.scope_project;
-        })
-        .slice(0, 5);
+      // memory. searchSimilarFactsSameScope applies the scope gate BEFORE its
+      // limit, so an in-scope match is never starved out by closer out-of-scope
+      // rows. A global fact needs a scope_project — skip malformed rows.
+      const scope = newFact.scope_type === 'global'
+        ? ({ type: 'global' } as const)
+        : newFact.scope_project
+          ? ({ type: 'project', project: newFact.scope_project } as const)
+          : null;
+      const candidates = scope
+        ? searchSimilarFactsSameScope(db, embeddingArray, scope, 5, SIMILARITY_THRESHOLD)
+            .filter((s) => s.fact.id !== newFact.id)
+        : [];
 
       if (candidates.length > 0) {
         const closest = candidates[0];

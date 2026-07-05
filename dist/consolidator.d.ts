@@ -1,12 +1,6 @@
 import Database from 'better-sqlite3';
 import type { Fact, ConsolidationResult } from './types.js';
 export declare function buildConsolidationPrompt(existingFact: string, newFact: string): string;
-export declare function consolidateFacts(db: Database.Database, project: string, lastConsolidatedAt: string): Promise<{
-    processed: number;
-    merged: number;
-    contradictions: number;
-    evolutions: number;
-}>;
 /**
  * Consolidate the ENTIRE backlog in one pass: every new fact (any scope, any
  * project) processed exactly once, under a single shared Haiku budget. The
