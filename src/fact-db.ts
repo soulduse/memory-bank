@@ -242,39 +242,42 @@ export function searchSimilarFactsSameScope(
   const canonProject = scope.type === 'project' ? canonicalizeProject(db, scope.project) : null;
   const buf = Buffer.from(new Float32Array(embedding).buffer);
 
-  // Hard bound the KNN paging by the number of active facts actually in this
-  // scope — once we've scanned at least that many nearest rows we cannot be
-  // hiding an in-scope match behind out-of-scope neighbours. (A fresh threshold
-  // cutoff still applies; this only prevents a shallow fetch from starving the
-  // in-scope match when many closer out-of-scope rows exist.)
+  // Early out only if the scope is genuinely empty (nothing to match against).
   const scopeCount = scope.type === 'global'
     ? (db.prepare("SELECT COUNT(*) AS n FROM facts WHERE is_active = 1 AND scope_type = 'global' AND embedding_version = ?").get(EMBEDDING_VERSION) as { n: number }).n
     : (db.prepare("SELECT COUNT(*) AS n FROM facts WHERE is_active = 1 AND scope_type = 'project' AND scope_project = ? AND embedding_version = ?").get(canonProject, EMBEDDING_VERSION) as { n: number }).n;
-  const totalActive = (db.prepare('SELECT COUNT(*) AS n FROM facts WHERE is_active = 1 AND embedding_version = ?').get(EMBEDDING_VERSION) as { n: number }).n;
   if (scopeCount === 0) return [];
 
-  const fetchN = (table: string, n: number) => {
+  // fetchN returns rows AND whether the index returned fewer than requested
+  // (i.e. it was exhausted). We page on the VECTOR-TABLE row count, not the
+  // active-fact count: the vec tables can hold stale/old-version rows that rank
+  // ahead of a valid in-scope row and are only rejected later by the
+  // embedding_version filter, so bounding by active facts could stop before
+  // reaching the match. `exhausted` is the correct, index-size-independent stop.
+  const fetchN = (table: string, n: number): { rows: Array<{ id: string; distance: number }>; exhausted: boolean } => {
     try {
-      return db.prepare(`
+      const rows = db.prepare(`
         SELECT id, distance FROM ${table}
         WHERE embedding MATCH ? ORDER BY distance LIMIT ?
       `).all(buf, n) as Array<{ id: string; distance: number }>;
+      return { rows, exhausted: rows.length < n };
     } catch {
-      return [];
+      return { rows: [], exhausted: true };
     }
   };
 
-  // Grow the KNN fetch until we have `limit` in-scope hits, or we've scanned the
-  // whole index (fetchCount >= totalActive). Bounds the loop at the DB size.
-  let fetchCount = Math.min(Math.max(limit * 20, 200), Math.max(totalActive, 1));
+  const HARD_CAP = 100_000; // safety ceiling so a pathological index can't loop unbounded
+  let fetchCount = Math.max(limit * 20, 200);
   let results: Array<{ fact: Fact; distance: number }> = [];
   for (;;) {
+    const a = fetchN('vec_facts', fetchCount);
+    const b = fetchN('vec_facts_kr', fetchCount);
     const best = new Map<string, number>();
-    for (const vr of [...fetchN('vec_facts', fetchCount), ...fetchN('vec_facts_kr', fetchCount)]) {
+    for (const vr of [...a.rows, ...b.rows]) {
       const cur = best.get(vr.id);
       if (cur === undefined || vr.distance < cur) best.set(vr.id, vr.distance);
     }
-    const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b) => a.distance - b.distance);
+    const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((x, y) => x.distance - y.distance);
 
     results = [];
     for (const vr of merged) {
@@ -294,9 +297,10 @@ export function searchSimilarFactsSameScope(
       if (results.length >= limit) break;
     }
 
-    // Done if we found enough, or we've already scanned the entire index.
-    if (results.length >= limit || fetchCount >= totalActive) break;
-    fetchCount = Math.min(fetchCount * 4, totalActive);
+    // Stop when we have enough, both indexes are exhausted, or we hit the cap.
+    const bothExhausted = a.exhausted && b.exhausted;
+    if (results.length >= limit || bothExhausted || fetchCount >= HARD_CAP) break;
+    fetchCount = Math.min(fetchCount * 4, HARD_CAP);
   }
 
   return results;

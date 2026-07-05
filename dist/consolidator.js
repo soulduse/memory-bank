@@ -25,12 +25,15 @@ export function buildConsolidationPrompt(existingFact, newFact) {
 /**
  * Consolidate ONE driver fact against a same-scope neighbour (if any).
  * Shared by consolidateAllPending and the back-compat consolidateFacts wrapper.
- * Returns the applied verdict, 'none' (no candidate / unusable), or throws only
- * to signal a transient LLM failure the caller should not skip past.
+ *
+ * `called` reports whether an LLM call was actually made — the caller MUST use
+ * this (not the verdict) for budget accounting, because a call that returns
+ * malformed/unparseable text still consumed the budget even though its verdict
+ * is 'none'. Throws only on a transient LLM failure the caller should retry.
  */
 async function consolidateOne(db, newFact) {
     if (!newFact.embedding)
-        return 'none';
+        return { called: false, verdict: 'none' };
     const embeddingArray = Array.from(newFact.embedding);
     // SAME-SCOPE only (no cross-scope leak): project fact → its own project,
     // global fact → global. The scope gate is inside the search, before its
@@ -41,18 +44,18 @@ async function consolidateOne(db, newFact) {
             ? { type: 'project', project: newFact.scope_project }
             : null;
     if (!scope)
-        return 'none';
+        return { called: false, verdict: 'none' };
     const candidates = searchSimilarFactsSameScope(db, embeddingArray, scope, 5, SIMILARITY_THRESHOLD)
         .filter((s) => s.fact.id !== newFact.id);
     if (candidates.length === 0)
-        return 'none';
+        return { called: false, verdict: 'none' };
     const closest = candidates[0];
     const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, buildConsolidationPrompt(closest.fact.fact, newFact.fact));
     const result = parseJsonResponse(response);
     if (!result)
-        return 'none';
+        return { called: true, verdict: 'none' }; // call happened but output unusable
     applyConsolidationResult(db, closest.fact, newFact, result);
-    return result.relation;
+    return { called: true, verdict: result.relation };
 }
 /**
  * @deprecated Back-compat wrapper for the removed per-project consolidator.
@@ -71,9 +74,9 @@ export async function consolidateFacts(db, project, lastConsolidatedAt) {
         if (!stillActive)
             continue;
         try {
-            const verdict = await consolidateOne(db, newFact);
-            if (verdict !== 'none')
-                haikuCalls++;
+            const { called, verdict } = await consolidateOne(db, newFact);
+            if (called)
+                haikuCalls++; // count the CALL, not the verdict (malformed output still spent budget)
             if (verdict === 'DUPLICATE')
                 merged++;
             else if (verdict === 'CONTRADICTION')
@@ -128,9 +131,9 @@ export async function consolidateAllPending(db, since) {
         if (stillActive) {
             try {
                 // Same-scope isolation + budget accounting via the shared helper.
-                const verdict = await consolidateOne(db, newFact);
-                if (verdict !== 'none')
-                    haikuCalls++;
+                const { called, verdict } = await consolidateOne(db, newFact);
+                if (called)
+                    haikuCalls++; // count the CALL, not the verdict
                 if (verdict === 'DUPLICATE')
                     merged++;
                 else if (verdict === 'CONTRADICTION')

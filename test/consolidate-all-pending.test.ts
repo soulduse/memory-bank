@@ -178,6 +178,19 @@ describe('consolidateAllPending', () => {
     expect(hits[0].fact.fact).toBe('proj deep'); // found despite 210 closer globals
   });
 
+  it('counts an LLM CALL even when the response is unparseable (budget not undercounted)', async () => {
+    // HIGH guard: a call that returns garbage still spent budget → must count,
+    // or the budget is bypassed and every candidate gets an LLM call.
+    for (let i = 0; i < 40; i++) addFact(db, `dup fact ${i}`, 'global', null);
+    (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('not json at all');
+    (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue(null); // unparseable
+
+    const result = await consolidateAllPending(db, '2000-01-01T00:00:00Z');
+
+    expect(result.haikuCalls).toBeLessThanOrEqual(10);
+    expect((callHaiku as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(10);
+  });
+
   it('does NOT advance the cursor past a fact whose comparison errored (retryable)', async () => {
     addFact(db, 'errdriver one', 'global', null);
     addFact(db, 'errdriver two', 'global', null); // similar → triggers a call
