@@ -11,11 +11,20 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { initDatabase } from '../dist/db.js';
 import { consolidateFacts } from '../dist/consolidator.js';
 import { getIndexDir } from '../dist/paths.js';
 
-const LOCK = path.join(getIndexDir(), 'fact-consolidate.lock');
+// PER-PROJECT lock: a global lock would let one project's long consolidation
+// run starve every other project (each worker only consolidates its own CWD,
+// so a losing project's facts stay unconsolidated until a later session).
+// Keying the lock by project path caps the actual flood cause — the SAME
+// project's SessionStart hook re-spawning on every session — to one worker,
+// while letting distinct projects proceed in parallel.
+const PROJECT = process.env.CWD || process.cwd();
+const PROJECT_HASH = crypto.createHash('sha256').update(PROJECT).digest('hex').slice(0, 16);
+const LOCK = path.join(getIndexDir(), `fact-consolidate-${PROJECT_HASH}.lock`);
 
 function log(line) {
   const msg = `[${new Date().toISOString()}] ${line}`;
@@ -27,11 +36,12 @@ function log(line) {
   console.log(msg);
 }
 
-// Single-instance lock: the SessionStart hook spawns this worker detached on
-// EVERY session start with no lock, so without this guard orphaned workers
-// (ppid=1) pile up — measured 14 running at once, each spawning a headless
-// Claude session per LLM call, flooding the proxy. Atomic exclusive create
-// ('wx') + pid-liveness check so a stale lock from a killed worker is cleared.
+// Single-instance-per-project lock: the SessionStart hook spawns this worker
+// detached on EVERY session start with no lock, so without this guard orphaned
+// workers (ppid=1) pile up — measured 14 running at once, each spawning a
+// headless Claude session per LLM call, flooding the proxy. Atomic exclusive
+// create ('wx') + pid-liveness check so a stale lock from a killed worker is
+// cleared.
 function acquireLock() {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -62,15 +72,16 @@ function releaseLock() {
 
 async function main() {
   if (!acquireLock()) {
-    // Another consolidate worker is already running — exit cleanly (this
-    // project's facts get consolidated on a later session; resumable).
+    // Another worker for THIS project is already running — exit cleanly (this
+    // project's facts get consolidated on a later session; resumable). Other
+    // projects have their own lock and are unaffected.
     process.exit(0);
   }
   process.on('exit', releaseLock);
   process.on('SIGINT', () => process.exit(0));
   process.on('SIGTERM', () => process.exit(0));
 
-  const project = process.env.CWD || process.cwd();
+  const project = PROJECT;
   const lastConsolidated = process.env.LAST_CONSOLIDATED_AT
     || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 

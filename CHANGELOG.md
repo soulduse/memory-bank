@@ -12,8 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawns it detached on every session start, so orphaned workers (ppid=1) piled up
   (measured 14 running at once), each spawning a headless Claude session per LLM call
   and flooding the proxy across the account pool. Added the same atomic `wx` pid-lock
-  used by the ontology/extract/reembed workers, so at most one consolidate worker runs
-  at a time (the rest exit cleanly and resume on a later session). This was the same
+  used by the ontology/extract/reembed workers, keyed PER PROJECT (a global lock would
+  let one project's long run starve others, since each worker only consolidates its own
+  CWD) — so the actual flood cause (the same project's SessionStart re-spawning every
+  session) is capped to one worker while distinct projects proceed in parallel. This was
+  the same
   orphan-flood class fixed for the backfill workers in v1.3.0 — the consolidate worker
   was the one detached worker still missing a lock.
 
