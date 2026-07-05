@@ -44,13 +44,22 @@ export function isTransientLlmError(err) {
     const status = typeof e?.status === 'number' ? e.status
         : typeof e?.statusCode === 'number' ? e.statusCode : undefined;
     if (status !== undefined) {
+        // Auth/config errors (401/403) and missing endpoint (404) are treated as
+        // "hold" (transient) ON PURPOSE: while credentials/config are broken NO
+        // consolidation can succeed, so holding the cursor and retrying is correct —
+        // it resumes cleanly once the config is fixed, whereas skipping would
+        // permanently drain the backlog with zero comparisons. (The global lock +
+        // per-run budget mean a broken-auth run makes only a few failed calls then
+        // stops, so this holds progress without flooding.)
+        if (status === 401 || status === 403 || status === 404)
+            return true;
         if (status === 429 || status >= 500)
             return true; // rate limit / server error
         if (status === 400 || status === 413 || status === 422)
-            return false; // bad/oversized request
+            return false; // per-fact bad/oversized request
     }
     const m = (e?.message ?? String(err)).toLowerCase();
-    if (/\b(429|500|502|503|504)\b|timeout|etimedout|econnreset|econnrefused|enotfound|socket hang up|network|overloaded|temporarily|rate.?limit/.test(m)) {
+    if (/\b(401|403|404|429|500|502|503|504)\b|unauthor|forbidden|invalid.*(key|token|api)|timeout|etimedout|econnreset|econnrefused|enotfound|socket hang up|network|overloaded|temporarily|rate.?limit/.test(m)) {
         return true;
     }
     if (/\b(400|413|422)\b|too (large|long)|context length|maximum.*token|max.*token|invalid.*request|content.*too/.test(m)) {

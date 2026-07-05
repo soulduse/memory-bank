@@ -272,6 +272,19 @@ describe('consolidateAllPending', () => {
     expect(cursor).not.toBeNull(); // advanced past the un-processable fact
   });
 
+  it('AUTH/config errors (401/403) hold the cursor (correct — nothing succeeds until config is fixed)', async () => {
+    addFact(db, 'auth A', 'global', null);
+    addFact(db, 'auth B', 'global', null);
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('401 unauthorized'), { status: 401 }));
+
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 4; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+
+    expect(cursor).toBeNull(); // held, not silently drained
+    const attempts = db.prepare("SELECT MAX(consolidation_attempts) AS m FROM facts").get() as { m: number };
+    expect(attempts.m).toBe(0); // config failure burns no per-fact attempt
+  });
+
   it('an UNKNOWN error is treated as transient (held, not skipped)', async () => {
     addFact(db, 'mystery A', 'global', null);
     addFact(db, 'mystery B', 'global', null);
