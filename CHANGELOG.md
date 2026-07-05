@@ -61,15 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of materializing every active fact, and a new `idx_facts_active_created_id`
   index serves the `(is_active, created_at, id)` filter+sort — so a from-the-beginning
   drain over tens of thousands of facts can't OOM or trigger a full-table temp sort.
-- **Error-classified consolidation failure handling**: a comparison CALL rejection is
-  classified as TRANSIENT (429/5xx/timeout/network — and any UNKNOWN error) or DETERMINISTIC
-  (400/413/422/oversized-prompt). Transient failures HOLD the cursor and retry forever until
-  the provider recovers — an outage never silently skips the backlog, and no attempt is
-  burned. Deterministic per-fact rejections are ledgered (`facts.consolidation_attempts`,
-  idempotent migration) and SKIPPED after MAX attempts so one un-processable fact can't wedge
-  the cursor. Classifying by error type is the only way to satisfy both "an outage must not
-  silently drain the backlog" and "one bad fact must not wedge the cursor"; unknown errors
-  default to transient so nothing is ever silently skipped.
+- **Error-classified consolidation failure handling** (`classifyLlmError`): a comparison
+  CALL rejection is three-valued — TRANSIENT (429/5xx/timeout/network/auth), DETERMINISTIC
+  (400/413/422/oversized-prompt), or UNKNOWN (unrecognized). The status is read from the
+  structured error (`status`/`statusCode`) OR the nested SDK/axios shape
+  (`error.response.status`) OR a status number explicitly labelled in the message
+  ("status code 400") — never a bare incidental number ("retry after 400 ms"). The drain
+  loop SKIPS (advances after `facts.consolidation_attempts` reaches MAX, idempotent
+  migration) **only** on a recognized DETERMINISTIC rejection — the one case where the fact
+  itself is provably at fault. TRANSIENT, UNKNOWN, and any non-LLM internal error
+  (parser/DB bug, tagged apart via `LlmCallError`) all HOLD the cursor and retry — an
+  outage or an unrecognized error never silently drains the backlog, and a code bug never
+  gets miscounted as a "bad fact". Skipping only on a certain per-request rejection is the
+  narrowest, safest criterion that satisfies both "an outage must not silently drain the
+  backlog" and "one un-processable fact must not wedge the cursor".
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same
