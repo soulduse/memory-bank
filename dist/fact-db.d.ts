@@ -96,7 +96,7 @@ export declare function getNewFactsSince(db: Database.Database, project: string,
 export declare function getAllNewFactsSince(db: Database.Database, cursor: {
     createdAt: string;
     id: string;
-} | null): Fact[];
+} | null, limit?: number): Fact[];
 /**
  * Search facts across ALL projects (no scope filter).
  * Used for cross-project knowledge transfer.

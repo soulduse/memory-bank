@@ -406,18 +406,25 @@ export function getNewFactsSince(db: Database.Database, project: string, since: 
 export function getAllNewFactsSince(
   db: Database.Database,
   cursor: { createdAt: string; id: string } | null,
+  limit: number = 2000,
 ): Fact[] {
+  // Bounded page (keyset) — NEVER materialize the whole table: seeding from the
+  // beginning could otherwise pull tens of thousands of rows into memory in one
+  // query. The keyset cursor makes each run resume exactly where the last ended,
+  // so the backlog drains page-by-page. The idx_facts_active_created_id index
+  // (is_active, created_at, id) serves both the filter and the ORDER BY without
+  // a temp sort.
   if (!cursor) {
     return (db.prepare(`
-      SELECT * FROM facts WHERE is_active = 1 ORDER BY created_at ASC, id ASC
-    `).all() as Record<string, unknown>[]).map(rowToFact);
+      SELECT * FROM facts WHERE is_active = 1 ORDER BY created_at ASC, id ASC LIMIT ?
+    `).all(limit) as Record<string, unknown>[]).map(rowToFact);
   }
   return (db.prepare(`
     SELECT * FROM facts
     WHERE is_active = 1
       AND (created_at > ? OR (created_at = ? AND id > ?))
-    ORDER BY created_at ASC, id ASC
-  `).all(cursor.createdAt, cursor.createdAt, cursor.id) as Record<string, unknown>[]).map(rowToFact);
+    ORDER BY created_at ASC, id ASC LIMIT ?
+  `).all(cursor.createdAt, cursor.createdAt, cursor.id, limit) as Record<string, unknown>[]).map(rowToFact);
 }
 
 /**

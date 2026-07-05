@@ -57,6 +57,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backlog drains across a few runs regardless of age). A fact imported mid-drain with an
   old timestamp is not re-driven by the current pass but is still a candidate for future
   comparisons (best-effort dedup, documented).
+- **Bounded drain page + index**: the consolidation query pages the keyset (LIMIT 2000)
+  instead of materializing every active fact, and a new `idx_facts_active_created_id`
+  index serves the `(is_active, created_at, id)` filter+sort — so a from-the-beginning
+  drain over tens of thousands of facts can't OOM or trigger a full-table temp sort.
+- **Consolidation quarantine**: a driver fact whose comparison CALL fails deterministically
+  (oversized text → provider 400, etc.) is retried a bounded number of times
+  (`consolidation_attempts`, idempotent migration) and then skipped, so one un-processable
+  fact can't wedge the cursor and starve the rest of the backlog. Transient failures still
+  retry (hold the cursor) until they either succeed or exhaust the attempt budget.
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

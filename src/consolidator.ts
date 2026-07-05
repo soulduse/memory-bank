@@ -27,6 +27,10 @@ const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relat
 }`;
 
 const MAX_HAIKU_CALLS = 10;
+// A driver fact whose comparison CALL keeps throwing (deterministic provider
+// rejection — e.g. oversized text) is quarantined after this many run-level
+// failures so it can't wedge the cursor and starve the rest of the backlog.
+const MAX_CONSOLIDATION_ATTEMPTS = 3;
 // e5 passage-passage scale (measured): near-dup 0.99, paraphrase 0.97,
 // related-but-distinct ~0.91, unrelated <=0.86. 0.95 selects dup candidates.
 const SIMILARITY_THRESHOLD = 0.95;
@@ -163,14 +167,25 @@ export async function consolidateAllPending(
         else if (verdict === 'CONTRADICTION') contradictions++;
         else if (verdict === 'EVOLUTION') evolutions++;
       } catch (error) {
-        // A throw is a TRANSIENT call failure (callHaiku rejected — infra down);
-        // unparseable output is a no-op inside consolidateOne, not a throw.
-        // Count the spent attempt but do NOT advance the cursor past this fact —
-        // stop so the next run retries it from here. (During an outage every
-        // fact would fail anyway, so there is nothing to starve.)
+        // A throw is a CALL failure (callHaiku rejected). Usually transient
+        // (infra down) → hold the cursor and retry next run. But a DETERMINISTIC
+        // rejection (oversized text, content the provider always 400s) would
+        // wedge the cursor forever, so ledger the failure and quarantine the
+        // fact after MAX attempts (advance past it). During a real outage every
+        // fact fails, so nothing is prematurely quarantined before recovery
+        // unless the SAME fact fails across MAX separate runs.
         haikuCalls++;
-        console.error(`Consolidation failed for fact ${newFact.id}:`, error);
-        break;
+        console.error(`Consolidation call failed for fact ${newFact.id}:`, error);
+        const attempts = (db.prepare(
+          'UPDATE facts SET consolidation_attempts = COALESCE(consolidation_attempts, 0) + 1 WHERE id = ? RETURNING consolidation_attempts'
+        ).get(newFact.id) as { consolidation_attempts: number } | undefined)?.consolidation_attempts ?? 0;
+        if (attempts >= MAX_CONSOLIDATION_ATTEMPTS) {
+          console.error(`Consolidation quarantine fact ${newFact.id} after ${attempts} call failures — skipping`);
+          processed++;
+          cursor = { createdAt: newFact.created_at, id: newFact.id }; // advance past the wedge
+          continue;
+        }
+        break; // hold the cursor — retry this fact next run
       }
     }
     // Fully examined (including a no-op / no-candidate / no-embedding fact — none

@@ -241,6 +241,27 @@ describe('consolidateAllPending', () => {
     expect(remaining.length).toBe(0); // fully drained despite the shared timestamp
   });
 
+  it('getAllNewFactsSince honors a page limit (no full-table materialization)', () => {
+    for (let i = 0; i < 50; i++) addFact(db, `page ${i}`, 'global', null);
+    const page = getAllNewFactsSince(db, null, 10);
+    expect(page.length).toBe(10); // bounded, not all 50
+  });
+
+  it('quarantines a fact whose comparison CALL deterministically throws (no cursor wedge)', async () => {
+    addFact(db, 'always throws', 'global', null);
+    addFact(db, 'sibling for candidate', 'global', null); // gives the driver a candidate
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('provider 400 oversized'));
+
+    // Run repeatedly; the failing fact is retried then quarantined after MAX.
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 5; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+
+    // The cursor must have advanced past the wedge (not stuck at the beginning).
+    expect(cursor).not.toBeNull();
+    const stuck = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'always throws'").get() as { consolidation_attempts: number };
+    expect(stuck.consolidation_attempts).toBeGreaterThanOrEqual(3);
+  });
+
   it('does NOT advance the cursor past a fact whose comparison errored (retryable)', async () => {
     addFact(db, 'errdriver one', 'global', null);
     addFact(db, 'errdriver two', 'global', null); // similar → triggers a call
