@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole index is scanned) so even >200 closer out-of-scope rows cannot hide a valid
   in-scope match. `consolidateFacts` is kept as a deprecated, now-scope-safe back-compat
   export so existing importers don't crash at module load.
+- **Consolidation attempt ledger** (`facts.consolidation_attempts`, idempotent migration):
+  a driver fact whose comparison deterministically returns non-JSON (a prompt-injected
+  fact could force this) is retried up to 3 times, then dead-lettered (the cursor advances
+  past it) so it can never hold the cursor and starve the rest of the backlog. Transient
+  LLM failures (call rejected — infra down) hold the cursor without burning an attempt, so
+  an outage is retried rather than misfiled. Malformed-response and error attempts both
+  count against the per-run Haiku budget (no cost/rate-limit bypass).
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

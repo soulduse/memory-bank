@@ -23551,6 +23551,9 @@ function initDatabase() {
   if (!factColumnNames.has("ontology_attempts")) {
     db.prepare("ALTER TABLE facts ADD COLUMN ontology_attempts INTEGER NOT NULL DEFAULT 0").run();
   }
+  if (!factColumnNames.has("consolidation_attempts")) {
+    db.prepare("ALTER TABLE facts ADD COLUMN consolidation_attempts INTEGER NOT NULL DEFAULT 0").run();
+  }
   if (!factColumnNames.has("ontology_last_attempt_at")) {
     db.prepare("ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT").run();
   }

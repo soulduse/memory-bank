@@ -193,6 +193,33 @@ describe('consolidateAllPending', () => {
     expect(result.cursor).toBe('2000-01-01T00:00:00Z'); // held → retried next run
   });
 
+  it('a persistently-unparseable (poison) fact is skipped after MAX attempts (no permanent starvation)', async () => {
+    const base = Date.parse('2020-01-01T00:00:00Z');
+    // fact 0 = poison driver (always unparseable); fact 1 = clean later backlog.
+    insertFact(db, { fact: 'poison driver', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+    insertFact(db, { fact: 'clean later', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'poison driver'").run(new Date(base).toISOString());
+    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'clean later'").run(new Date(base + 1000).toISOString());
+
+    // Only the poison driver's comparison is unparseable; anything else resolves.
+    (callHaiku as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, user: string) =>
+      user.includes('poison driver') ? 'not json' : '{"relation":"INDEPENDENT","merged_fact":"","reason":"x"}');
+    (parseJsonResponse as ReturnType<typeof vi.fn>).mockImplementation((text: string) =>
+      text.includes('not json') ? null : { relation: 'INDEPENDENT', merged_fact: '', reason: 'x' });
+
+    // Drive several runs; the poison fact holds the cursor until dead-lettered.
+    let cursor = '2000-01-01T00:00:00Z';
+    for (let r = 0; r < 5; r++) {
+      const run = await consolidateAllPending(db, cursor);
+      cursor = run.cursor;
+    }
+    // The poison fact must no longer block: cursor advanced at least to its own
+    // timestamp (so `created_at > cursor` excludes it), letting the backlog drain.
+    expect(cursor >= new Date(base).toISOString()).toBe(true);
+    const poison = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'poison driver'").get() as { consolidation_attempts: number };
+    expect(poison.consolidation_attempts).toBeGreaterThanOrEqual(3); // was retried, then skipped
+  });
+
   it('back-compat consolidateFacts respects the budget even when every LLM call rejects', async () => {
     for (let i = 0; i < 100; i++) addFact(db, `bc dup ${i}`, 'project', '/bc');
     (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('LLM down'));
