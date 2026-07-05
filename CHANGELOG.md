@@ -15,25 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic reuse gate (`MEMORY_BANK_ONTOLOGY_DET_GATE`, disabled by default per
   live measurement)
 
-### Changed (post-1.3.0 adversarial-review hardening, same day)
-- Single-fact classification path unified onto the batch core (structured JSON prompt,
-  index validation, typed failure taxonomy shared)
-- Transient circuit breaker in the backfill worker (consecutive all-transient batches
-  abort the run; facts preserved untouched)
-- Category vec-index self-heal: exact id set-diff trigger, bidirectional reconciliation
-  (add missing + purge stale), structured completeness reporting ({added, purged,
-  missingRemaining, staleRemaining, blocked}) — incomplete index always refuses
-  candidate-starved classification
-- `IndexRepairError` typed escalation: index corruption surfaces loudly, never burns
-  fact attempts, never blocks relation detection over the healthy fact index
-- Relation edges idempotent per (source, type, target) + UNIQUE index migration
-  (exact-triple dedup only — distinct relation types between the same facts are
-  preserved as valid graph data)
-- Graph traversal: deterministic belief-safety edge preference (CONTRADICTS >
-  SUPERSEDES > affirmative), qualifying-edge fallback (a below-floor safety edge never
-  hides a qualifying neighbour), and pruned-path containment (below-floor neighbours
-  never enter the traversal frontier)
-
 ## [1.3.0] - 2026-07-05
 
 ### Changed
@@ -59,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic category-reuse gate. The gate ships DISABLED by default
   (opt-in via `MEMORY_BANK_ONTOLOGY_DET_GATE`): measured top-1 agreement with LLM
   assignments was only 72% at sim≥0.93 (n=800 sample) — insufficient for auto-assign.
+
+### Hardened (adversarial review, 24 rounds pre-release)
+- Single-fact classification path unified onto the batch core (structured JSON prompt,
+  index validation, typed failure taxonomy shared)
+- Transient circuit breaker in the backfill worker (consecutive all-transient batches
+  abort the run; facts preserved untouched)
+- Category vec-index self-heal: exact id set-diff trigger, bidirectional reconciliation
+  (add missing + purge stale), structured completeness reporting — an incomplete index
+  always refuses candidate-starved classification
+- `IndexRepairError` typed escalation: index corruption surfaces loudly, never burns
+  fact attempts, never blocks relation detection over the healthy fact index
+- Relation edges idempotent per (source, type, target) + UNIQUE index migration
+  (exact-triple dedup only — distinct relation types between the same facts are
+  preserved as valid graph data)
+- Graph traversal: deterministic belief-safety edge preference (CONTRADICTS >
+  SUPERSEDES > affirmative), qualifying-edge fallback, and pruned-path containment
 
 ### Fixed
 - **Fallback classification was never persisted**: on unparseable LLM output the
