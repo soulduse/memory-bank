@@ -127,6 +127,42 @@ describe('consolidateAllPending', () => {
     expect(secret.fact).toBe('Uses private vendor X');
   });
 
+  it('NEVER lets a project fact mutate/deactivate a global fact (EVOLUTION/CONTRADICTION isolation)', async () => {
+    // CRITICAL: a project-private driver must not reach a global candidate.
+    addFact(db, 'Uses vendor X', 'global', null);
+    addFact(db, 'Uses vendor X with SECRET token', 'project', '/secret'); // newer, similar
+
+    (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      relation: 'EVOLUTION', merged_fact: 'Uses vendor X with SECRET token', reason: 'newer',
+    });
+
+    await consolidateAllPending(db, '2000-01-01T00:00:00Z');
+
+    // The global row keeps its original text and stays active — never rewritten
+    // with the project-private secret, never deactivated.
+    const global = db.prepare("SELECT fact, is_active FROM facts WHERE scope_type = 'global'").get() as { fact: string; is_active: number };
+    expect(global.fact).toBe('Uses vendor X');
+    expect(global.is_active).toBe(1);
+    // No prompt ever paired the global fact with the secret project fact.
+    for (const call of (callHaiku as ReturnType<typeof vi.fn>).mock.calls) {
+      const prompt = String(call[1]);
+      const crossScopePair = prompt.includes('SECRET token') && /Existing fact:\s*"Uses vendor X"/.test(prompt);
+      expect(crossScopePair).toBe(false);
+    }
+  });
+
+  it('does NOT advance the cursor past a fact whose comparison errored (retryable)', async () => {
+    addFact(db, 'errdriver one', 'global', null);
+    addFact(db, 'errdriver two', 'global', null); // similar → triggers a call
+
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('LLM down'));
+
+    const run = await consolidateAllPending(db, '2000-01-01T00:00:00Z');
+
+    // Cursor must stay at the start so the errored fact is retried next run.
+    expect(run.cursor).toBe('2000-01-01T00:00:00Z');
+  });
+
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {
     // 15 similar global facts, budget 10 → run 1 processes the oldest 10 and
     // advances the cursor; run 2 (since=cursor) reaches the remaining 5.

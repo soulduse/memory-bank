@@ -98,8 +98,8 @@ export async function consolidateAllPending(db, since) {
     // after it (`created_at > cursor`) — otherwise INDEPENDENT facts (which stay
     // active) would re-consume the whole Haiku budget on the same oldest rows
     // every run and never reach newer/project-specific backlog.
-    let lastExaminedAt = null; // created_at of the last fact fully examined
-    let brokeAt = null; // created_at of the first UNexamined fact (budget wall)
+    let lastExaminedAt = null; // created_at of the last fact SAFE to advance past
+    let brokeAt = null; // created_at of the first fact we must NOT advance past
     for (let i = 0; i < newFacts.length; i++) {
         const newFact = newFacts[i];
         if (haikuCalls >= MAX_HAIKU_CALLS) {
@@ -110,20 +110,22 @@ export async function consolidateAllPending(db, since) {
         const stillActive = db.prepare('SELECT 1 FROM facts WHERE id = ? AND is_active = 1').get(newFact.id);
         if (stillActive && newFact.embedding) {
             const embeddingArray = Array.from(newFact.embedding);
-            // SCOPE-CORRECT candidates (no cross-project leakage): a global fact is
-            // compared ONLY against other global facts; a project fact against its
-            // own project + global. Passing null to searchSimilarFacts disables the
-            // scope filter, so for global facts we overfetch and keep global rows.
-            let candidates;
-            if (newFact.scope_type === 'global') {
-                candidates = searchSimilarFacts(db, embeddingArray, null, 20, SIMILARITY_THRESHOLD)
-                    .filter((s) => s.fact.id !== newFact.id && s.fact.scope_type === 'global')
-                    .slice(0, 5);
-            }
-            else {
-                candidates = searchSimilarFacts(db, embeddingArray, newFact.scope_project, 5, SIMILARITY_THRESHOLD)
-                    .filter((s) => s.fact.id !== newFact.id);
-            }
+            // SAME-SCOPE consolidation only — a project-private fact and a global
+            // fact must never merge across the boundary: an EVOLUTION would rewrite
+            // the global row with project-private text (leaking it to every project),
+            // and a CONTRADICTION would let one project deactivate shared global
+            // memory. So a project fact is compared ONLY against its own project's
+            // facts, and a global fact only against other global facts.
+            const canonProject = newFact.scope_project;
+            const candidates = searchSimilarFacts(db, embeddingArray, canonProject, 20, SIMILARITY_THRESHOLD)
+                .filter((s) => {
+                if (s.fact.id === newFact.id)
+                    return false;
+                if (newFact.scope_type === 'global')
+                    return s.fact.scope_type === 'global';
+                return s.fact.scope_type === 'project' && s.fact.scope_project === newFact.scope_project;
+            })
+                .slice(0, 5);
             if (candidates.length > 0) {
                 const closest = candidates[0];
                 const prompt = buildConsolidationPrompt(closest.fact.fact, newFact.fact);
@@ -147,10 +149,19 @@ export async function consolidateAllPending(db, since) {
                     }
                 }
                 catch (error) {
+                    // Transient LLM failure: do NOT advance the cursor past this fact, or
+                    // the comparison is lost forever (created_at > cursor skips it). Stop
+                    // the run here (like the budget wall); the next run retries from here.
                     console.error(`Consolidation failed for fact ${newFact.id}:`, error);
+                    brokeAt = newFact.created_at;
+                    break;
                 }
             }
         }
+        // Note: a fact with NO embedding cannot be a consolidation driver (no
+        // similarity search). Advancing past it is intentional — if its embedding
+        // is backfilled later, a newer similar fact still picks it up as a
+        // candidate. Only unexamined/errored facts hold the cursor back.
         processed++;
         lastExaminedAt = newFact.created_at;
     }
