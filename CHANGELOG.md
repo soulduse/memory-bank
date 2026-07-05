@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-07-05
+
+### Fixed
+- **`fact-consolidate-worker` had no single-instance lock** — the SessionStart hook
+  spawns it detached on every session start, so orphaned workers (ppid=1) piled up
+  (measured 14 running at once), each spawning a headless Claude session per LLM call
+  and flooding the proxy across the account pool. Added the same atomic `wx` pid-lock
+  used by the ontology/extract/reembed workers, so at most one consolidate worker runs
+  at a time (the rest exit cleanly and resume on a later session). This was the same
+  orphan-flood class fixed for the backfill workers in v1.3.0 — the consolidate worker
+  was the one detached worker still missing a lock.
+
 ## [1.3.1] - 2026-07-05
 
 ### Documentation

@@ -15,6 +15,8 @@ import { initDatabase } from '../dist/db.js';
 import { consolidateFacts } from '../dist/consolidator.js';
 import { getIndexDir } from '../dist/paths.js';
 
+const LOCK = path.join(getIndexDir(), 'fact-consolidate.lock');
+
 function log(line) {
   const msg = `[${new Date().toISOString()}] ${line}`;
   try {
@@ -25,7 +27,49 @@ function log(line) {
   console.log(msg);
 }
 
+// Single-instance lock: the SessionStart hook spawns this worker detached on
+// EVERY session start with no lock, so without this guard orphaned workers
+// (ppid=1) pile up — measured 14 running at once, each spawning a headless
+// Claude session per LLM call, flooding the proxy. Atomic exclusive create
+// ('wx') + pid-liveness check so a stale lock from a killed worker is cleared.
+function acquireLock() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') return false;
+      try {
+        const pid = parseInt(fs.readFileSync(LOCK, 'utf8'), 10);
+        if (pid && !Number.isNaN(pid)) {
+          try { process.kill(pid, 0); return false; } // alive → don't run
+          catch { /* stale lock */ }
+        }
+        fs.unlinkSync(LOCK); // stale — remove and retry the exclusive create
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+function releaseLock() {
+  try {
+    if (parseInt(fs.readFileSync(LOCK, 'utf8'), 10) === process.pid) fs.unlinkSync(LOCK);
+  } catch { /* ignore */ }
+}
+
 async function main() {
+  if (!acquireLock()) {
+    // Another consolidate worker is already running — exit cleanly (this
+    // project's facts get consolidated on a later session; resumable).
+    process.exit(0);
+  }
+  process.on('exit', releaseLock);
+  process.on('SIGINT', () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
+
   const project = process.env.CWD || process.cwd();
   const lastConsolidated = process.env.LAST_CONSOLIDATED_AT
     || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
