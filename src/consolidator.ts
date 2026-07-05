@@ -42,48 +42,73 @@ export function buildConsolidationPrompt(existingFact: string, newFact: string):
   return `Existing fact: "${existingFact}"\nNew fact: "${newFact}"`;
 }
 
+export type LlmErrorClass = 'transient' | 'deterministic' | 'unknown';
+
 /**
- * Classify a callHaiku rejection: is it a TRANSIENT provider problem (retry
- * forever until it recovers) or a DETERMINISTIC per-fact rejection (skip after
- * MAX attempts so it can't wedge the cursor)?
+ * Classify a callHaiku rejection into three states so the drain loop can satisfy
+ * BOTH "an outage must never silently skip the backlog" AND "one un-processable
+ * fact must never wedge the cursor forever" — a binary flag cannot do both under
+ * a single monotonic cursor with imperfect error recognition:
  *
- * This is the ONLY way to satisfy both "an outage must never silently skip the
- * backlog" and "one un-processable fact must never wedge the cursor" — a plain
- * failure count can't tell them apart. UNKNOWN errors are treated as transient
- * (hold/retry), so an unrecognized error never silently drains the backlog.
+ *   - 'transient'     recognized outage/auth (429/5xx/401/403/404, rate-limit,
+ *                     timeout, network...). The provider — not the fact — is at
+ *                     fault, so the caller HOLDS the cursor and retries; it
+ *                     resumes cleanly on recovery, never skipping during an
+ *                     outage however long it lasts.
+ *   - 'deterministic' recognized per-request rejection (400/413/422, too-long,
+ *                     max_tokens, bad request...). Only THIS fact is at fault, so
+ *                     the caller burns an attempt and advances after MAX.
+ *   - 'unknown'       neither recognized. Treated like 'deterministic' by the
+ *                     caller (bounded retry → advance) so an UNRECOGNIZED error
+ *                     can never wedge the whole backlog forever. This is safe:
+ *                     "skipping" a fact only means it isn't consolidated/deduped
+ *                     — the fact stays active and searchable, it is never deleted
+ *                     — whereas an unbounded hold halts ALL future consolidation.
+ *
+ * Numbers are read from the STRUCTURED status, or from a status number that is
+ * explicitly LABELLED in the message ("status code 400"). A bare incidental
+ * number ("retry after 400 ms") is never read as a status — it falls through to
+ * phrase matching or 'unknown'.
  */
-export function isTransientLlmError(err: unknown): boolean {
+export function classifyLlmError(err: unknown): LlmErrorClass {
   const e = err as { status?: number; statusCode?: number; message?: string } | undefined;
-  const status = typeof e?.status === 'number' ? e.status
+  const byCode = (code: number): LlmErrorClass => {
+    if (code === 401 || code === 403 || code === 404) return 'transient'; // systemic/config — hold, resumes on fix
+    if (code === 429 || code >= 500) return 'transient';                  // rate limit / server error
+    if (code === 400 || code === 413 || code === 422) return 'deterministic'; // per-request bad/oversized
+    return 'unknown';
+  };
+  const structured = typeof e?.status === 'number' ? e.status
     : typeof e?.statusCode === 'number' ? e.statusCode : undefined;
-  if (status !== undefined) {
-    // Auth/config errors (401/403) and missing endpoint (404) are treated as
-    // "hold" (transient) ON PURPOSE: while credentials/config are broken NO
-    // consolidation can succeed, so holding the cursor and retrying is correct —
-    // it resumes cleanly once the config is fixed, whereas skipping would
-    // permanently drain the backlog with zero comparisons. (The global lock +
-    // per-run budget mean a broken-auth run makes only a few failed calls then
-    // stops, so this holds progress without flooding.)
-    if (status === 401 || status === 403 || status === 404) return true;
-    if (status === 429 || status >= 500) return true;                 // rate limit / server error
-    if (status === 400 || status === 413 || status === 422) return false; // per-fact bad/oversized request
-  }
-  // Message fallback (only when there is no structured status). Match PHRASES
-  // only — never bare status numbers: incidental digits in a message (e.g. a
-  // 429's "retry after 400 ms") would otherwise misclassify. Numeric decisions
-  // are made from the structured status above.
+  if (structured !== undefined) return byCode(structured);
+
   const m = (e?.message ?? String(err)).toLowerCase();
-  // DETERMINISTIC (per-fact) phrases checked FIRST so a specific request-size /
-  // param error isn't swallowed by the broader transient phrases below.
-  if (/too (large|long)|prompt is too long|context length|maximum.*token|max_?tokens|content.*too/.test(m)) {
-    return false;
+  // A status number LABELLED in the message ("status code 400", "status: 503") —
+  // but never a bare incidental number ("retry after 400 ms").
+  const labelled = m.match(/status(?:\s*code)?\s*[:=]?\s*(\d{3})\b/);
+  if (labelled) return byCode(parseInt(labelled[1], 10));
+
+  // DETERMINISTIC (per-request) phrases checked FIRST so a specific request-size
+  // / param error isn't swallowed by the broader transient phrases below.
+  if (/too (large|long)|prompt is too long|context length|maximum.*token|max_?tokens|content.*too|invalid[_ ]?request|bad request|unprocessable/.test(m)) {
+    return 'deterministic';
   }
   // TRANSIENT phrases: rate limit / server / network / outage, plus auth-KEY
   // errors (kept narrow — "invalid api key", not "invalid api request").
   if (/unauthor|forbidden|invalid.*(api.?key|access.?token|credential)|timeout|etimedout|econnreset|econnrefused|enotfound|socket hang up|network|overloaded|temporarily|rate.?limit|too many requests|service unavailable|bad gateway|gateway timeout/.test(m)) {
-    return true;
+    return 'transient';
   }
-  return true; // UNKNOWN → transient (never silently skip on an unrecognized error)
+  return 'unknown'; // unrecognized → caller bounds it (retry MAX then advance)
+}
+
+/**
+ * Back-compat boolean: true only for a RECOGNIZED transient (outage/auth). An
+ * 'unknown' error is NOT a recognized transient, so this returns false for it —
+ * the drain loop uses classifyLlmError directly and bounds 'unknown' rather than
+ * holding on it.
+ */
+export function isTransientLlmError(err: unknown): boolean {
+  return classifyLlmError(err) === 'transient';
 }
 
 /**
@@ -220,18 +245,21 @@ export async function consolidateAllPending(
         haikuCalls++;
         console.error(`Consolidation call failed for fact ${newFact.id}:`, error);
 
-        if (isTransientLlmError(error)) {
-          // Provider outage (503/429/timeout/unknown): HOLD the cursor and stop.
-          // No attempt is burned — the fact is not at fault — so the drain
-          // resumes here when the provider recovers, never silently skipping the
-          // backlog during an outage (however long it lasts).
+        if (classifyLlmError(error) === 'transient') {
+          // Recognized provider outage/auth (503/429/timeout/401...): HOLD the
+          // cursor and stop. No attempt is burned — the fact is not at fault — so
+          // the drain resumes here when the provider recovers, never silently
+          // skipping the backlog during an outage (however long it lasts).
           break;
         }
 
-        // Deterministic per-fact rejection (400/oversized/etc.): ledger it and,
-        // after MAX attempts, SKIP (advance past it) so one un-processable fact
-        // can't wedge the cursor. Below MAX, hold so a mis-classified blip still
-        // gets a couple of retries.
+        // Deterministic per-fact rejection (400/oversized/...) OR an UNRECOGNIZED
+        // error: ledger it and, after MAX attempts, SKIP (advance past it) so one
+        // un-processable — or unclassifiable — fact can't wedge the cursor
+        // forever. Below MAX, hold so a mis-classified blip still gets a couple of
+        // retries. Advancing is safe: the fact stays active/searchable, it just
+        // isn't consolidated — strictly better than an unbounded hold that would
+        // halt ALL future consolidation.
         const attempts = (db.prepare(
           'UPDATE facts SET consolidation_attempts = COALESCE(consolidation_attempts, 0) + 1 WHERE id = ? RETURNING consolidation_attempts'
         ).get(newFact.id) as { consolidation_attempts: number } | undefined)?.consolidation_attempts ?? 0;

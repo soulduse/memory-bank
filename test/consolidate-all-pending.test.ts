@@ -21,7 +21,7 @@ vi.mock('../src/embeddings.js', () => ({
 import { callHaiku, parseJsonResponse } from '../src/llm.js';
 import { initDatabase } from '../src/db.js';
 import { insertFact, getAllNewFactsSince } from '../src/fact-db.js';
-import { consolidateAllPending, consolidateFacts, isTransientLlmError } from '../src/consolidator.js';
+import { consolidateAllPending, isTransientLlmError, classifyLlmError } from '../src/consolidator.js';
 
 const restoreConsole = suppressConsole();
 afterAll(() => restoreConsole());
@@ -285,34 +285,54 @@ describe('consolidateAllPending', () => {
     expect(attempts.m).toBe(0); // config failure burns no per-fact attempt
   });
 
-  it('isTransientLlmError classifies message-only deterministic errors correctly (regex ordering)', () => {
-    // Deterministic (per-fact) — must NOT be swallowed by the auth/transient patterns.
-    expect(isTransientLlmError(new Error('invalid max_tokens: must be <= 4096'))).toBe(false);
-    expect(isTransientLlmError(new Error('invalid API request: prompt is too long'))).toBe(false);
-    expect(isTransientLlmError(new Error('413 payload too large'))).toBe(false);
-    expect(isTransientLlmError(Object.assign(new Error('bad'), { status: 400 }))).toBe(false);
-    // Transient — outage / rate limit / auth-key / unknown.
-    expect(isTransientLlmError(new Error('invalid api key'))).toBe(true);
-    expect(isTransientLlmError(Object.assign(new Error('down'), { status: 503 }))).toBe(true);
-    expect(isTransientLlmError(Object.assign(new Error('nope'), { status: 401 }))).toBe(true);
-    expect(isTransientLlmError(new Error('ETIMEDOUT'))).toBe(true);
-    expect(isTransientLlmError(new Error('something weird'))).toBe(true);
-    // Incidental digits in a message must NOT be read as a status number.
-    expect(isTransientLlmError(new Error('429 rate limit exceeded; retry after 400 ms'))).toBe(true);
-    expect(isTransientLlmError(new Error('503 upstream error after 400 ms'))).toBe(true);
+  it('classifyLlmError three-values errors (transient / deterministic / unknown)', () => {
+    // DETERMINISTIC (per-request) — must NOT be swallowed by the transient patterns.
+    expect(classifyLlmError(new Error('invalid max_tokens: must be <= 4096'))).toBe('deterministic');
+    expect(classifyLlmError(new Error('invalid API request: prompt is too long'))).toBe('deterministic');
+    expect(classifyLlmError(new Error('413 payload too large'))).toBe('deterministic'); // 'too large' phrase
+    expect(classifyLlmError(new Error('Request failed with status code 400'))).toBe('deterministic'); // labelled status
+    expect(classifyLlmError(new Error('invalid_request_error: content must be non-empty'))).toBe('deterministic');
+    expect(classifyLlmError(Object.assign(new Error('bad'), { status: 400 }))).toBe('deterministic');
+    // TRANSIENT — outage / rate limit / auth.
+    expect(classifyLlmError(new Error('invalid api key'))).toBe('transient');
+    expect(classifyLlmError(Object.assign(new Error('down'), { status: 503 }))).toBe('transient');
+    expect(classifyLlmError(Object.assign(new Error('nope'), { status: 401 }))).toBe('transient');
+    expect(classifyLlmError(new Error('ETIMEDOUT'))).toBe('transient');
+    expect(classifyLlmError(new Error('status: 503 upstream'))).toBe('transient'); // labelled status
+    // Incidental digits are NOT read as a status number.
+    expect(classifyLlmError(new Error('429 rate limit exceeded; retry after 400 ms'))).toBe('transient'); // 'rate limit' phrase
+    expect(classifyLlmError(new Error('503 upstream error after 400 ms'))).toBe('unknown'); // bare numbers, no label/phrase
+    expect(classifyLlmError(new Error('something weird'))).toBe('unknown');
     // Structured status always wins over message text.
-    expect(isTransientLlmError(Object.assign(new Error('retry after 400ms'), { status: 429 }))).toBe(true);
+    expect(classifyLlmError(Object.assign(new Error('retry after 400ms'), { status: 429 }))).toBe('transient');
+    // Back-compat boolean: true ONLY for a recognized transient.
+    expect(isTransientLlmError(Object.assign(new Error('down'), { status: 503 }))).toBe(true);
+    expect(isTransientLlmError(new Error('invalid max_tokens: must be <= 4096'))).toBe(false);
+    expect(isTransientLlmError(new Error('something weird'))).toBe(false); // unknown is not a recognized transient
   });
 
-  it('an UNKNOWN error is treated as transient (held, not skipped)', async () => {
+  it('a recognized TRANSIENT outage holds the cursor (never skips the backlog)', async () => {
+    addFact(db, 'mystery A', 'global', null);
+    addFact(db, 'mystery B', 'global', null);
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('down'), { status: 503 }));
+
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 5; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+
+    expect(cursor).toBeNull(); // 503 → transient → held, never silently skipped during an outage
+  });
+
+  it('an UNKNOWN error is BOUNDED — advances after MAX attempts, never wedges forever', async () => {
     addFact(db, 'mystery A', 'global', null);
     addFact(db, 'mystery B', 'global', null);
     (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('something weird happened'));
 
     let cursor: { createdAt: string; id: string } | null = null;
-    for (let r = 0; r < 5; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+    for (let r = 0; r < 8; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
 
-    expect(cursor).toBeNull(); // unknown → transient → held, never silently skipped
+    // Unknown is bounded: after MAX_CONSOLIDATION_ATTEMPTS retries the cursor
+    // advances past the poison fact, so the backlog is not wedged forever.
+    expect(cursor).not.toBeNull();
   });
 
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {
