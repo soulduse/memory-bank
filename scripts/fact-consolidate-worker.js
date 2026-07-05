@@ -101,13 +101,15 @@ async function main() {
   process.on('SIGINT', () => process.exit(0));
   process.on('SIGTERM', () => process.exit(0));
 
-  // Resume from the persisted keyset cursor. An env override (manual runs) or a
-  // fresh start seeds only the createdAt; id '' makes the first row inclusive.
+  // Resume from the persisted keyset cursor. Absent/legacy/corrupt cursor →
+  // start from the BEGINNING (null) so no active fact is ever skipped — the
+  // per-run Haiku budget only caps actual consolidation CALLS, and facts with
+  // no similar candidate don't consume budget, so the whole backlog drains
+  // across a few runs regardless of age. An explicit LAST_CONSOLIDATED_AT env
+  // (manual/scoped runs) still seeds a starting timestamp.
   let since = readCursor();
-  if (!since) {
-    const seedAt = process.env.LAST_CONSOLIDATED_AT
-      || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    since = { createdAt: seedAt, id: '' };
+  if (!since && process.env.LAST_CONSOLIDATED_AT) {
+    since = { createdAt: process.env.LAST_CONSOLIDATED_AT, id: '' };
   }
 
   let db;

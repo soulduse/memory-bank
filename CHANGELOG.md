@@ -52,8 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without risking a skip, so every run reprocessed the same oldest N and never reached the
   rest of the backlog). Keying on the unique `(created_at, id)` pair lets the drain advance
   one fact at a time — no stall, no same-timestamp skip. The cursor is persisted as JSON;
-  a legacy plain-timestamp cursor file is treated as absent (drain restarts from the
-  beginning, which is safe/idempotent).
+  an absent/legacy/corrupt cursor makes the drain start from the BEGINNING (no active fact
+  is skipped — the per-run budget only caps actual consolidation calls, so the whole
+  backlog drains across a few runs regardless of age). A fact imported mid-drain with an
+  old timestamp is not re-driven by the current pass but is still a candidate for future
+  comparisons (best-effort dedup, documented).
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

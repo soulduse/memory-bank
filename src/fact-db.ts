@@ -395,6 +395,13 @@ export function getNewFactsSince(db: Database.Database, project: string, since: 
  * `id` is the unique tiebreaker that lets the drain progress one fact at a time.
  *
  * cursor null → from the beginning (all active facts).
+ *
+ * KNOWN LIMITATION (best-effort dedup): a fact IMPORTED mid-drain with an old
+ * `created_at` that sorts before the current cursor is not re-driven by this
+ * pass (it's still a similarity CANDIDATE for future facts, so a duplicate is
+ * still caught opportunistically). Consolidation is a background convenience,
+ * not an exhaustive guarantee, so this is accepted rather than adding a
+ * full re-scan on every import.
  */
 export function getAllNewFactsSince(
   db: Database.Database,
