@@ -347,6 +347,16 @@ export function initDatabase() {
     if (!factColumnNames.has('ontology_attempts')) {
         db.prepare('ALTER TABLE facts ADD COLUMN ontology_attempts INTEGER NOT NULL DEFAULT 0').run();
     }
+    // Consolidation attempt ledger (cross-run): a driver fact whose comparison
+    // CALL keeps failing is held (retried) up to MAX attempts, then skipped so it
+    // can't wedge the cursor. This distinguishes a short/transient outage (a few
+    // attempts, then it succeeds and the counter resets) from a persistently
+    // un-processable fact (reaches MAX and is skipped) WITHOUT inspecting the
+    // provider-specific error — run-local counting alone can't, because a real
+    // outage spans separate worker runs.
+    if (!factColumnNames.has('consolidation_attempts')) {
+        db.prepare('ALTER TABLE facts ADD COLUMN consolidation_attempts INTEGER NOT NULL DEFAULT 0').run();
+    }
     if (!factColumnNames.has('ontology_last_attempt_at')) {
         db.prepare('ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT').run();
     }

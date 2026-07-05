@@ -247,41 +247,48 @@ describe('consolidateAllPending', () => {
     expect(page.length).toBe(10); // bounded, not all 50
   });
 
-  it('an ISOLATED call failure is skipped (fact-specific), not held', async () => {
-    // fact A always fails; fact B (later) succeeds. A must be skipped so the
-    // cursor advances and B gets consolidated — one bad fact must not wedge.
-    const base = Date.parse('2020-03-01T00:00:00Z');
-    insertFact(db, { fact: 'bad driver', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
-    insertFact(db, { fact: 'bad sibling', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
-    insertFact(db, { fact: 'good driver', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
-    insertFact(db, { fact: 'good sibling', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
-    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'bad driver'").run(new Date(base).toISOString());
-    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'bad sibling'").run(new Date(base + 1000).toISOString());
-    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'good driver'").run(new Date(base + 2000).toISOString());
-    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'good sibling'").run(new Date(base + 3000).toISOString());
-
-    // Only 'bad driver' throws; everything else succeeds.
-    (callHaiku as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, user: string) => {
-      if (user.includes('bad driver')) throw new Error('provider 400 oversized');
-      return '{"relation":"INDEPENDENT","merged_fact":"","reason":"x"}';
-    });
+  it('a SHORT/transient outage HOLDS the cursor (retried next run, not skipped)', async () => {
+    addFact(db, 'transient A', 'global', null);
+    addFact(db, 'transient B', 'global', null); // candidate for A
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('LLM down'));
+    // Only the FIRST call this run rejects; the fact is held (attempt 1 < MAX).
 
     const run = await consolidateAllPending(db, null);
 
-    // The cursor advanced past the isolated bad fact (not stuck at the start).
-    expect(run.cursor).not.toBeNull();
-    expect(run.cursor!.createdAt > new Date(base).toISOString()).toBe(true);
+    // Cursor held at the beginning → the failed fact is retried next run.
+    expect(run.cursor).toBeNull();
+    const a = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'transient A'").get() as { consolidation_attempts: number };
+    expect(a.consolidation_attempts).toBe(1); // ledgered, not yet skipped
   });
 
-  it('an OUTAGE (consecutive failures) rolls the cursor back and holds for retry', async () => {
-    for (let i = 0; i < 5; i++) addFact(db, `outage fact ${i}`, 'global', null);
-    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('LLM down'));
+  it('a persistently failing fact is SKIPPED after MAX attempts (no wedge)', async () => {
+    addFact(db, 'always fails', 'global', null);
+    addFact(db, 'sibling', 'global', null); // candidate
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('provider 400'));
 
-    const run = await consolidateAllPending(db, null);
+    let cursor: { createdAt: string; id: string } | null = null;
+    // Each run adds one attempt to the first fact; after MAX it is skipped and
+    // the cursor advances past it.
+    for (let r = 0; r < 4; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
 
-    // OUTAGE_TRIP consecutive failures → cursor rolled back to the start (null),
-    // so the whole streak is retried next run rather than silently skipped.
-    expect(run.cursor).toBeNull();
+    const bad = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'always fails'").get() as { consolidation_attempts: number };
+    expect(bad.consolidation_attempts).toBeGreaterThanOrEqual(3);
+    // Cursor must have advanced past the wedge (not stuck at the very first fact forever).
+    expect(cursor).not.toBeNull();
+  });
+
+  it('a success RESETS the attempt counter (transient blip does not accumulate toward skip)', async () => {
+    addFact(db, 'flaky', 'global', null);
+    addFact(db, 'flaky sibling', 'global', null);
+    // Fail once (attempt→1), then succeed on the retry run (reset→0).
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('blip'));
+
+    await consolidateAllPending(db, null); // attempt 1, held
+    (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{"relation":"INDEPENDENT","merged_fact":"","reason":"x"}');
+    await consolidateAllPending(db, null); // succeeds → reset
+
+    const f = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'flaky'").get() as { consolidation_attempts: number };
+    expect(f.consolidation_attempts).toBe(0);
   });
 
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {
