@@ -21,7 +21,7 @@ vi.mock('../src/embeddings.js', () => ({
 import { callHaiku, parseJsonResponse } from '../src/llm.js';
 import { initDatabase } from '../src/db.js';
 import { insertFact, getAllNewFactsSince } from '../src/fact-db.js';
-import { consolidateAllPending } from '../src/consolidator.js';
+import { consolidateAllPending, consolidateFacts } from '../src/consolidator.js';
 
 const restoreConsole = suppressConsole();
 afterAll(() => restoreConsole());
@@ -178,16 +178,28 @@ describe('consolidateAllPending', () => {
     expect(hits[0].fact.fact).toBe('proj deep'); // found despite 210 closer globals
   });
 
-  it('counts an LLM CALL even when the response is unparseable (budget not undercounted)', async () => {
-    // HIGH guard: a call that returns garbage still spent budget → must count,
-    // or the budget is bypassed and every candidate gets an LLM call.
-    for (let i = 0; i < 40; i++) addFact(db, `dup fact ${i}`, 'global', null);
+  it('unparseable output counts budget AND holds the cursor for retry (not silently skipped)', async () => {
+    // HIGH guard: a call returning garbage spent budget (must count) and its
+    // comparison never resolved (must be retried, not advanced past).
+    addFact(db, 'dup fact A', 'global', null);
+    addFact(db, 'dup fact B', 'global', null);
     (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('not json at all');
     (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue(null); // unparseable
 
     const result = await consolidateAllPending(db, '2000-01-01T00:00:00Z');
 
-    expect(result.haikuCalls).toBeLessThanOrEqual(10);
+    expect(result.haikuCalls).toBe((callHaiku as ReturnType<typeof vi.fn>).mock.calls.length);
+    expect(result.haikuCalls).toBeGreaterThanOrEqual(1);
+    expect(result.cursor).toBe('2000-01-01T00:00:00Z'); // held → retried next run
+  });
+
+  it('back-compat consolidateFacts respects the budget even when every LLM call rejects', async () => {
+    for (let i = 0; i < 100; i++) addFact(db, `bc dup ${i}`, 'project', '/bc');
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('LLM down'));
+
+    await consolidateFacts(db, '/bc', '2000-01-01T00:00:00Z');
+
+    // Attempts are capped at MAX_HAIKU_CALLS (10), not one per similar fact.
     expect((callHaiku as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(10);
   });
 
@@ -201,6 +213,9 @@ describe('consolidateAllPending', () => {
 
     // Cursor must stay at the start so the errored fact is retried next run.
     expect(run.cursor).toBe('2000-01-01T00:00:00Z');
+    // The attempted (failed) call is still counted — returned budget is accurate.
+    expect(run.haikuCalls).toBe((callHaiku as ReturnType<typeof vi.fn>).mock.calls.length);
+    expect(run.haikuCalls).toBeGreaterThanOrEqual(1);
   });
 
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {

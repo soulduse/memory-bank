@@ -44,6 +44,10 @@ export function buildConsolidationPrompt(existingFact: string, newFact: string):
  * malformed/unparseable text still consumed the budget even though its verdict
  * is 'none'. Throws only on a transient LLM failure the caller should retry.
  */
+class UnparseableConsolidationError extends Error {
+  constructor() { super('consolidation: unparseable LLM response'); this.name = 'UnparseableConsolidationError'; }
+}
+
 async function consolidateOne(
   db: Database.Database,
   newFact: Fact,
@@ -66,7 +70,12 @@ async function consolidateOne(
   const closest = candidates[0];
   const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, buildConsolidationPrompt(closest.fact.fact, newFact.fact));
   const result = parseJsonResponse<ConsolidationResult>(response);
-  if (!result) return { called: true, verdict: 'none' }; // call happened but output unusable
+  // Unparseable output = the call happened but produced no usable verdict.
+  // Throw so the caller treats it like a failed attempt (counts budget, holds
+  // the cursor for retry) rather than silently advancing past a comparison that
+  // never actually resolved — a fact whose output is momentarily non-JSON must
+  // still get another chance to consolidate.
+  if (!result) throw new UnparseableConsolidationError();
   applyConsolidationResult(db, closest.fact, newFact, result);
   return { called: true, verdict: result.relation };
 }
@@ -96,6 +105,10 @@ export async function consolidateFacts(
       else if (verdict === 'CONTRADICTION') contradictions++;
       else if (verdict === 'EVOLUTION') evolutions++;
     } catch (error) {
+      // A throw means callHaiku was reached and failed — that attempt still
+      // counts against the budget, otherwise a persistently-failing LLM would
+      // let this loop attempt a call for every one of N similar facts.
+      haikuCalls++;
       console.error(`Consolidation failed for fact ${newFact.id}:`, error);
     }
   }
@@ -152,9 +165,12 @@ export async function consolidateAllPending(
         else if (verdict === 'CONTRADICTION') contradictions++;
         else if (verdict === 'EVOLUTION') evolutions++;
       } catch (error) {
-        // Transient LLM failure: do NOT advance the cursor past this fact, or
-        // the comparison is lost forever (created_at > cursor skips it). Stop
-        // the run here (like the budget wall); the next run retries from here.
+        // The throw means callHaiku was reached and failed — the attempt still
+        // counts (consistent with the "called = budget spent" contract and so
+        // the returned haikuCalls is accurate for monitoring). Do NOT advance
+        // the cursor past this fact (created_at > cursor would skip it); stop
+        // the run here like the budget wall so the next run retries it.
+        haikuCalls++;
         console.error(`Consolidation failed for fact ${newFact.id}:`, error);
         brokeAt = newFact.created_at;
         break;
