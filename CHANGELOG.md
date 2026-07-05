@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starve the rest of the backlog. Only TRANSIENT call failures (callHaiku rejected — infra
   down) hold the cursor to retry, which is safe because during an outage nothing else
   would progress either.
+- **Keyset consolidation cursor `(created_at, id)`**: the progress cursor was keyed on
+  `created_at` alone, which stalled forever when a single timestamp group held more facts
+  than the per-run Haiku budget (the cursor couldn't advance into a shared timestamp
+  without risking a skip, so every run reprocessed the same oldest N and never reached the
+  rest of the backlog). Keying on the unique `(created_at, id)` pair lets the drain advance
+  one fact at a time — no stall, no same-timestamp skip. The cursor is persisted as JSON;
+  a legacy plain-timestamp cursor file is treated as absent (drain restarts from the
+  beginning, which is safe/idempotent).
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

@@ -30,19 +30,22 @@ const LOCK = path.join(getIndexDir(), 'fact-consolidate.lock');
 // created_at.
 const CURSOR = path.join(getIndexDir(), 'fact-consolidate-cursor.txt');
 
+// Keyset cursor persisted as JSON { createdAt, id }.
 function readCursor() {
   try {
-    const v = fs.readFileSync(CURSOR, 'utf8').trim();
-    if (v && !Number.isNaN(Date.parse(v))) return v;
-  } catch { /* absent → default below */ }
+    const c = JSON.parse(fs.readFileSync(CURSOR, 'utf8'));
+    if (c && typeof c.createdAt === 'string' && typeof c.id === 'string' && !Number.isNaN(Date.parse(c.createdAt))) {
+      return { createdAt: c.createdAt, id: c.id };
+    }
+  } catch { /* absent/legacy/corrupt → start from the beginning */ }
   return null;
 }
 
-function writeCursor(ts) {
-  if (!ts || Number.isNaN(Date.parse(ts))) return;
+function writeCursor(cursor) {
+  if (!cursor || typeof cursor.createdAt !== 'string' || typeof cursor.id !== 'string') return;
   try {
     const tmp = `${CURSOR}.tmp`;
-    fs.writeFileSync(tmp, ts);
+    fs.writeFileSync(tmp, JSON.stringify(cursor));
     fs.renameSync(tmp, CURSOR); // atomic
   } catch { /* best-effort */ }
 }
@@ -98,20 +101,24 @@ async function main() {
   process.on('SIGINT', () => process.exit(0));
   process.on('SIGTERM', () => process.exit(0));
 
-  // Resume from the persisted cursor; env override wins (manual runs); else 24h.
-  const since = process.env.LAST_CONSOLIDATED_AT
-    || readCursor()
-    || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // Resume from the persisted keyset cursor. An env override (manual runs) or a
+  // fresh start seeds only the createdAt; id '' makes the first row inclusive.
+  let since = readCursor();
+  if (!since) {
+    const seedAt = process.env.LAST_CONSOLIDATED_AT
+      || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    since = { createdAt: seedAt, id: '' };
+  }
 
   let db;
   try {
     db = initDatabase();
-    // One pass over the backlog since the cursor: every new fact once, single
+    // One pass over the backlog after the cursor: every new fact once, single
     // Haiku budget, then advance the cursor so the next run reaches newer rows.
     const result = await consolidateAllPending(db, since);
     writeCursor(result.cursor);
     if (result.haikuCalls > 0) {
-      log(`worker: processed=${result.processed} haiku=${result.haikuCalls} merged=${result.merged} contradictions=${result.contradictions} evolutions=${result.evolutions} cursor=${result.cursor}`);
+      log(`worker: processed=${result.processed} haiku=${result.haikuCalls} merged=${result.merged} contradictions=${result.contradictions} evolutions=${result.evolutions} cursor=${JSON.stringify(result.cursor)}`);
     }
   } catch (error) {
     log(`worker: FATAL ${error instanceof Error ? error.message : error}`);

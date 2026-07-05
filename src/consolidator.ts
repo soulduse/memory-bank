@@ -130,8 +130,8 @@ export async function consolidateFacts(
  */
 export async function consolidateAllPending(
   db: Database.Database,
-  since: string,
-): Promise<{ processed: number; merged: number; contradictions: number; evolutions: number; haikuCalls: number; cursor: string }> {
+  since: { createdAt: string; id: string } | null,
+): Promise<{ processed: number; merged: number; contradictions: number; evolutions: number; haikuCalls: number; cursor: { createdAt: string; id: string } | null }> {
   await initEmbeddings();
 
   const newFacts = getAllNewFactsSince(db, since);
@@ -140,17 +140,17 @@ export async function consolidateAllPending(
   let contradictions = 0;
   let evolutions = 0;
   let processed = 0;
-  // Progress cursor (created_at ASC): the timestamp up to which this run has
-  // FULLY examined the backlog. Persisted by the caller so the next run starts
-  // after it (`created_at > cursor`) — otherwise INDEPENDENT facts (which stay
-  // active) would re-consume the whole Haiku budget on the same oldest rows
-  // every run and never reach newer/project-specific backlog.
-  let lastExaminedAt = null; // created_at of the last fact SAFE to advance past
-  let brokeAt = null;        // created_at of the first fact we must NOT advance past
+  // KEYSET progress cursor `(created_at, id)`: the last fact FULLY examined this
+  // run. Persisted by the caller so the next run resumes strictly after it.
+  // Because (created_at, id) is unique, we can always advance to the last
+  // examined fact without risking a skip — even when a whole timestamp group is
+  // larger than the per-run budget (the pre-keyset created_at-only cursor
+  // stalled forever in that case and starved the rest of the backlog).
+  let cursor = since;
 
   for (let i = 0; i < newFacts.length; i++) {
     const newFact = newFacts[i];
-    if (haikuCalls >= MAX_HAIKU_CALLS) { brokeAt = newFact.created_at; break; }
+    if (haikuCalls >= MAX_HAIKU_CALLS) break; // budget wall — cursor stays at the last examined fact
 
     // Re-read: an earlier comparison this run may have deactivated this fact.
     const stillActive = db.prepare('SELECT 1 FROM facts WHERE id = ? AND is_active = 1').get(newFact.id);
@@ -163,38 +163,21 @@ export async function consolidateAllPending(
         else if (verdict === 'CONTRADICTION') contradictions++;
         else if (verdict === 'EVOLUTION') evolutions++;
       } catch (error) {
-        // A throw here is a TRANSIENT call failure (callHaiku rejected — infra
-        // down); unparseable output is handled as a no-op inside consolidateOne,
-        // not a throw. Count the spent attempt, hold the cursor, and stop; the
-        // next run retries from here. No poison-fact starvation is possible
-        // because content-level failures never reach this catch.
+        // A throw is a TRANSIENT call failure (callHaiku rejected — infra down);
+        // unparseable output is a no-op inside consolidateOne, not a throw.
+        // Count the spent attempt but do NOT advance the cursor past this fact —
+        // stop so the next run retries it from here. (During an outage every
+        // fact would fail anyway, so there is nothing to starve.)
         haikuCalls++;
         console.error(`Consolidation failed for fact ${newFact.id}:`, error);
-        brokeAt = newFact.created_at;
         break;
       }
     }
-    // Note: a fact with NO embedding cannot be a consolidation driver (no
-    // similarity search). Advancing past it is intentional — if its embedding
-    // is backfilled later, a newer similar fact still picks it up as a
-    // candidate. Only unexamined/errored facts hold the cursor back.
-
+    // Fully examined (including a no-op / no-candidate / no-embedding fact — none
+    // of which need reprocessing as a driver): advance the keyset cursor past it.
     processed++;
-    lastExaminedAt = newFact.created_at;
+    cursor = { createdAt: newFact.created_at, id: newFact.id };
   }
-
-  // Safe cursor: advance ONLY to a timestamp strictly less than the first
-  // unexamined fact's created_at. Same-millisecond facts straddling the budget
-  // wall must not be skipped (`created_at > cursor` is strict), so if the last
-  // examined fact shares the breaking fact's timestamp, don't advance into that
-  // shared timestamp — keep the run's starting `since`.
-  let cursor = since;
-  if (brokeAt === null) {
-    // Finished the whole backlog → advance to the newest examined row (or keep since if none).
-    cursor = lastExaminedAt ?? since;
-  } else if (lastExaminedAt !== null && lastExaminedAt < brokeAt) {
-    cursor = lastExaminedAt;
-  } // else: last examined shares brokeAt's timestamp → stay at `since` (re-examine next run)
 
   return { processed, merged, contradictions, evolutions, haikuCalls, cursor };
 }

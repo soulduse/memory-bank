@@ -299,20 +299,27 @@ export function getNewFactsSince(db, project, since) {
   `).all(since, canonicalizeProject(db, project)).map(rowToFact);
 }
 /**
- * All active facts created since `since`, EVERY scope/project, each row once.
- * The consolidate worker uses this to process the whole backlog in a single
- * pass (one global lock, one Haiku budget) instead of looping per project —
- * which would re-examine shared global facts once per project (up to 10×N
- * redundant LLM calls) and could still miss a project whose only pending work
- * is an old active fact matching a new global fact (that old fact surfaces
- * here as a similarity candidate of the new fact instead).
+ * All active facts after a KEYSET cursor `(createdAt, id)`, EVERY scope/project,
+ * each row once, ordered by (created_at, id). The composite key is what makes
+ * the consolidate cursor strictly monotonic PER FACT: ordering by created_at
+ * alone stalls when a whole timestamp group is larger than the per-run budget
+ * (the cursor can't advance into a shared timestamp without risking a skip), so
+ * `id` is the unique tiebreaker that lets the drain progress one fact at a time.
+ *
+ * cursor null → from the beginning (all active facts).
  */
-export function getAllNewFactsSince(db, since) {
+export function getAllNewFactsSince(db, cursor) {
+    if (!cursor) {
+        return db.prepare(`
+      SELECT * FROM facts WHERE is_active = 1 ORDER BY created_at ASC, id ASC
+    `).all().map(rowToFact);
+    }
     return db.prepare(`
     SELECT * FROM facts
-    WHERE is_active = 1 AND created_at > ?
-    ORDER BY created_at ASC
-  `).all(since).map(rowToFact);
+    WHERE is_active = 1
+      AND (created_at > ? OR (created_at = ? AND id > ?))
+    ORDER BY created_at ASC, id ASC
+  `).all(cursor.createdAt, cursor.createdAt, cursor.id).map(rowToFact);
 }
 /**
  * Search facts across ALL projects (no scope filter).

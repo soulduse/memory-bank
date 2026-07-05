@@ -28,12 +28,18 @@ export declare function consolidateFacts(db: Database.Database, project: string,
  * by an earlier comparison is deactivated, it neither reappears in this list
  * nor as a later candidate.
  */
-export declare function consolidateAllPending(db: Database.Database, since: string): Promise<{
+export declare function consolidateAllPending(db: Database.Database, since: {
+    createdAt: string;
+    id: string;
+} | null): Promise<{
     processed: number;
     merged: number;
     contradictions: number;
     evolutions: number;
     haikuCalls: number;
-    cursor: string;
+    cursor: {
+        createdAt: string;
+        id: string;
+    } | null;
 }>;
 export declare function applyConsolidationResult(db: Database.Database, existingFact: Fact, newFact: Fact, result: ConsolidationResult): void;
