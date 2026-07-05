@@ -59,11 +59,16 @@ export function isTransientLlmError(err) {
             return false; // per-fact bad/oversized request
     }
     const m = (e?.message ?? String(err)).toLowerCase();
-    if (/\b(401|403|404|429|500|502|503|504)\b|unauthor|forbidden|invalid.*(key|token|api)|timeout|etimedout|econnreset|econnrefused|enotfound|socket hang up|network|overloaded|temporarily|rate.?limit/.test(m)) {
-        return true;
-    }
-    if (/\b(400|413|422)\b|too (large|long)|context length|maximum.*token|max.*token|invalid.*request|content.*too/.test(m)) {
+    // DETERMINISTIC (per-fact) checked FIRST so a specific request-size/param error
+    // like "invalid max_tokens: must be <= 4096" or "prompt is too long" is not
+    // swallowed by the broader transient patterns below.
+    if (/\b(400|413|422)\b|too (large|long)|prompt is too long|context length|maximum.*token|max_?tokens|content.*too|invalid.*request/.test(m)) {
         return false;
+    }
+    // TRANSIENT: rate limit / server / network / outage, plus auth-KEY errors
+    // (kept narrow — "invalid api key", not "invalid api request").
+    if (/\b(401|403|404|429|500|502|503|504)\b|unauthor|forbidden|invalid.*(api.?key|access.?token|credential)|timeout|etimedout|econnreset|econnrefused|enotfound|socket hang up|network|overloaded|temporarily|rate.?limit/.test(m)) {
+        return true;
     }
     return true; // UNKNOWN → transient (never silently skip on an unrecognized error)
 }

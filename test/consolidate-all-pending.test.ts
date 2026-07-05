@@ -21,7 +21,7 @@ vi.mock('../src/embeddings.js', () => ({
 import { callHaiku, parseJsonResponse } from '../src/llm.js';
 import { initDatabase } from '../src/db.js';
 import { insertFact, getAllNewFactsSince } from '../src/fact-db.js';
-import { consolidateAllPending, consolidateFacts } from '../src/consolidator.js';
+import { consolidateAllPending, consolidateFacts, isTransientLlmError } from '../src/consolidator.js';
 
 const restoreConsole = suppressConsole();
 afterAll(() => restoreConsole());
@@ -283,6 +283,20 @@ describe('consolidateAllPending', () => {
     expect(cursor).toBeNull(); // held, not silently drained
     const attempts = db.prepare("SELECT MAX(consolidation_attempts) AS m FROM facts").get() as { m: number };
     expect(attempts.m).toBe(0); // config failure burns no per-fact attempt
+  });
+
+  it('isTransientLlmError classifies message-only deterministic errors correctly (regex ordering)', () => {
+    // Deterministic (per-fact) — must NOT be swallowed by the auth/transient patterns.
+    expect(isTransientLlmError(new Error('invalid max_tokens: must be <= 4096'))).toBe(false);
+    expect(isTransientLlmError(new Error('invalid API request: prompt is too long'))).toBe(false);
+    expect(isTransientLlmError(new Error('413 payload too large'))).toBe(false);
+    expect(isTransientLlmError(Object.assign(new Error('bad'), { status: 400 }))).toBe(false);
+    // Transient — outage / rate limit / auth-key / unknown.
+    expect(isTransientLlmError(new Error('invalid api key'))).toBe(true);
+    expect(isTransientLlmError(Object.assign(new Error('down'), { status: 503 }))).toBe(true);
+    expect(isTransientLlmError(Object.assign(new Error('nope'), { status: 401 }))).toBe(true);
+    expect(isTransientLlmError(new Error('ETIMEDOUT'))).toBe(true);
+    expect(isTransientLlmError(new Error('something weird'))).toBe(true);
   });
 
   it('an UNKNOWN error is treated as transient (held, not skipped)', async () => {
