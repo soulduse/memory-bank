@@ -28,5 +28,6 @@ export declare function consolidateAllPending(db: Database.Database, since: stri
     contradictions: number;
     evolutions: number;
     haikuCalls: number;
+    cursor: string;
 }>;
 export declare function applyConsolidationResult(db: Database.Database, existingFact: Fact, newFact: Fact, result: ConsolidationResult): void;

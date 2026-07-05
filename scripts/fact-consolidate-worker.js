@@ -24,6 +24,28 @@ import { getIndexDir } from '../dist/paths.js';
 // session with no lock (measured 14 orphaned ppid=1 workers at once, each
 // spawning a headless Claude session per LLM call).
 const LOCK = path.join(getIndexDir(), 'fact-consolidate.lock');
+// Persisted progress cursor: without it, INDEPENDENT facts (which stay active)
+// would re-consume the whole Haiku budget on the same oldest rows every run and
+// never reach newer backlog. Each run resumes from the last fully-examined
+// created_at.
+const CURSOR = path.join(getIndexDir(), 'fact-consolidate-cursor.txt');
+
+function readCursor() {
+  try {
+    const v = fs.readFileSync(CURSOR, 'utf8').trim();
+    if (v && !Number.isNaN(Date.parse(v))) return v;
+  } catch { /* absent → default below */ }
+  return null;
+}
+
+function writeCursor(ts) {
+  if (!ts || Number.isNaN(Date.parse(ts))) return;
+  try {
+    const tmp = `${CURSOR}.tmp`;
+    fs.writeFileSync(tmp, ts);
+    fs.renameSync(tmp, CURSOR); // atomic
+  } catch { /* best-effort */ }
+}
 
 function log(line) {
   const msg = `[${new Date().toISOString()}] ${line}`;
@@ -76,16 +98,20 @@ async function main() {
   process.on('SIGINT', () => process.exit(0));
   process.on('SIGTERM', () => process.exit(0));
 
-  const lastConsolidated = process.env.LAST_CONSOLIDATED_AT
+  // Resume from the persisted cursor; env override wins (manual runs); else 24h.
+  const since = process.env.LAST_CONSOLIDATED_AT
+    || readCursor()
     || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   let db;
   try {
     db = initDatabase();
-    // One pass over the entire backlog: every new fact once, single Haiku budget.
-    const result = await consolidateAllPending(db, lastConsolidated);
-    if (result.processed > 0 && result.haikuCalls > 0) {
-      log(`worker: processed=${result.processed} haiku=${result.haikuCalls} merged=${result.merged} contradictions=${result.contradictions} evolutions=${result.evolutions}`);
+    // One pass over the backlog since the cursor: every new fact once, single
+    // Haiku budget, then advance the cursor so the next run reaches newer rows.
+    const result = await consolidateAllPending(db, since);
+    writeCursor(result.cursor);
+    if (result.haikuCalls > 0) {
+      log(`worker: processed=${result.processed} haiku=${result.haikuCalls} merged=${result.merged} contradictions=${result.contradictions} evolutions=${result.evolutions} cursor=${result.cursor}`);
     }
   } catch (error) {
     log(`worker: FATAL ${error instanceof Error ? error.message : error}`);

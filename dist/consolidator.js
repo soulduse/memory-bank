@@ -92,48 +92,82 @@ export async function consolidateAllPending(db, since) {
     let merged = 0;
     let contradictions = 0;
     let evolutions = 0;
-    for (const newFact of newFacts) {
-        if (haikuCalls >= MAX_HAIKU_CALLS)
-            break; // single budget across all scopes
-        if (!newFact.embedding)
-            continue;
+    let processed = 0;
+    // Progress cursor (created_at ASC): the timestamp up to which this run has
+    // FULLY examined the backlog. Persisted by the caller so the next run starts
+    // after it (`created_at > cursor`) — otherwise INDEPENDENT facts (which stay
+    // active) would re-consume the whole Haiku budget on the same oldest rows
+    // every run and never reach newer/project-specific backlog.
+    let lastExaminedAt = null; // created_at of the last fact fully examined
+    let brokeAt = null; // created_at of the first UNexamined fact (budget wall)
+    for (let i = 0; i < newFacts.length; i++) {
+        const newFact = newFacts[i];
+        if (haikuCalls >= MAX_HAIKU_CALLS) {
+            brokeAt = newFact.created_at;
+            break;
+        }
         // Re-read: an earlier comparison this run may have deactivated this fact.
         const stillActive = db.prepare('SELECT 1 FROM facts WHERE id = ? AND is_active = 1').get(newFact.id);
-        if (!stillActive)
-            continue;
-        const embeddingArray = Array.from(newFact.embedding);
-        // scope_project null (global fact) → searchSimilarFacts applies no scope
-        // filter; a project fact → its project + global.
-        const similar = searchSimilarFacts(db, embeddingArray, newFact.scope_project, 5, SIMILARITY_THRESHOLD);
-        const candidates = similar.filter((s) => s.fact.id !== newFact.id);
-        if (candidates.length === 0)
-            continue;
-        const closest = candidates[0];
-        const prompt = buildConsolidationPrompt(closest.fact.fact, newFact.fact);
-        try {
-            const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, prompt);
-            haikuCalls++;
-            const result = parseJsonResponse(response);
-            if (!result)
-                continue;
-            applyConsolidationResult(db, closest.fact, newFact, result);
-            switch (result.relation) {
-                case 'DUPLICATE':
-                    merged++;
-                    break;
-                case 'CONTRADICTION':
-                    contradictions++;
-                    break;
-                case 'EVOLUTION':
-                    evolutions++;
-                    break;
+        if (stillActive && newFact.embedding) {
+            const embeddingArray = Array.from(newFact.embedding);
+            // SCOPE-CORRECT candidates (no cross-project leakage): a global fact is
+            // compared ONLY against other global facts; a project fact against its
+            // own project + global. Passing null to searchSimilarFacts disables the
+            // scope filter, so for global facts we overfetch and keep global rows.
+            let candidates;
+            if (newFact.scope_type === 'global') {
+                candidates = searchSimilarFacts(db, embeddingArray, null, 20, SIMILARITY_THRESHOLD)
+                    .filter((s) => s.fact.id !== newFact.id && s.fact.scope_type === 'global')
+                    .slice(0, 5);
+            }
+            else {
+                candidates = searchSimilarFacts(db, embeddingArray, newFact.scope_project, 5, SIMILARITY_THRESHOLD)
+                    .filter((s) => s.fact.id !== newFact.id);
+            }
+            if (candidates.length > 0) {
+                const closest = candidates[0];
+                const prompt = buildConsolidationPrompt(closest.fact.fact, newFact.fact);
+                try {
+                    const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, prompt);
+                    haikuCalls++;
+                    const result = parseJsonResponse(response);
+                    if (result) {
+                        applyConsolidationResult(db, closest.fact, newFact, result);
+                        switch (result.relation) {
+                            case 'DUPLICATE':
+                                merged++;
+                                break;
+                            case 'CONTRADICTION':
+                                contradictions++;
+                                break;
+                            case 'EVOLUTION':
+                                evolutions++;
+                                break;
+                        }
+                    }
+                }
+                catch (error) {
+                    console.error(`Consolidation failed for fact ${newFact.id}:`, error);
+                }
             }
         }
-        catch (error) {
-            console.error(`Consolidation failed for fact ${newFact.id}:`, error);
-        }
+        processed++;
+        lastExaminedAt = newFact.created_at;
     }
-    return { processed: newFacts.length, merged, contradictions, evolutions, haikuCalls };
+    // Safe cursor: advance ONLY to a timestamp strictly less than the first
+    // unexamined fact's created_at. Same-millisecond facts straddling the budget
+    // wall must not be skipped (`created_at > cursor` is strict), so if the last
+    // examined fact shares the breaking fact's timestamp, don't advance into that
+    // shared timestamp — keep the run's starting `since`.
+    let cursor = since;
+    if (brokeAt === null) {
+        // Finished the whole backlog → advance to the newest examined row (or keep since if none).
+        cursor = lastExaminedAt ?? since;
+    }
+    else if (lastExaminedAt !== null && lastExaminedAt < brokeAt) {
+        cursor = lastExaminedAt;
+    } // else: last examined shares brokeAt's timestamp → stay at `since` (re-examine next run)
+    return { processed, merged, contradictions, evolutions, haikuCalls, cursor };
 }
 export function applyConsolidationResult(db, existingFact, newFact, result) {
     // Normalize merged_fact: treat empty/whitespace-only as absent

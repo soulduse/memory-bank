@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep the fact active) and could starve a project whose only pending work was an old
   fact matching a new global one. Same orphan-flood class fixed for the backfill workers
   in v1.3.0; the consolidate worker was the last detached worker missing a lock.
+- **Scope isolation in consolidation**: a global driver fact is now compared ONLY against
+  other global facts (never a project's private facts), closing a cross-project mutation
+  path where an LLM verdict on a global fact could deactivate/rewrite an unrelated
+  project's private fact.
+- **Persisted consolidation cursor**: the worker records the last fully-examined
+  `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
+  budget reaches newer/project backlog instead of re-spending every run on the same
+  oldest INDEPENDENT facts. The cursor only advances past a timestamp strictly older than
+  the first unexamined fact, so same-millisecond facts at the budget wall are never
+  skipped.
 
 ## [1.3.1] - 2026-07-05
 

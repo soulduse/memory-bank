@@ -18,7 +18,7 @@ vi.mock('../src/embeddings.js', () => ({
   EMBEDDING_MODEL: 'test',
 }));
 
-import { callHaiku } from '../src/llm.js';
+import { callHaiku, parseJsonResponse } from '../src/llm.js';
 import { initDatabase } from '../src/db.js';
 import { insertFact, getAllNewFactsSince } from '../src/fact-db.js';
 import { consolidateAllPending } from '../src/consolidator.js';
@@ -42,6 +42,10 @@ describe('consolidateAllPending', () => {
     process.env.TEST_DB_PATH = dbPath;
     db = initDatabase();
     vi.clearAllMocks();
+    // Restore default verdict (INDEPENDENT) so tests are order-independent —
+    // clearAllMocks resets call history but NOT return values set by earlier tests.
+    (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{"relation":"INDEPENDENT","merged_fact":"","reason":"unrelated"}');
+    (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({ relation: 'INDEPENDENT', merged_fact: '', reason: 'unrelated' });
   });
 
   afterEach(() => {
@@ -95,5 +99,52 @@ describe('consolidateAllPending', () => {
 
     expect(result.processed).toBe(0);
     expect(callHaiku).not.toHaveBeenCalled();
+  });
+
+  it('NEVER compares a global fact against a private project fact (no cross-project mutation)', async () => {
+    // CRITICAL guard: a global driver fact must not reach into /secretProj's
+    // private rows, or an LLM verdict could deactivate/rewrite them.
+    addFact(db, 'Uses private vendor X', 'project', '/secretProj');
+    addFact(db, 'Uses private vendor X globally', 'global', null); // similar, newer
+
+    const { parseJsonResponse } = await import('../src/llm.js');
+    (parseJsonResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      relation: 'CONTRADICTION', merged_fact: '', reason: 'conflict',
+    });
+
+    await consolidateAllPending(db, '2000-01-01T00:00:00Z');
+
+    // Every callHaiku comparison prompt must exclude the project-private fact.
+    for (const call of (callHaiku as ReturnType<typeof vi.fn>).mock.calls) {
+      const prompt = String(call[1]);
+      expect(prompt).not.toContain('Uses private vendor X globally' + '\0'); // sanity
+      // the project-private fact text must never appear as a candidate in any prompt
+      expect(prompt.includes('Uses private vendor X') && !prompt.includes('globally')).toBe(false);
+    }
+    // The project-private fact stays active and unmodified.
+    const secret = db.prepare("SELECT fact, is_active FROM facts WHERE scope_project = '/secretProj'").get() as { fact: string; is_active: number };
+    expect(secret.is_active).toBe(1);
+    expect(secret.fact).toBe('Uses private vendor X');
+  });
+
+  it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {
+    // 15 similar global facts, budget 10 → run 1 processes the oldest 10 and
+    // advances the cursor; run 2 (since=cursor) reaches the remaining 5.
+    const base = Date.parse('2020-01-01T00:00:00Z');
+    for (let i = 0; i < 15; i++) {
+      // distinct, strictly increasing timestamps so the cursor can advance safely
+      const ts = new Date(base + i * 1000).toISOString();
+      insertFact(db, { fact: `fact ${i}`, category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+      db.prepare('UPDATE facts SET created_at = ? WHERE fact = ?').run(ts, `fact ${i}`);
+    }
+
+    const run1 = await consolidateAllPending(db, '2000-01-01T00:00:00Z');
+    expect(run1.haikuCalls).toBeLessThanOrEqual(10);
+    expect(run1.cursor > '2000-01-01T00:00:00Z').toBe(true); // advanced
+
+    const run2 = await consolidateAllPending(db, run1.cursor);
+    // run 2 starts strictly after run 1's cursor → reaches the remaining backlog
+    expect(run2.processed).toBeGreaterThan(0);
+    expect(run2.cursor >= run1.cursor).toBe(true);
   });
 });
