@@ -168,6 +168,16 @@ describe('consolidateAllPending', () => {
     expect(globalHits.every((h) => h.fact.scope_type === 'global')).toBe(true);
   });
 
+  it('pages past the initial overfetch (201+ out-of-scope rows) to reach an in-scope match', async () => {
+    const { searchSimilarFactsSameScope } = await import('../src/fact-db.js');
+    for (let i = 0; i < 210; i++) addFact(db, `global crowd ${i}`, 'global', null); // > initial 200 fetch
+    addFact(db, 'proj deep', 'project', '/projDeep');
+
+    const hits = searchSimilarFactsSameScope(db, EMB, { type: 'project', project: '/projDeep' }, 5, 0.5);
+    expect(hits.length).toBe(1);
+    expect(hits[0].fact.fact).toBe('proj deep'); // found despite 210 closer globals
+  });
+
   it('does NOT advance the cursor past a fact whose comparison errored (retryable)', async () => {
     addFact(db, 'errdriver one', 'global', null);
     addFact(db, 'errdriver two', 'global', null); // similar → triggers a call

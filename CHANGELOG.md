@@ -32,7 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewriting a shared global fact via EVOLUTION (leaking private text to every project) or
   deactivating it via CONTRADICTION. The old per-project `consolidateFacts()` (which used
   a project-scoped search that still included globals) was removed — all consolidation
-  now goes through the single-pass, scope-isolated `consolidateAllPending`.
+  now goes through the single-pass, scope-isolated `consolidateAllPending`. The
+  same-scope search pages the KNN fetch (growing until enough in-scope hits or the
+  whole index is scanned) so even >200 closer out-of-scope rows cannot hide a valid
+  in-scope match. `consolidateFacts` is kept as a deprecated, now-scope-safe back-compat
+  export so existing importers don't crash at module load.
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

@@ -242,46 +242,61 @@ export function searchSimilarFactsSameScope(
   const canonProject = scope.type === 'project' ? canonicalizeProject(db, scope.project) : null;
   const buf = Buffer.from(new Float32Array(embedding).buffer);
 
-  // Overfetch generously: we filter hard to a single scope, so a shallow fetch
-  // could return only out-of-scope neighbours and miss an in-scope match.
-  const candidateFetch = Math.max(limit * 20, 200);
-  const fetch = (table: string) => {
+  // Hard bound the KNN paging by the number of active facts actually in this
+  // scope — once we've scanned at least that many nearest rows we cannot be
+  // hiding an in-scope match behind out-of-scope neighbours. (A fresh threshold
+  // cutoff still applies; this only prevents a shallow fetch from starving the
+  // in-scope match when many closer out-of-scope rows exist.)
+  const scopeCount = scope.type === 'global'
+    ? (db.prepare("SELECT COUNT(*) AS n FROM facts WHERE is_active = 1 AND scope_type = 'global' AND embedding_version = ?").get(EMBEDDING_VERSION) as { n: number }).n
+    : (db.prepare("SELECT COUNT(*) AS n FROM facts WHERE is_active = 1 AND scope_type = 'project' AND scope_project = ? AND embedding_version = ?").get(canonProject, EMBEDDING_VERSION) as { n: number }).n;
+  const totalActive = (db.prepare('SELECT COUNT(*) AS n FROM facts WHERE is_active = 1 AND embedding_version = ?').get(EMBEDDING_VERSION) as { n: number }).n;
+  if (scopeCount === 0) return [];
+
+  const fetchN = (table: string, n: number) => {
     try {
       return db.prepare(`
         SELECT id, distance FROM ${table}
         WHERE embedding MATCH ? ORDER BY distance LIMIT ?
-      `).all(buf, candidateFetch) as Array<{ id: string; distance: number }>;
+      `).all(buf, n) as Array<{ id: string; distance: number }>;
     } catch {
       return [];
     }
   };
 
-  const best = new Map<string, number>();
-  for (const vr of [...fetch('vec_facts'), ...fetch('vec_facts_kr')]) {
-    const cur = best.get(vr.id);
-    if (cur === undefined || vr.distance < cur) best.set(vr.id, vr.distance);
-  }
-  const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b) => a.distance - b.distance);
+  // Grow the KNN fetch until we have `limit` in-scope hits, or we've scanned the
+  // whole index (fetchCount >= totalActive). Bounds the loop at the DB size.
+  let fetchCount = Math.min(Math.max(limit * 20, 200), Math.max(totalActive, 1));
+  let results: Array<{ fact: Fact; distance: number }> = [];
+  for (;;) {
+    const best = new Map<string, number>();
+    for (const vr of [...fetchN('vec_facts', fetchCount), ...fetchN('vec_facts_kr', fetchCount)]) {
+      const cur = best.get(vr.id);
+      if (cur === undefined || vr.distance < cur) best.set(vr.id, vr.distance);
+    }
+    const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b) => a.distance - b.distance);
 
-  const results: Array<{ fact: Fact; distance: number }> = [];
-  for (const vr of merged) {
-    const similarity = 1 - (vr.distance * vr.distance) / 2;
-    if (similarity < threshold) continue;
-    const row = db.prepare(
-      'SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?'
-    ).get(vr.id, EMBEDDING_VERSION) as Record<string, unknown> | undefined;
-    if (!row) continue;
-    const fact = rowToFact(row);
-
-    // Exact-scope gate (applied BEFORE the limit break):
-    if (scope.type === 'global') {
-      if (fact.scope_type !== 'global') continue;
-    } else {
-      if (fact.scope_type !== 'project' || fact.scope_project !== canonProject) continue;
+    results = [];
+    for (const vr of merged) {
+      const similarity = 1 - (vr.distance * vr.distance) / 2;
+      if (similarity < threshold) continue;
+      const row = db.prepare(
+        'SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?'
+      ).get(vr.id, EMBEDDING_VERSION) as Record<string, unknown> | undefined;
+      if (!row) continue;
+      const fact = rowToFact(row);
+      if (scope.type === 'global') {
+        if (fact.scope_type !== 'global') continue;
+      } else if (fact.scope_type !== 'project' || fact.scope_project !== canonProject) {
+        continue;
+      }
+      results.push({ fact, distance: vr.distance });
+      if (results.length >= limit) break;
     }
 
-    results.push({ fact, distance: vr.distance });
-    if (results.length >= limit) break;
+    // Done if we found enough, or we've already scanned the entire index.
+    if (results.length >= limit || fetchCount >= totalActive) break;
+    fetchCount = Math.min(fetchCount * 4, totalActive);
   }
 
   return results;

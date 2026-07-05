@@ -2,6 +2,18 @@ import Database from 'better-sqlite3';
 import type { Fact, ConsolidationResult } from './types.js';
 export declare function buildConsolidationPrompt(existingFact: string, newFact: string): string;
 /**
+ * @deprecated Back-compat wrapper for the removed per-project consolidator.
+ * Prefer `consolidateAllPending`. Now scope-isolated (via consolidateOne), so
+ * it can no longer leak project-private text into global facts. Kept as a
+ * public export so existing importers don't crash at module load.
+ */
+export declare function consolidateFacts(db: Database.Database, project: string, lastConsolidatedAt: string): Promise<{
+    processed: number;
+    merged: number;
+    contradictions: number;
+    evolutions: number;
+}>;
+/**
  * Consolidate the ENTIRE backlog in one pass: every new fact (any scope, any
  * project) processed exactly once, under a single shared Haiku budget. The
  * consolidate worker calls this once while holding the global lock, instead of

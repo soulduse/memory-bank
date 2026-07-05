@@ -1,5 +1,5 @@
 import { callHaiku, parseJsonResponse } from './llm.js';
-import { getAllNewFactsSince, searchSimilarFactsSameScope, updateFact, deactivateFact, insertRevision, } from './fact-db.js';
+import { getNewFactsSince, getAllNewFactsSince, searchSimilarFactsSameScope, updateFact, deactivateFact, insertRevision, } from './fact-db.js';
 import { initEmbeddings } from './embeddings.js';
 const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relationship.
 
@@ -22,11 +22,71 @@ const SIMILARITY_THRESHOLD = 0.95;
 export function buildConsolidationPrompt(existingFact, newFact) {
     return `Existing fact: "${existingFact}"\nNew fact: "${newFact}"`;
 }
-// NOTE: the former per-project `consolidateFacts()` was removed — it selected
-// candidates with searchSimilarFacts(project), which includes GLOBAL facts, so
-// a project-private driver could rewrite/deactivate a shared global fact
-// (cross-scope leak). All consolidation now goes through consolidateAllPending
-// below, which searches strictly within a single scope.
+/**
+ * Consolidate ONE driver fact against a same-scope neighbour (if any).
+ * Shared by consolidateAllPending and the back-compat consolidateFacts wrapper.
+ * Returns the applied verdict, 'none' (no candidate / unusable), or throws only
+ * to signal a transient LLM failure the caller should not skip past.
+ */
+async function consolidateOne(db, newFact) {
+    if (!newFact.embedding)
+        return 'none';
+    const embeddingArray = Array.from(newFact.embedding);
+    // SAME-SCOPE only (no cross-scope leak): project fact → its own project,
+    // global fact → global. The scope gate is inside the search, before its
+    // limit, so an in-scope match isn't starved by closer out-of-scope rows.
+    const scope = newFact.scope_type === 'global'
+        ? { type: 'global' }
+        : newFact.scope_project
+            ? { type: 'project', project: newFact.scope_project }
+            : null;
+    if (!scope)
+        return 'none';
+    const candidates = searchSimilarFactsSameScope(db, embeddingArray, scope, 5, SIMILARITY_THRESHOLD)
+        .filter((s) => s.fact.id !== newFact.id);
+    if (candidates.length === 0)
+        return 'none';
+    const closest = candidates[0];
+    const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, buildConsolidationPrompt(closest.fact.fact, newFact.fact));
+    const result = parseJsonResponse(response);
+    if (!result)
+        return 'none';
+    applyConsolidationResult(db, closest.fact, newFact, result);
+    return result.relation;
+}
+/**
+ * @deprecated Back-compat wrapper for the removed per-project consolidator.
+ * Prefer `consolidateAllPending`. Now scope-isolated (via consolidateOne), so
+ * it can no longer leak project-private text into global facts. Kept as a
+ * public export so existing importers don't crash at module load.
+ */
+export async function consolidateFacts(db, project, lastConsolidatedAt) {
+    await initEmbeddings();
+    const newFacts = getNewFactsSince(db, project, lastConsolidatedAt);
+    let haikuCalls = 0, merged = 0, contradictions = 0, evolutions = 0;
+    for (const newFact of newFacts) {
+        if (haikuCalls >= MAX_HAIKU_CALLS)
+            break;
+        const stillActive = db.prepare('SELECT 1 FROM facts WHERE id = ? AND is_active = 1').get(newFact.id);
+        if (!stillActive)
+            continue;
+        try {
+            const verdict = await consolidateOne(db, newFact);
+            if (verdict !== 'none')
+                haikuCalls++;
+            if (verdict === 'DUPLICATE')
+                merged++;
+            else if (verdict === 'CONTRADICTION')
+                contradictions++;
+            else if (verdict === 'EVOLUTION')
+                evolutions++;
+        }
+        catch (error) {
+            console.error(`Consolidation failed for fact ${newFact.id}:`, error);
+        }
+    }
+    return { processed: newFacts.length, merged, contradictions, evolutions };
+}
 /**
  * Consolidate the ENTIRE backlog in one pass: every new fact (any scope, any
  * project) processed exactly once, under a single shared Haiku budget. The
@@ -65,54 +125,26 @@ export async function consolidateAllPending(db, since) {
         }
         // Re-read: an earlier comparison this run may have deactivated this fact.
         const stillActive = db.prepare('SELECT 1 FROM facts WHERE id = ? AND is_active = 1').get(newFact.id);
-        if (stillActive && newFact.embedding) {
-            const embeddingArray = Array.from(newFact.embedding);
-            // SAME-SCOPE consolidation only — a project-private fact and a global
-            // fact must never merge across the boundary: an EVOLUTION would rewrite
-            // the global row with project-private text (leaking it to every project),
-            // and a CONTRADICTION would let one project deactivate shared global
-            // memory. searchSimilarFactsSameScope applies the scope gate BEFORE its
-            // limit, so an in-scope match is never starved out by closer out-of-scope
-            // rows. A global fact needs a scope_project — skip malformed rows.
-            const scope = newFact.scope_type === 'global'
-                ? { type: 'global' }
-                : newFact.scope_project
-                    ? { type: 'project', project: newFact.scope_project }
-                    : null;
-            const candidates = scope
-                ? searchSimilarFactsSameScope(db, embeddingArray, scope, 5, SIMILARITY_THRESHOLD)
-                    .filter((s) => s.fact.id !== newFact.id)
-                : [];
-            if (candidates.length > 0) {
-                const closest = candidates[0];
-                const prompt = buildConsolidationPrompt(closest.fact.fact, newFact.fact);
-                try {
-                    const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, prompt);
+        if (stillActive) {
+            try {
+                // Same-scope isolation + budget accounting via the shared helper.
+                const verdict = await consolidateOne(db, newFact);
+                if (verdict !== 'none')
                     haikuCalls++;
-                    const result = parseJsonResponse(response);
-                    if (result) {
-                        applyConsolidationResult(db, closest.fact, newFact, result);
-                        switch (result.relation) {
-                            case 'DUPLICATE':
-                                merged++;
-                                break;
-                            case 'CONTRADICTION':
-                                contradictions++;
-                                break;
-                            case 'EVOLUTION':
-                                evolutions++;
-                                break;
-                        }
-                    }
-                }
-                catch (error) {
-                    // Transient LLM failure: do NOT advance the cursor past this fact, or
-                    // the comparison is lost forever (created_at > cursor skips it). Stop
-                    // the run here (like the budget wall); the next run retries from here.
-                    console.error(`Consolidation failed for fact ${newFact.id}:`, error);
-                    brokeAt = newFact.created_at;
-                    break;
-                }
+                if (verdict === 'DUPLICATE')
+                    merged++;
+                else if (verdict === 'CONTRADICTION')
+                    contradictions++;
+                else if (verdict === 'EVOLUTION')
+                    evolutions++;
+            }
+            catch (error) {
+                // Transient LLM failure: do NOT advance the cursor past this fact, or
+                // the comparison is lost forever (created_at > cursor skips it). Stop
+                // the run here (like the budget wall); the next run retries from here.
+                console.error(`Consolidation failed for fact ${newFact.id}:`, error);
+                brokeAt = newFact.created_at;
+                break;
             }
         }
         // Note: a fact with NO embedding cannot be a consolidation driver (no
