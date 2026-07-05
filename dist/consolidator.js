@@ -1,5 +1,5 @@
 import { callHaiku, parseJsonResponse } from './llm.js';
-import { getNewFactsSince, searchSimilarFacts, updateFact, deactivateFact, insertRevision, } from './fact-db.js';
+import { getNewFactsSince, getAllNewFactsSince, searchSimilarFacts, updateFact, deactivateFact, insertRevision, } from './fact-db.js';
 import { initEmbeddings } from './embeddings.js';
 const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relationship.
 
@@ -69,6 +69,71 @@ export async function consolidateFacts(db, project, lastConsolidatedAt) {
         }
     }
     return { processed: newFacts.length, merged, contradictions, evolutions };
+}
+/**
+ * Consolidate the ENTIRE backlog in one pass: every new fact (any scope, any
+ * project) processed exactly once, under a single shared Haiku budget. The
+ * consolidate worker calls this once while holding the global lock, instead of
+ * looping consolidateFacts per project — which reprocessed shared global facts
+ * once per project (up to `MAX_HAIKU_CALLS × projectCount` calls) and, for
+ * INDEPENDENT/CONTRADICTION verdicts (new fact stays active), kept re-comparing
+ * the same global fact every pass.
+ *
+ * Each fact is compared within its own scope: a project fact against its
+ * project + global (via its scope_project), a global fact against the whole
+ * store (scope_project is null → no scope filter). Because a fact merged away
+ * by an earlier comparison is deactivated, it neither reappears in this list
+ * nor as a later candidate.
+ */
+export async function consolidateAllPending(db, since) {
+    await initEmbeddings();
+    const newFacts = getAllNewFactsSince(db, since);
+    let haikuCalls = 0;
+    let merged = 0;
+    let contradictions = 0;
+    let evolutions = 0;
+    for (const newFact of newFacts) {
+        if (haikuCalls >= MAX_HAIKU_CALLS)
+            break; // single budget across all scopes
+        if (!newFact.embedding)
+            continue;
+        // Re-read: an earlier comparison this run may have deactivated this fact.
+        const stillActive = db.prepare('SELECT 1 FROM facts WHERE id = ? AND is_active = 1').get(newFact.id);
+        if (!stillActive)
+            continue;
+        const embeddingArray = Array.from(newFact.embedding);
+        // scope_project null (global fact) → searchSimilarFacts applies no scope
+        // filter; a project fact → its project + global.
+        const similar = searchSimilarFacts(db, embeddingArray, newFact.scope_project, 5, SIMILARITY_THRESHOLD);
+        const candidates = similar.filter((s) => s.fact.id !== newFact.id);
+        if (candidates.length === 0)
+            continue;
+        const closest = candidates[0];
+        const prompt = buildConsolidationPrompt(closest.fact.fact, newFact.fact);
+        try {
+            const response = await callHaiku(CONSOLIDATION_SYSTEM_PROMPT, prompt);
+            haikuCalls++;
+            const result = parseJsonResponse(response);
+            if (!result)
+                continue;
+            applyConsolidationResult(db, closest.fact, newFact, result);
+            switch (result.relation) {
+                case 'DUPLICATE':
+                    merged++;
+                    break;
+                case 'CONTRADICTION':
+                    contradictions++;
+                    break;
+                case 'EVOLUTION':
+                    evolutions++;
+                    break;
+            }
+        }
+        catch (error) {
+            console.error(`Consolidation failed for fact ${newFact.id}:`, error);
+        }
+    }
+    return { processed: newFacts.length, merged, contradictions, evolutions, haikuCalls };
 }
 export function applyConsolidationResult(db, existingFact, newFact, result) {
     // Normalize merged_fact: treat empty/whitespace-only as absent

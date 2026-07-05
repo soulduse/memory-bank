@@ -7,4 +7,26 @@ export declare function consolidateFacts(db: Database.Database, project: string,
     contradictions: number;
     evolutions: number;
 }>;
+/**
+ * Consolidate the ENTIRE backlog in one pass: every new fact (any scope, any
+ * project) processed exactly once, under a single shared Haiku budget. The
+ * consolidate worker calls this once while holding the global lock, instead of
+ * looping consolidateFacts per project — which reprocessed shared global facts
+ * once per project (up to `MAX_HAIKU_CALLS × projectCount` calls) and, for
+ * INDEPENDENT/CONTRADICTION verdicts (new fact stays active), kept re-comparing
+ * the same global fact every pass.
+ *
+ * Each fact is compared within its own scope: a project fact against its
+ * project + global (via its scope_project), a global fact against the whole
+ * store (scope_project is null → no scope filter). Because a fact merged away
+ * by an earlier comparison is deactivated, it neither reappears in this list
+ * nor as a later candidate.
+ */
+export declare function consolidateAllPending(db: Database.Database, since: string): Promise<{
+    processed: number;
+    merged: number;
+    contradictions: number;
+    evolutions: number;
+    haikuCalls: number;
+}>;
 export declare function applyConsolidationResult(db: Database.Database, existingFact: Fact, newFact: Fact, result: ConsolidationResult): void;

@@ -219,6 +219,22 @@ export function getNewFactsSince(db, project, since) {
   `).all(since, canonicalizeProject(db, project)).map(rowToFact);
 }
 /**
+ * All active facts created since `since`, EVERY scope/project, each row once.
+ * The consolidate worker uses this to process the whole backlog in a single
+ * pass (one global lock, one Haiku budget) instead of looping per project —
+ * which would re-examine shared global facts once per project (up to 10×N
+ * redundant LLM calls) and could still miss a project whose only pending work
+ * is an old active fact matching a new global fact (that old fact surfaces
+ * here as a similarity candidate of the new fact instead).
+ */
+export function getAllNewFactsSince(db, since) {
+    return db.prepare(`
+    SELECT * FROM facts
+    WHERE is_active = 1 AND created_at > ?
+    ORDER BY created_at ASC
+  `).all(since).map(rowToFact);
+}
+/**
  * Search facts across ALL projects (no scope filter).
  * Used for cross-project knowledge transfer.
  */

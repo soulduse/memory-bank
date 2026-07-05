@@ -9,17 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **`fact-consolidate-worker` had no single-instance lock** — the SessionStart hook
-  spawns it detached on every session start with no lock, so orphaned workers (ppid=1)
-  piled up (measured 14 running at once), each spawning a headless Claude session per
-  LLM call and flooding the proxy across the account pool. Added a GLOBAL atomic `wx`
-  pid-lock (same pattern as the ontology/extract/reembed workers). The lock is global
-  rather than per-project because consolidation touches shared global-scope facts
-  (`getNewFactsSince` includes `scope_type='global'` for every project), so concurrent
-  per-project workers would race on the same rows. To avoid starving the projects that
-  lose the lock, the single lock-holder DRAINS every project with pending facts in one
-  serial run — race-free for shared rows, and no project's background work is dropped.
-  This was the same orphan-flood class fixed for the backfill workers in v1.3.0; the
-  consolidate worker was the one detached worker still missing a lock.
+  spawns it detached on every session with no lock, so orphaned workers (ppid=1) piled
+  up (measured 14 at once), each spawning a headless Claude session per LLM call and
+  flooding the proxy across the account pool. Added a GLOBAL atomic `wx` pid-lock (same
+  pattern as the ontology/extract/reembed workers). The lock is global, not per-project,
+  because consolidation touches shared global-scope facts — concurrent per-project
+  workers would race on the same rows.
+- **Consolidation now processes the whole backlog in one pass** (`consolidateAllPending`
+  / `getAllNewFactsSince`): the single lock-holder walks every new fact across all
+  scopes/projects exactly once under a single Haiku budget, instead of looping
+  `consolidateFacts` per project — which re-examined shared global facts once per project
+  (up to `MAX_HAIKU_CALLS × projectCount` calls, since INDEPENDENT/CONTRADICTION verdicts
+  keep the fact active) and could starve a project whose only pending work was an old
+  fact matching a new global one. Same orphan-flood class fixed for the backfill workers
+  in v1.3.0; the consolidate worker was the last detached worker missing a lock.
 
 ## [1.3.1] - 2026-07-05
 
