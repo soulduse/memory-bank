@@ -23731,17 +23731,20 @@ function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance = 0.2, 
       for (const [targetId, rows] of outByNeighbour) {
         const fact = rowToFact2(rows[0]);
         if (scopeProject && fact.scope_type === "project" && fact.scope_project !== scopeProject) continue;
-        visited.add(targetId);
-        nextFrontier.push(targetId);
+        let chosen = null;
         for (const row of rows) {
           const relation = rowToRelation(row);
           const typeWeight = relation.relation_type === "SUPPORTS" || relation.relation_type === "INFLUENCES" ? 1 : 0.7;
           const relevance = hopRelevance * typeWeight;
           if (relevance >= minRelevance) {
-            results.push({ fact, relation, relevance, hop: hop + 1 });
+            chosen = { relation, relevance };
             break;
           }
         }
+        if (!chosen) continue;
+        visited.add(targetId);
+        nextFrontier.push(targetId);
+        results.push({ fact, relation: chosen.relation, relevance: chosen.relevance, hop: hop + 1 });
       }
       const incoming = db.prepare(
         `SELECT r.*, f.*,
@@ -23764,17 +23767,20 @@ function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance = 0.2, 
       for (const [sourceId, rows] of inByNeighbour) {
         const fact = rowToFact2(rows[0]);
         if (scopeProject && fact.scope_type === "project" && fact.scope_project !== scopeProject) continue;
-        visited.add(sourceId);
-        nextFrontier.push(sourceId);
+        let chosen = null;
         for (const row of rows) {
           const relation = rowToRelation(row);
           const typeWeight = relation.relation_type === "SUPPORTS" || relation.relation_type === "INFLUENCES" ? 1 : 0.7;
           const relevance = hopRelevance * typeWeight;
           if (relevance >= minRelevance) {
-            results.push({ fact, relation, relevance, hop: hop + 1 });
+            chosen = { relation, relevance };
             break;
           }
         }
+        if (!chosen) continue;
+        visited.add(sourceId);
+        nextFrontier.push(sourceId);
+        results.push({ fact, relation: chosen.relation, relevance: chosen.relevance, hop: hop + 1 });
       }
     }
     frontier = nextFrontier;

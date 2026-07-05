@@ -219,18 +219,27 @@ export function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance 
                 // Scope filter: skip facts from other projects (unless scopeProject is null)
                 if (scopeProject && fact.scope_type === 'project' && fact.scope_project !== scopeProject)
                     continue;
-                visited.add(targetId);
-                nextFrontier.push(targetId);
+                // Select the surfaced edge FIRST: a neighbour with no qualifying
+                // edge is PRUNED — it must not enter the frontier, or traversal
+                // would leak paths through edges the relevance floor rejected
+                // ("Facts below minRelevance are pruned" is a path contract, not
+                // just a display filter).
+                let chosen = null;
                 for (const row of rows) {
                     const relation = rowToRelation(row);
                     // Relation type weight: SUPPORTS/INFLUENCES stronger than CONTRADICTS/SUPERSEDES
                     const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
                     const relevance = hopRelevance * typeWeight;
                     if (relevance >= minRelevance) {
-                        results.push({ fact, relation, relevance, hop: hop + 1 });
+                        chosen = { relation, relevance };
                         break;
                     }
                 }
+                if (!chosen)
+                    continue;
+                visited.add(targetId);
+                nextFrontier.push(targetId);
+                results.push({ fact, relation: chosen.relation, relevance: chosen.relevance, hop: hop + 1 });
             }
             // Incoming relations (target ← source)
             const incoming = db
@@ -260,17 +269,23 @@ export function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance 
                 // Scope filter: skip facts from other projects
                 if (scopeProject && fact.scope_type === 'project' && fact.scope_project !== scopeProject)
                     continue;
-                visited.add(sourceId);
-                nextFrontier.push(sourceId);
+                // Same pruning contract as the outgoing side: no qualifying edge →
+                // no frontier entry, no path leak.
+                let chosen = null;
                 for (const row of rows) {
                     const relation = rowToRelation(row);
                     const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
                     const relevance = hopRelevance * typeWeight;
                     if (relevance >= minRelevance) {
-                        results.push({ fact, relation, relevance, hop: hop + 1 });
+                        chosen = { relation, relevance };
                         break;
                     }
                 }
+                if (!chosen)
+                    continue;
+                visited.add(sourceId);
+                nextFrontier.push(sourceId);
+                results.push({ fact, relation: chosen.relation, relevance: chosen.relevance, hop: hop + 1 });
             }
         }
         frontier = nextFrontier;

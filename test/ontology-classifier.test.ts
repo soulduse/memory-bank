@@ -893,6 +893,19 @@ describe('ontology-classifier', () => {
       expect(related[0].relation.relation_type).toBe('SUPPORTS'); // qualifying edge surfaced, neighbour not hidden
     });
 
+    it('pruned neighbour does NOT leak deeper paths through a filtered edge', () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'g-p', 'Fact P', emb);
+      insertTestFact(db, 'g-q', 'Fact Q', emb);
+      insertTestFact(db, 'g-r', 'Fact R', emb);
+      createRelation(db, 'g-p', 'CONTRADICTS', 'g-q', 'blocked edge'); // 0.7 < floor 0.8 → Q pruned
+      createRelation(db, 'g-q', 'SUPPORTS', 'g-r', 'would leak');
+
+      const related = getRelatedFacts(db, 'g-p', 2, 1, 0.8);
+
+      expect(related.length).toBe(0); // Q pruned AND R unreachable through the pruned path
+    });
+
     it('createRelation stays idempotent per triple but preserves distinct types', () => {
       const emb = new Array(384).fill(0.1);
       insertTestFact(db, 'g-c', 'Fact C', emb);
