@@ -45,6 +45,23 @@ export function buildConsolidationPrompt(existingFact: string, newFact: string):
 export type LlmErrorClass = 'transient' | 'deterministic' | 'unknown';
 
 /**
+ * Extract an HTTP status from the common provider-error shapes: a top-level
+ * `status`/`statusCode` (Anthropic SDK APIError) OR a nested `response.status`/
+ * `response.statusCode` (axios / fetch-wrapper style). Reading only the top
+ * level misses nested shapes and misclassifies a real 400/413 as 'unknown'.
+ */
+function extractStatus(x: unknown): number | undefined {
+  const o = x as {
+    status?: unknown; statusCode?: unknown;
+    response?: { status?: unknown; statusCode?: unknown };
+  } | undefined;
+  for (const c of [o?.status, o?.statusCode, o?.response?.status, o?.response?.statusCode]) {
+    if (typeof c === 'number') return c;
+  }
+  return undefined;
+}
+
+/**
  * Wraps a rejection from the LLM provider call (callHaiku) so the drain loop can
  * tell a provider error apart from an internal bug (parser/DB/mutation). ONLY a
  * provider error is eligible for classification + bounded skip; an internal
@@ -54,12 +71,11 @@ export class LlmCallError extends Error {
   readonly reason: unknown;
   readonly status?: number;
   constructor(reason: unknown) {
-    const r = reason as { message?: string; status?: number; statusCode?: number } | undefined;
+    const r = reason as { message?: string } | undefined;
     super(r?.message ?? String(reason));
     this.name = 'LlmCallError';
     this.reason = reason;
-    this.status = typeof r?.status === 'number' ? r.status
-      : typeof r?.statusCode === 'number' ? r.statusCode : undefined;
+    this.status = extractStatus(reason);
   }
 }
 
@@ -91,15 +107,14 @@ export class LlmCallError extends Error {
  */
 export function classifyLlmError(err: unknown): LlmErrorClass {
   // Classify the underlying provider rejection, not the wrapper.
-  const e = (err instanceof LlmCallError ? err.reason : err) as { status?: number; statusCode?: number; message?: string } | undefined;
+  const e = (err instanceof LlmCallError ? err.reason : err) as { message?: string } | undefined;
   const byCode = (code: number): LlmErrorClass => {
     if (code === 401 || code === 403 || code === 404) return 'transient'; // systemic/config — hold, resumes on fix
     if (code === 429 || code >= 500) return 'transient';                  // rate limit / server error
     if (code === 400 || code === 413 || code === 422) return 'deterministic'; // per-request bad/oversized
     return 'unknown';
   };
-  const structured = typeof e?.status === 'number' ? e.status
-    : typeof e?.statusCode === 'number' ? e.statusCode : undefined;
+  const structured = extractStatus(err instanceof LlmCallError ? err.reason : err);
   if (structured !== undefined) return byCode(structured);
 
   const m = (e?.message ?? String(err)).toLowerCase();

@@ -305,6 +305,10 @@ describe('consolidateAllPending', () => {
     expect(classifyLlmError(new Error('something weird'))).toBe('unknown');
     // Structured status always wins over message text.
     expect(classifyLlmError(Object.assign(new Error('retry after 400ms'), { status: 429 }))).toBe('transient');
+    // Nested SDK/axios status shape (error.response.status) is read too.
+    expect(classifyLlmError({ response: { status: 413 }, message: 'Request failed' })).toBe('deterministic');
+    expect(classifyLlmError({ response: { status: 503 }, message: 'Request failed' })).toBe('transient');
+    expect(classifyLlmError({ response: { statusCode: 400 }, message: 'x' })).toBe('deterministic');
     // Back-compat boolean: true ONLY for a recognized transient.
     expect(isTransientLlmError(Object.assign(new Error('down'), { status: 503 }))).toBe(true);
     expect(isTransientLlmError(new Error('invalid max_tokens: must be <= 4096'))).toBe(false);

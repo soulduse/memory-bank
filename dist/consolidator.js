@@ -30,6 +30,20 @@ export function buildConsolidationPrompt(existingFact, newFact) {
     return `Existing fact: "${existingFact}"\nNew fact: "${newFact}"`;
 }
 /**
+ * Extract an HTTP status from the common provider-error shapes: a top-level
+ * `status`/`statusCode` (Anthropic SDK APIError) OR a nested `response.status`/
+ * `response.statusCode` (axios / fetch-wrapper style). Reading only the top
+ * level misses nested shapes and misclassifies a real 400/413 as 'unknown'.
+ */
+function extractStatus(x) {
+    const o = x;
+    for (const c of [o?.status, o?.statusCode, o?.response?.status, o?.response?.statusCode]) {
+        if (typeof c === 'number')
+            return c;
+    }
+    return undefined;
+}
+/**
  * Wraps a rejection from the LLM provider call (callHaiku) so the drain loop can
  * tell a provider error apart from an internal bug (parser/DB/mutation). ONLY a
  * provider error is eligible for classification + bounded skip; an internal
@@ -43,8 +57,7 @@ export class LlmCallError extends Error {
         super(r?.message ?? String(reason));
         this.name = 'LlmCallError';
         this.reason = reason;
-        this.status = typeof r?.status === 'number' ? r.status
-            : typeof r?.statusCode === 'number' ? r.statusCode : undefined;
+        this.status = extractStatus(reason);
     }
 }
 /**
@@ -85,8 +98,7 @@ export function classifyLlmError(err) {
             return 'deterministic'; // per-request bad/oversized
         return 'unknown';
     };
-    const structured = typeof e?.status === 'number' ? e.status
-        : typeof e?.statusCode === 'number' ? e.statusCode : undefined;
+    const structured = extractStatus(err instanceof LlmCallError ? err.reason : err);
     if (structured !== undefined)
         return byCode(structured);
     const m = (e?.message ?? String(err)).toLowerCase();
