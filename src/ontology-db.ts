@@ -296,12 +296,20 @@ export function getRelatedFacts(
         )
         .all(currentId) as Array<Record<string, unknown>>;
 
+      // Group candidate edges per neighbour (rows arrive in belief-safety
+      // order): the surfaced edge is the FIRST one whose relevance clears
+      // minRelevance — a safety edge that fails the floor must not consume
+      // the neighbour's single slot and hide a qualifying affirmative edge.
+      const outByNeighbour = new Map<string, Array<Record<string, unknown>>>();
       for (const row of outgoing) {
         const targetId = row['target_fact_id'] as string;
         if (visited.has(targetId)) continue;
-
-        const relation = rowToRelation(row);
-        const fact = rowToFact(row);
+        const rows = outByNeighbour.get(targetId);
+        if (rows) rows.push(row);
+        else outByNeighbour.set(targetId, [row]);
+      }
+      for (const [targetId, rows] of outByNeighbour) {
+        const fact = rowToFact(rows[0]);
 
         // Scope filter: skip facts from other projects (unless scopeProject is null)
         if (scopeProject && fact.scope_type === 'project' && fact.scope_project !== scopeProject) continue;
@@ -309,12 +317,15 @@ export function getRelatedFacts(
         visited.add(targetId);
         nextFrontier.push(targetId);
 
-        // Relation type weight: SUPPORTS/INFLUENCES stronger than CONTRADICTS/SUPERSEDES
-        const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
-        const relevance = hopRelevance * typeWeight;
-
-        if (relevance >= minRelevance) {
-          results.push({ fact, relation, relevance, hop: hop + 1 });
+        for (const row of rows) {
+          const relation = rowToRelation(row);
+          // Relation type weight: SUPPORTS/INFLUENCES stronger than CONTRADICTS/SUPERSEDES
+          const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
+          const relevance = hopRelevance * typeWeight;
+          if (relevance >= minRelevance) {
+            results.push({ fact, relation, relevance, hop: hop + 1 });
+            break;
+          }
         }
       }
 
@@ -332,12 +343,17 @@ export function getRelatedFacts(
         )
         .all(currentId) as Array<Record<string, unknown>>;
 
+      // Same per-neighbour grouping as the outgoing side (see comment above).
+      const inByNeighbour = new Map<string, Array<Record<string, unknown>>>();
       for (const row of incoming) {
         const sourceId = row['source_fact_id'] as string;
         if (visited.has(sourceId)) continue;
-
-        const relation = rowToRelation(row);
-        const fact = rowToFact(row);
+        const rows = inByNeighbour.get(sourceId);
+        if (rows) rows.push(row);
+        else inByNeighbour.set(sourceId, [row]);
+      }
+      for (const [sourceId, rows] of inByNeighbour) {
+        const fact = rowToFact(rows[0]);
 
         // Scope filter: skip facts from other projects
         if (scopeProject && fact.scope_type === 'project' && fact.scope_project !== scopeProject) continue;
@@ -345,11 +361,14 @@ export function getRelatedFacts(
         visited.add(sourceId);
         nextFrontier.push(sourceId);
 
-        const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
-        const relevance = hopRelevance * typeWeight;
-
-        if (relevance >= minRelevance) {
-          results.push({ fact, relation, relevance, hop: hop + 1 });
+        for (const row of rows) {
+          const relation = rowToRelation(row);
+          const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
+          const relevance = hopRelevance * typeWeight;
+          if (relevance >= minRelevance) {
+            results.push({ fact, relation, relevance, hop: hop + 1 });
+            break;
+          }
         }
       }
     }

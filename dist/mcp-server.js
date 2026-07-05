@@ -23720,18 +23720,27 @@ function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance = 0.2, 
              WHEN 'CONTRADICTS' THEN 0 WHEN 'SUPERSEDES' THEN 1
              WHEN 'SUPPORTS' THEN 2 ELSE 3 END, r.created_at`
       ).all(currentId);
+      const outByNeighbour = /* @__PURE__ */ new Map();
       for (const row of outgoing) {
         const targetId = row["target_fact_id"];
         if (visited.has(targetId)) continue;
-        const relation = rowToRelation(row);
-        const fact = rowToFact2(row);
+        const rows = outByNeighbour.get(targetId);
+        if (rows) rows.push(row);
+        else outByNeighbour.set(targetId, [row]);
+      }
+      for (const [targetId, rows] of outByNeighbour) {
+        const fact = rowToFact2(rows[0]);
         if (scopeProject && fact.scope_type === "project" && fact.scope_project !== scopeProject) continue;
         visited.add(targetId);
         nextFrontier.push(targetId);
-        const typeWeight = relation.relation_type === "SUPPORTS" || relation.relation_type === "INFLUENCES" ? 1 : 0.7;
-        const relevance = hopRelevance * typeWeight;
-        if (relevance >= minRelevance) {
-          results.push({ fact, relation, relevance, hop: hop + 1 });
+        for (const row of rows) {
+          const relation = rowToRelation(row);
+          const typeWeight = relation.relation_type === "SUPPORTS" || relation.relation_type === "INFLUENCES" ? 1 : 0.7;
+          const relevance = hopRelevance * typeWeight;
+          if (relevance >= minRelevance) {
+            results.push({ fact, relation, relevance, hop: hop + 1 });
+            break;
+          }
         }
       }
       const incoming = db.prepare(
@@ -23744,18 +23753,27 @@ function getRelatedFacts(db, factId, hops = 1, decay = 0.6, minRelevance = 0.2, 
              WHEN 'CONTRADICTS' THEN 0 WHEN 'SUPERSEDES' THEN 1
              WHEN 'SUPPORTS' THEN 2 ELSE 3 END, r.created_at`
       ).all(currentId);
+      const inByNeighbour = /* @__PURE__ */ new Map();
       for (const row of incoming) {
         const sourceId = row["source_fact_id"];
         if (visited.has(sourceId)) continue;
-        const relation = rowToRelation(row);
-        const fact = rowToFact2(row);
+        const rows = inByNeighbour.get(sourceId);
+        if (rows) rows.push(row);
+        else inByNeighbour.set(sourceId, [row]);
+      }
+      for (const [sourceId, rows] of inByNeighbour) {
+        const fact = rowToFact2(rows[0]);
         if (scopeProject && fact.scope_type === "project" && fact.scope_project !== scopeProject) continue;
         visited.add(sourceId);
         nextFrontier.push(sourceId);
-        const typeWeight = relation.relation_type === "SUPPORTS" || relation.relation_type === "INFLUENCES" ? 1 : 0.7;
-        const relevance = hopRelevance * typeWeight;
-        if (relevance >= minRelevance) {
-          results.push({ fact, relation, relevance, hop: hop + 1 });
+        for (const row of rows) {
+          const relation = rowToRelation(row);
+          const typeWeight = relation.relation_type === "SUPPORTS" || relation.relation_type === "INFLUENCES" ? 1 : 0.7;
+          const relevance = hopRelevance * typeWeight;
+          if (relevance >= minRelevance) {
+            results.push({ fact, relation, relevance, hop: hop + 1 });
+            break;
+          }
         }
       }
     }

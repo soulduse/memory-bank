@@ -880,6 +880,19 @@ describe('ontology-classifier', () => {
       expect(related[0].relation.relation_type).toBe('CONTRADICTS'); // belief-safety edge wins, not insertion luck
     });
 
+    it('safety edge below the relevance floor does NOT hide a qualifying affirmative edge', () => {
+      const emb = new Array(384).fill(0.1);
+      insertTestFact(db, 'g-e', 'Fact E', emb);
+      insertTestFact(db, 'g-f', 'Fact F', emb);
+      createRelation(db, 'g-e', 'SUPPORTS', 'g-f', 'affirms');   // weight 1.0 → relevance 1.0
+      createRelation(db, 'g-e', 'CONTRADICTS', 'g-f', 'conflicts'); // weight 0.7 → relevance 0.7
+
+      const related = getRelatedFacts(db, 'g-e', 1, 0.6, 0.8); // floor 0.8: CONTRADICTS fails, SUPPORTS passes
+
+      expect(related.length).toBe(1);
+      expect(related[0].relation.relation_type).toBe('SUPPORTS'); // qualifying edge surfaced, neighbour not hidden
+    });
+
     it('createRelation stays idempotent per triple but preserves distinct types', () => {
       const emb = new Array(384).fill(0.1);
       insertTestFact(db, 'g-c', 'Fact C', emb);
