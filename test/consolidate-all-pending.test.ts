@@ -247,34 +247,41 @@ describe('consolidateAllPending', () => {
     expect(page.length).toBe(10); // bounded, not all 50
   });
 
-  it('quarantines a fact whose comparison CALL deterministically throws (no cursor wedge)', async () => {
-    addFact(db, 'always throws', 'global', null);
-    addFact(db, 'sibling for candidate', 'global', null); // gives the driver a candidate
-    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('provider 400 oversized'));
+  it('an ISOLATED call failure is skipped (fact-specific), not held', async () => {
+    // fact A always fails; fact B (later) succeeds. A must be skipped so the
+    // cursor advances and B gets consolidated — one bad fact must not wedge.
+    const base = Date.parse('2020-03-01T00:00:00Z');
+    insertFact(db, { fact: 'bad driver', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+    insertFact(db, { fact: 'bad sibling', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+    insertFact(db, { fact: 'good driver', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+    insertFact(db, { fact: 'good sibling', category: 'decision', scope_type: 'global', scope_project: null, source_exchange_ids: [], embedding: EMB });
+    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'bad driver'").run(new Date(base).toISOString());
+    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'bad sibling'").run(new Date(base + 1000).toISOString());
+    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'good driver'").run(new Date(base + 2000).toISOString());
+    db.prepare("UPDATE facts SET created_at = ? WHERE fact = 'good sibling'").run(new Date(base + 3000).toISOString());
 
-    // Run repeatedly; the failing fact is retried then quarantined after MAX.
-    let cursor: { createdAt: string; id: string } | null = null;
-    for (let r = 0; r < 5; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+    // Only 'bad driver' throws; everything else succeeds.
+    (callHaiku as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, user: string) => {
+      if (user.includes('bad driver')) throw new Error('provider 400 oversized');
+      return '{"relation":"INDEPENDENT","merged_fact":"","reason":"x"}';
+    });
 
-    // The cursor must have advanced past the wedge (not stuck at the beginning).
-    expect(cursor).not.toBeNull();
-    const stuck = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'always throws'").get() as { consolidation_attempts: number };
-    expect(stuck.consolidation_attempts).toBeGreaterThanOrEqual(3);
+    const run = await consolidateAllPending(db, null);
+
+    // The cursor advanced past the isolated bad fact (not stuck at the start).
+    expect(run.cursor).not.toBeNull();
+    expect(run.cursor!.createdAt > new Date(base).toISOString()).toBe(true);
   });
 
-  it('does NOT advance the cursor past a fact whose comparison errored (retryable)', async () => {
-    addFact(db, 'errdriver one', 'global', null);
-    addFact(db, 'errdriver two', 'global', null); // similar → triggers a call
-
+  it('an OUTAGE (consecutive failures) rolls the cursor back and holds for retry', async () => {
+    for (let i = 0; i < 5; i++) addFact(db, `outage fact ${i}`, 'global', null);
     (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('LLM down'));
 
-    const run = await consolidateAllPending(db, { createdAt: '2000-01-01T00:00:00Z', id: '' });
+    const run = await consolidateAllPending(db, null);
 
-    // Cursor must stay at the start (createdAt unchanged) so the errored fact is retried.
-    expect(run.cursor).toEqual({ createdAt: '2000-01-01T00:00:00Z', id: '' });
-    // The attempted (failed) call is still counted — returned budget is accurate.
-    expect(run.haikuCalls).toBe((callHaiku as ReturnType<typeof vi.fn>).mock.calls.length);
-    expect(run.haikuCalls).toBeGreaterThanOrEqual(1);
+    // OUTAGE_TRIP consecutive failures → cursor rolled back to the start (null),
+    // so the whole streak is retried next run rather than silently skipped.
+    expect(run.cursor).toBeNull();
   });
 
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {

@@ -389,15 +389,6 @@ export function initDatabase(): Database.Database {
   if (!factColumnNames.has('ontology_attempts')) {
     db.prepare('ALTER TABLE facts ADD COLUMN ontology_attempts INTEGER NOT NULL DEFAULT 0').run();
   }
-  // Consolidation attempt ledger: if a driver fact's comparison CALL fails
-  // deterministically (oversized text → provider 400, etc.), the cursor would
-  // otherwise wedge on it forever (each run retries it, newer backlog never
-  // drains). After MAX attempts the consolidator quarantines it (advances the
-  // cursor past it) — the fact stays active/searchable and remains a candidate
-  // for future comparisons.
-  if (!factColumnNames.has('consolidation_attempts')) {
-    db.prepare('ALTER TABLE facts ADD COLUMN consolidation_attempts INTEGER NOT NULL DEFAULT 0').run();
-  }
   if (!factColumnNames.has('ontology_last_attempt_at')) {
     db.prepare('ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT').run();
   }

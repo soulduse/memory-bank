@@ -61,11 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of materializing every active fact, and a new `idx_facts_active_created_id`
   index serves the `(is_active, created_at, id)` filter+sort — so a from-the-beginning
   drain over tens of thousands of facts can't OOM or trigger a full-table temp sort.
-- **Consolidation quarantine**: a driver fact whose comparison CALL fails deterministically
-  (oversized text → provider 400, etc.) is retried a bounded number of times
-  (`consolidation_attempts`, idempotent migration) and then skipped, so one un-processable
-  fact can't wedge the cursor and starve the rest of the backlog. Transient failures still
-  retry (hold the cursor) until they either succeed or exhaust the attempt budget.
+- **Outage-vs-fact failure circuit breaker**: a comparison CALL failure is disambiguated
+  by CONSECUTIVE-failure count, not by inspecting the provider-specific error — an isolated
+  failure (surrounded by successes) is treated as one un-processable fact and skipped so it
+  can't wedge the cursor, while 3 consecutive failures are treated as a provider outage,
+  rolling the cursor back to before the streak and stopping so the whole streak retries next
+  run instead of being silently skipped. No persistent attempt ledger is needed.
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same

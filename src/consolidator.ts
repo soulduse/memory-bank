@@ -27,10 +27,12 @@ const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relat
 }`;
 
 const MAX_HAIKU_CALLS = 10;
-// A driver fact whose comparison CALL keeps throwing (deterministic provider
-// rejection — e.g. oversized text) is quarantined after this many run-level
-// failures so it can't wedge the cursor and starve the rest of the backlog.
-const MAX_CONSOLIDATION_ATTEMPTS = 3;
+// Consecutive CALL failures that mean "the provider is down" (an outage) rather
+// than "this one fact's text is un-processable". Below this, an isolated failure
+// is treated as fact-specific and skipped (the cursor advances past it); at this
+// count the run rolls the cursor back to before the streak and stops, so a real
+// outage retries the whole streak next run instead of silently skipping it.
+const OUTAGE_TRIP = 3;
 // e5 passage-passage scale (measured): near-dup 0.99, paraphrase 0.97,
 // related-but-distinct ~0.91, unrelated <=0.86. 0.95 selects dup candidates.
 const SIMILARITY_THRESHOLD = 0.95;
@@ -151,6 +153,13 @@ export async function consolidateAllPending(
   // larger than the per-run budget (the pre-keyset created_at-only cursor
   // stalled forever in that case and starved the rest of the backlog).
   let cursor = since;
+  // Outage circuit breaker (no persistent ledger needed): an ISOLATED call
+  // failure is treated as fact-specific and skipped (cursor advances past it);
+  // OUTAGE_TRIP consecutive failures mean the provider is down, so we roll the
+  // cursor back to before the streak and stop — the streak retries next run
+  // instead of being silently skipped.
+  let consecFail = 0;
+  let cursorBeforeStreak = since;
 
   for (let i = 0; i < newFacts.length; i++) {
     const newFact = newFacts[i];
@@ -166,26 +175,26 @@ export async function consolidateAllPending(
         if (verdict === 'DUPLICATE') merged++;
         else if (verdict === 'CONTRADICTION') contradictions++;
         else if (verdict === 'EVOLUTION') evolutions++;
+        consecFail = 0; // a success ends any failure streak
       } catch (error) {
-        // A throw is a CALL failure (callHaiku rejected). Usually transient
-        // (infra down) → hold the cursor and retry next run. But a DETERMINISTIC
-        // rejection (oversized text, content the provider always 400s) would
-        // wedge the cursor forever, so ledger the failure and quarantine the
-        // fact after MAX attempts (advance past it). During a real outage every
-        // fact fails, so nothing is prematurely quarantined before recovery
-        // unless the SAME fact fails across MAX separate runs.
+        // A throw is a CALL failure (callHaiku rejected). Distinguish an outage
+        // (many facts failing) from a single un-processable fact by counting
+        // CONSECUTIVE failures rather than inspecting the (provider-specific)
+        // error.
         haikuCalls++;
         console.error(`Consolidation call failed for fact ${newFact.id}:`, error);
-        const attempts = (db.prepare(
-          'UPDATE facts SET consolidation_attempts = COALESCE(consolidation_attempts, 0) + 1 WHERE id = ? RETURNING consolidation_attempts'
-        ).get(newFact.id) as { consolidation_attempts: number } | undefined)?.consolidation_attempts ?? 0;
-        if (attempts >= MAX_CONSOLIDATION_ATTEMPTS) {
-          console.error(`Consolidation quarantine fact ${newFact.id} after ${attempts} call failures — skipping`);
-          processed++;
-          cursor = { createdAt: newFact.created_at, id: newFact.id }; // advance past the wedge
-          continue;
+        if (consecFail === 0) cursorBeforeStreak = cursor; // remember where the streak began
+        consecFail++;
+        if (consecFail >= OUTAGE_TRIP) {
+          // Looks like an outage: undo the tentative skips of the streak so the
+          // whole streak is retried next run, and stop.
+          cursor = cursorBeforeStreak;
+          break;
         }
-        break; // hold the cursor — retry this fact next run
+        // Isolated failure so far → assume fact-specific and skip past it.
+        processed++;
+        cursor = { createdAt: newFact.created_at, id: newFact.id };
+        continue;
       }
     }
     // Fully examined (including a no-op / no-candidate / no-embedding fact — none
