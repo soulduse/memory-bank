@@ -2,6 +2,17 @@ import Database from 'better-sqlite3';
 import type { Fact, ConsolidationResult } from './types.js';
 export declare function buildConsolidationPrompt(existingFact: string, newFact: string): string;
 /**
+ * Classify a callHaiku rejection: is it a TRANSIENT provider problem (retry
+ * forever until it recovers) or a DETERMINISTIC per-fact rejection (skip after
+ * MAX attempts so it can't wedge the cursor)?
+ *
+ * This is the ONLY way to satisfy both "an outage must never silently skip the
+ * backlog" and "one un-processable fact must never wedge the cursor" — a plain
+ * failure count can't tell them apart. UNKNOWN errors are treated as transient
+ * (hold/retry), so an unrecognized error never silently drains the backlog.
+ */
+export declare function isTransientLlmError(err: unknown): boolean;
+/**
  * @deprecated Back-compat wrapper for the removed per-project consolidator.
  * Prefer `consolidateAllPending`. Now scope-isolated (via consolidateOne), so
  * it can no longer leak project-private text into global facts. Kept as a

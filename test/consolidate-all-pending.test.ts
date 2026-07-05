@@ -247,48 +247,40 @@ describe('consolidateAllPending', () => {
     expect(page.length).toBe(10); // bounded, not all 50
   });
 
-  it('a SHORT/transient outage HOLDS the cursor (retried next run, not skipped)', async () => {
-    addFact(db, 'transient A', 'global', null);
-    addFact(db, 'transient B', 'global', null); // candidate for A
-    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('LLM down'));
-    // Only the FIRST call this run rejects; the fact is held (attempt 1 < MAX).
-
-    const run = await consolidateAllPending(db, null);
-
-    // Cursor held at the beginning → the failed fact is retried next run.
-    expect(run.cursor).toBeNull();
-    const a = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'transient A'").get() as { consolidation_attempts: number };
-    expect(a.consolidation_attempts).toBe(1); // ledgered, not yet skipped
-  });
-
-  it('a persistently failing fact is SKIPPED after MAX attempts (no wedge)', async () => {
-    addFact(db, 'always fails', 'global', null);
-    addFact(db, 'sibling', 'global', null); // candidate
-    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('provider 400'));
+  it('a TRANSIENT provider outage (503) holds the cursor forever — never skips, no attempt burned', async () => {
+    for (let i = 0; i < 5; i++) addFact(db, `outage ${i}`, 'global', null);
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('503 overloaded'), { status: 503 }));
 
     let cursor: { createdAt: string; id: string } | null = null;
-    // Each run adds one attempt to the first fact; after MAX it is skipped and
-    // the cursor advances past it.
-    for (let r = 0; r < 4; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+    for (let r = 0; r < 5; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
 
-    const bad = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'always fails'").get() as { consolidation_attempts: number };
-    expect(bad.consolidation_attempts).toBeGreaterThanOrEqual(3);
-    // Cursor must have advanced past the wedge (not stuck at the very first fact forever).
-    expect(cursor).not.toBeNull();
+    expect(cursor).toBeNull(); // never advanced past the outage
+    const attempts = db.prepare("SELECT MAX(consolidation_attempts) AS m FROM facts").get() as { m: number };
+    expect(attempts.m).toBe(0); // transient failures don't burn attempts
   });
 
-  it('a success RESETS the attempt counter (transient blip does not accumulate toward skip)', async () => {
-    addFact(db, 'flaky', 'global', null);
-    addFact(db, 'flaky sibling', 'global', null);
-    // Fail once (attempt→1), then succeed on the retry run (reset→0).
-    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('blip'));
+  it('a DETERMINISTIC per-fact rejection (400 oversized) is SKIPPED after MAX (no wedge)', async () => {
+    addFact(db, 'oversized driver', 'global', null);
+    addFact(db, 'oversized sibling', 'global', null);
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('400 prompt too long'), { status: 400 }));
 
-    await consolidateAllPending(db, null); // attempt 1, held
-    (callHaiku as ReturnType<typeof vi.fn>).mockResolvedValue('{"relation":"INDEPENDENT","merged_fact":"","reason":"x"}');
-    await consolidateAllPending(db, null); // succeeds → reset
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 4; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
 
-    const f = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'flaky'").get() as { consolidation_attempts: number };
-    expect(f.consolidation_attempts).toBe(0);
+    const bad = db.prepare("SELECT consolidation_attempts FROM facts WHERE fact = 'oversized driver'").get() as { consolidation_attempts: number };
+    expect(bad.consolidation_attempts).toBeGreaterThanOrEqual(3);
+    expect(cursor).not.toBeNull(); // advanced past the un-processable fact
+  });
+
+  it('an UNKNOWN error is treated as transient (held, not skipped)', async () => {
+    addFact(db, 'mystery A', 'global', null);
+    addFact(db, 'mystery B', 'global', null);
+    (callHaiku as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('something weird happened'));
+
+    let cursor: { createdAt: string; id: string } | null = null;
+    for (let r = 0; r < 5; r++) cursor = (await consolidateAllPending(db, cursor)).cursor;
+
+    expect(cursor).toBeNull(); // unknown → transient → held, never silently skipped
   });
 
   it('advances a persisted cursor so newer facts are reachable across runs (no starvation)', async () => {

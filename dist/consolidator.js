@@ -30,6 +30,35 @@ export function buildConsolidationPrompt(existingFact, newFact) {
     return `Existing fact: "${existingFact}"\nNew fact: "${newFact}"`;
 }
 /**
+ * Classify a callHaiku rejection: is it a TRANSIENT provider problem (retry
+ * forever until it recovers) or a DETERMINISTIC per-fact rejection (skip after
+ * MAX attempts so it can't wedge the cursor)?
+ *
+ * This is the ONLY way to satisfy both "an outage must never silently skip the
+ * backlog" and "one un-processable fact must never wedge the cursor" — a plain
+ * failure count can't tell them apart. UNKNOWN errors are treated as transient
+ * (hold/retry), so an unrecognized error never silently drains the backlog.
+ */
+export function isTransientLlmError(err) {
+    const e = err;
+    const status = typeof e?.status === 'number' ? e.status
+        : typeof e?.statusCode === 'number' ? e.statusCode : undefined;
+    if (status !== undefined) {
+        if (status === 429 || status >= 500)
+            return true; // rate limit / server error
+        if (status === 400 || status === 413 || status === 422)
+            return false; // bad/oversized request
+    }
+    const m = (e?.message ?? String(err)).toLowerCase();
+    if (/\b(429|500|502|503|504)\b|timeout|etimedout|econnreset|econnrefused|enotfound|socket hang up|network|overloaded|temporarily|rate.?limit/.test(m)) {
+        return true;
+    }
+    if (/\b(400|413|422)\b|too (large|long)|context length|maximum.*token|max.*token|invalid.*request|content.*too/.test(m)) {
+        return false;
+    }
+    return true; // UNKNOWN → transient (never silently skip on an unrecognized error)
+}
+/**
  * Consolidate ONE driver fact against a same-scope neighbour (if any).
  * Shared by consolidateAllPending and the back-compat consolidateFacts wrapper.
  *
@@ -161,16 +190,22 @@ export async function consolidateAllPending(db, since) {
                 db.prepare('UPDATE facts SET consolidation_attempts = 0 WHERE id = ? AND consolidation_attempts > 0').run(newFact.id);
             }
             catch (error) {
-                // A throw is a CALL failure (callHaiku rejected). Ledger the attempt.
-                // Below MAX → HOLD the cursor and stop, so a short/transient outage is
-                // retried next run (the counter accumulates across runs; a later success
-                // resets it). At MAX → SKIP (advance past it), so a persistently failing
-                // fact can't wedge the cursor and starve the rest of the backlog.
                 haikuCalls++;
                 console.error(`Consolidation call failed for fact ${newFact.id}:`, error);
+                if (isTransientLlmError(error)) {
+                    // Provider outage (503/429/timeout/unknown): HOLD the cursor and stop.
+                    // No attempt is burned — the fact is not at fault — so the drain
+                    // resumes here when the provider recovers, never silently skipping the
+                    // backlog during an outage (however long it lasts).
+                    break;
+                }
+                // Deterministic per-fact rejection (400/oversized/etc.): ledger it and,
+                // after MAX attempts, SKIP (advance past it) so one un-processable fact
+                // can't wedge the cursor. Below MAX, hold so a mis-classified blip still
+                // gets a couple of retries.
                 const attempts = db.prepare('UPDATE facts SET consolidation_attempts = COALESCE(consolidation_attempts, 0) + 1 WHERE id = ? RETURNING consolidation_attempts').get(newFact.id)?.consolidation_attempts ?? 0;
                 if (attempts >= MAX_CONSOLIDATION_ATTEMPTS) {
-                    console.error(`Consolidation skip fact ${newFact.id} after ${attempts} call failures`);
+                    console.error(`Consolidation skip fact ${newFact.id} after ${attempts} deterministic failures`);
                     processed++;
                     cursor = { createdAt: newFact.created_at, id: newFact.id };
                     continue;

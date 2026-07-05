@@ -61,14 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of materializing every active fact, and a new `idx_facts_active_created_id`
   index serves the `(is_active, created_at, id)` filter+sort — so a from-the-beginning
   drain over tens of thousands of facts can't OOM or trigger a full-table temp sort.
-- **Cross-run consolidation attempt ledger** (`facts.consolidation_attempts`, idempotent
-  migration): a comparison CALL failure holds the cursor (stops the run) and is retried
-  next run, up to MAX attempts, then the fact is skipped (cursor advances past it). This
-  spans runs on purpose — a short/transient provider outage is retried until it recovers
-  (a success resets the counter), while a persistently un-processable fact reaches MAX and
-  is skipped so it can't wedge the cursor and starve the backlog — without inspecting the
-  provider-specific error (a run-local counter can't tell an outage, which spans separate
-  worker runs, from a fact-specific failure).
+- **Error-classified consolidation failure handling**: a comparison CALL rejection is
+  classified as TRANSIENT (429/5xx/timeout/network — and any UNKNOWN error) or DETERMINISTIC
+  (400/413/422/oversized-prompt). Transient failures HOLD the cursor and retry forever until
+  the provider recovers — an outage never silently skips the backlog, and no attempt is
+  burned. Deterministic per-fact rejections are ledgered (`facts.consolidation_attempts`,
+  idempotent migration) and SKIPPED after MAX attempts so one un-processable fact can't wedge
+  the cursor. Classifying by error type is the only way to satisfy both "an outage must not
+  silently drain the backlog" and "one bad fact must not wedge the cursor"; unknown errors
+  default to transient so nothing is ever silently skipped.
 - **Persisted consolidation cursor**: the worker records the last fully-examined
   `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
   budget reaches newer/project backlog instead of re-spending every run on the same
