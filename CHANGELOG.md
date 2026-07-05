@@ -9,16 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **`fact-consolidate-worker` had no single-instance lock** — the SessionStart hook
-  spawns it detached on every session start, so orphaned workers (ppid=1) piled up
-  (measured 14 running at once), each spawning a headless Claude session per LLM call
-  and flooding the proxy across the account pool. Added the same atomic `wx` pid-lock
-  used by the ontology/extract/reembed workers, keyed PER PROJECT (a global lock would
-  let one project's long run starve others, since each worker only consolidates its own
-  CWD) — so the actual flood cause (the same project's SessionStart re-spawning every
-  session) is capped to one worker while distinct projects proceed in parallel. This was
-  the same
-  orphan-flood class fixed for the backfill workers in v1.3.0 — the consolidate worker
-  was the one detached worker still missing a lock.
+  spawns it detached on every session start with no lock, so orphaned workers (ppid=1)
+  piled up (measured 14 running at once), each spawning a headless Claude session per
+  LLM call and flooding the proxy across the account pool. Added a GLOBAL atomic `wx`
+  pid-lock (same pattern as the ontology/extract/reembed workers). The lock is global
+  rather than per-project because consolidation touches shared global-scope facts
+  (`getNewFactsSince` includes `scope_type='global'` for every project), so concurrent
+  per-project workers would race on the same rows. To avoid starving the projects that
+  lose the lock, the single lock-holder DRAINS every project with pending facts in one
+  serial run — race-free for shared rows, and no project's background work is dropped.
+  This was the same orphan-flood class fixed for the backfill workers in v1.3.0; the
+  consolidate worker was the one detached worker still missing a lock.
 
 ## [1.3.1] - 2026-07-05
 
