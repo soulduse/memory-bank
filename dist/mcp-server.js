@@ -23175,6 +23175,10 @@ function getDbPath() {
   }
   return path.join(getIndexDir(), "db.sqlite");
 }
+function getProjectsDir() {
+  return process.env.TEST_PROJECTS_DIR || path.join(os.homedir(), ".claude", "projects");
+}
+var LLM_WORKDIR_BASENAME = "memory-bank-llm";
 
 // src/project-canon.ts
 var slugCache = /* @__PURE__ */ new Map();
@@ -25812,13 +25816,73 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import fs5 from "node:fs";
 import path4 from "node:path";
 import os2 from "node:os";
-var LLM_WORKDIR = path4.join(os2.tmpdir(), "memory-bank-llm");
+var LLM_WORKDIR = path4.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
 function llmWorkdir() {
   try {
     fs5.mkdirSync(LLM_WORKDIR, { recursive: true });
   } catch {
   }
+  pruneLlmTranscripts();
   return LLM_WORKDIR;
+}
+var PRUNE_MARKER = path4.join(LLM_WORKDIR, ".last-transcript-prune");
+var PRUNE_THROTTLE_MS = 60 * 60 * 1e3;
+function transcriptTtlMs() {
+  const raw = process.env.MEMORY_BANK_LLM_TRANSCRIPT_TTL_HOURS;
+  const hours = raw != null && /^\d+$/.test(raw) ? parseInt(raw, 10) : 24;
+  return Math.max(1, hours) * 60 * 60 * 1e3;
+}
+function pruneLlmTranscripts(now = Date.now()) {
+  try {
+    try {
+      const markerAge = now - fs5.statSync(PRUNE_MARKER).mtimeMs;
+      if (markerAge >= 0 && markerAge < PRUNE_THROTTLE_MS) return;
+    } catch {
+    }
+    try {
+      fs5.writeFileSync(PRUNE_MARKER, new Date(now).toISOString());
+    } catch {
+    }
+    const projectsDir = getProjectsDir();
+    const ttl = transcriptTtlMs();
+    let entries;
+    try {
+      entries = fs5.readdirSync(projectsDir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry !== LLM_WORKDIR_BASENAME && !entry.endsWith(`-${LLM_WORKDIR_BASENAME}`)) continue;
+      const dir = path4.join(projectsDir, entry);
+      let stat;
+      try {
+        stat = fs5.lstatSync(dir);
+      } catch {
+        continue;
+      }
+      if (!stat.isDirectory()) continue;
+      let files;
+      try {
+        files = fs5.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith(".jsonl") && !file.endsWith("-summary.txt")) continue;
+        const filePath = path4.join(dir, file);
+        try {
+          const fstat = fs5.lstatSync(filePath);
+          if (fstat.isFile() && now - fstat.mtimeMs > ttl) fs5.unlinkSync(filePath);
+        } catch {
+        }
+      }
+      try {
+        fs5.rmdirSync(dir);
+      } catch {
+      }
+    }
+  } catch {
+  }
 }
 async function callHaiku(systemPrompt, userMessage, maxTokens = 2048) {
   const model = process.env.MEMORY_BANK_FACT_MODEL || "haiku";

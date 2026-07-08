@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-07-08
+
+### Fixed
+- **LLM worker sessions no longer pollute the conversation index** — every Haiku
+  call spawns a one-shot headless CLI session under `<tmpdir>/memory-bank-llm`;
+  those transcripts were being indexed like real conversations (measured: 4,351
+  sessions / 6.7k exchange rows). `isExcludedProject()` (paths.ts) now built-in
+  excludes any project slug ending with `-memory-bank-llm` (current fixed workdir
+  and legacy mkdtemp variants alike) and is applied at every exchange-inserting
+  walk: `indexConversations` / `indexSession` / `indexUnprocessed` (indexer.ts),
+  sync (sync.ts) and verify (verify.ts). Ephemeral worker state is not knowledge.
+- **Worker transcripts no longer accumulate forever** — nothing ever deleted the
+  one-shot session transcripts (measured: 11,573 files / 99MB under
+  `~/.claude/projects/*-memory-bank-llm`). `pruneLlmTranscripts()` (llm.ts) now
+  runs opportunistically (throttled to at most hourly) on each LLM call: deletes
+  only `.jsonl` / `-summary.txt` files older than a TTL
+  (`MEMORY_BANK_LLM_TRANSCRIPT_TTL_HOURS`, default 24h, hard floor 1h so an
+  in-flight transcript can never be reaped), strictly inside the reserved
+  `*-memory-bank-llm` slug namespace, never following symlinks, removing legacy
+  slug dirs once emptied, and never throwing into the LLM call path.
+- **Polluted rows cannot become extraction candidates** (defense in depth) —
+  `backfill-extract-worker` drops sessions whose `cwd` ends with
+  `/memory-bank-llm` from the pending queue, so exchanges indexed before this
+  fix cannot feed fact extraction (which would spawn yet more Haiku sessions —
+  a self-referential loop). The `NOT IN` subquery filters `session_id IS NOT
+  NULL` explicitly: one NULL inside `NOT IN` nulls the whole predicate
+  (3-valued logic) and would silently drain the entire backfill.
+- **All Agent SDK spawn sites are now contained** — summarizer.ts and
+  translate-facts.mjs ran `query()` without `cwd`/`settingSources`, so their
+  sessions landed in the caller's project slug (indexable, unpruned) and loaded
+  user settings whose SessionStart/End hooks re-spawn sync/backfill workers
+  (session cascade). Both now share the same containment as llm.ts `callHaiku`:
+  `cwd: llmWorkdir()`, `settingSources: []`.
+- `BACKFILL_MIN_EXCHANGES` is validated via `boundedInt` before being
+  interpolated into SQL — a garbage value (`'abc'` → `NaN`) used to produce
+  invalid query text at runtime.
+
 ## [1.3.2] - 2026-07-05
 
 ### Fixed

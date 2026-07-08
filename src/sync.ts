@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
-import { getExcludedProjects, detectCodingAgent } from './paths.js';
+import { getExcludedProjects, isExcludedProject, detectCodingAgent } from './paths.js';
 import { archiveFileExists, readArchiveFile, statArchiveFile } from './archive-io.js';
 
 const EXCLUSION_MARKERS = [
@@ -105,7 +105,7 @@ export async function syncConversations(
   const excludedProjects = getExcludedProjects();
 
   for (const project of projects) {
-    if (excludedProjects.includes(project)) {
+    if (isExcludedProject(project, excludedProjects)) {
       console.error("\nSkipping excluded project: " + project);
       continue;
     }
