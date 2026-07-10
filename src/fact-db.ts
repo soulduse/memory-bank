@@ -3,6 +3,19 @@ import { randomUUID } from 'crypto';
 import type { Fact, FactRevision } from './types.js';
 import { canonicalizeProject } from './project-canon.js';
 import { EMBEDDING_VERSION } from './embeddings.js';
+import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+
+type FactVecTable = 'vec_facts' | 'vec_facts_kr' | 'vec_categories';
+
+/** dtype-aware MATCH/INSERT param for a fact-side vec table: the SQL
+ * placeholder (vec_int8(?) wrap for int8) and the correctly-encoded blob.
+ * float32 tables (pre-migration DBs) and int8 tables (fresh DBs / migrated)
+ * are both served — the actual schema decides. */
+function vecParamFor(db: Database.Database, table: FactVecTable, embedding: number[]) {
+  const dt = getVecTableDtype(db, table);
+  return { sql: vecParamSql(dt), blob: embeddingToVecBlob(embedding, dt), dt };
+}
+
 
 interface InsertFactParams {
   fact: string;
@@ -57,20 +70,22 @@ export function insertFact(db: Database.Database, params: InsertFactParams): str
 
   // Insert into vector index (atomic DELETE+INSERT via transaction)
   if (params.embedding) {
+    const p = vecParamFor(db, 'vec_facts', params.embedding);
     const upsertVec = db.transaction((vecId: string, buf: Buffer) => {
       db.prepare('DELETE FROM vec_facts WHERE id = ?').run(vecId);
-      db.prepare('INSERT INTO vec_facts (id, embedding) VALUES (?, ?)').run(vecId, buf);
+      db.prepare(`INSERT INTO vec_facts (id, embedding) VALUES (?, ${p.sql})`).run(vecId, buf);
     });
-    upsertVec(id, Buffer.from(new Float32Array(params.embedding).buffer));
+    upsertVec(id, p.blob);
   }
 
   // Korean-text vector index (same-language matching for Korean queries)
   if (params.embedding_kr) {
+    const pk = vecParamFor(db, 'vec_facts_kr', params.embedding_kr);
     const upsertVecKr = db.transaction((vecId: string, buf: Buffer) => {
       db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(vecId);
-      db.prepare('INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ?)').run(vecId, buf);
+      db.prepare(`INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ${pk.sql})`).run(vecId, buf);
     });
-    upsertVecKr(id, Buffer.from(new Float32Array(params.embedding_kr).buffer));
+    upsertVecKr(id, pk.blob);
   }
 
   return id;
@@ -114,11 +129,12 @@ export function updateFact(db: Database.Database, id: string, params: UpdateFact
 
   // Update vector index (atomic DELETE+INSERT via transaction)
   if (params.embedding) {
+    const p = vecParamFor(db, 'vec_facts', params.embedding);
     const upsertVec = db.transaction((vecId: string, buf: Buffer) => {
       db.prepare('DELETE FROM vec_facts WHERE id = ?').run(vecId);
-      db.prepare('INSERT INTO vec_facts (id, embedding) VALUES (?, ?)').run(vecId, buf);
+      db.prepare(`INSERT INTO vec_facts (id, embedding) VALUES (?, ${p.sql})`).run(vecId, buf);
     });
-    upsertVec(id, Buffer.from(new Float32Array(params.embedding).buffer));
+    upsertVec(id, p.blob);
   }
 }
 
@@ -162,7 +178,6 @@ export function searchSimilarFacts(
   threshold: number = 0.85,
 ): Array<{ fact: Fact; distance: number }> {
   const canonProject = project ? canonicalizeProject(db, project) : project;
-  const buf = Buffer.from(new Float32Array(embedding).buffer);
 
   // Search both language indexes: the query language is unknown, and
   // multilingual models score same-language pairs far higher than
@@ -173,14 +188,20 @@ export function searchSimilarFacts(
   // dominated by other projects' facts — fetching only limit*2 starves the
   // requested scope of candidates entirely.
   const candidateFetch = Math.max(limit * 2, 50);
-  const fetch = (table: string) => {
+  // Per-table dtype: the two language indexes can be at DIFFERENT dtypes
+  // mid-migration, and int8 distances come back ×127-scaled — normalize
+  // BEFORE the cross-table merge or the scales are incomparable.
+  const fetch = (table: FactVecTable) => {
     try {
-      return db.prepare(`
+      const p = vecParamFor(db, table, embedding);
+      const rows = db.prepare(`
         SELECT id, distance FROM ${table}
-        WHERE embedding MATCH ?
+        WHERE embedding MATCH ${p.sql}
         ORDER BY distance
         LIMIT ?
-      `).all(buf, candidateFetch) as Array<{ id: string; distance: number }>;
+      `).all(p.blob, candidateFetch) as Array<{ id: string; distance: number }>;
+      for (const r of rows) r.distance = normalizeVecDistance(r.distance, p.dt);
+      return rows;
     } catch {
       return []; // table may not exist on very old DBs
     }
@@ -240,7 +261,6 @@ export function searchSimilarFactsSameScope(
   threshold: number = 0.85,
 ): Array<{ fact: Fact; distance: number }> {
   const canonProject = scope.type === 'project' ? canonicalizeProject(db, scope.project) : null;
-  const buf = Buffer.from(new Float32Array(embedding).buffer);
 
   // Early out only if the scope is genuinely empty (nothing to match against).
   const scopeCount = scope.type === 'global'
@@ -254,12 +274,15 @@ export function searchSimilarFactsSameScope(
   // ahead of a valid in-scope row and are only rejected later by the
   // embedding_version filter, so bounding by active facts could stop before
   // reaching the match. `exhausted` is the correct, index-size-independent stop.
-  const fetchN = (table: string, n: number): { rows: Array<{ id: string; distance: number }>; exhausted: boolean } => {
+  const fetchN = (table: FactVecTable, n: number): { rows: Array<{ id: string; distance: number }>; exhausted: boolean } => {
     try {
+      const p = vecParamFor(db, table, embedding);
       const rows = db.prepare(`
         SELECT id, distance FROM ${table}
-        WHERE embedding MATCH ? ORDER BY distance LIMIT ?
-      `).all(buf, n) as Array<{ id: string; distance: number }>;
+        WHERE embedding MATCH ${p.sql} ORDER BY distance LIMIT ?
+      `).all(p.blob, n) as Array<{ id: string; distance: number }>;
+      // Normalize ×127-scaled int8 distances BEFORE the cross-table merge.
+      for (const r of rows) r.distance = normalizeVecDistance(r.distance, p.dt);
       return { rows, exhausted: rows.length < n };
     } catch {
       return { rows: [], exhausted: true };
@@ -437,13 +460,15 @@ export function searchAllFacts(
   limit: number = 10,
   threshold: number = 0.6,
 ): Array<{ fact: Fact; distance: number }> {
+  const pAll = vecParamFor(db, 'vec_facts', embedding);
   const vecResults = db.prepare(`
     SELECT id, distance
     FROM vec_facts
-    WHERE embedding MATCH ?
+    WHERE embedding MATCH ${pAll.sql}
     ORDER BY distance
     LIMIT ?
-  `).all(Buffer.from(new Float32Array(embedding).buffer), limit * 2) as Array<{ id: string; distance: number }>;
+  `).all(pAll.blob, limit * 2) as Array<{ id: string; distance: number }>;
+  for (const r of vecResults) r.distance = normalizeVecDistance(r.distance, pAll.dt);
 
   const results: Array<{ fact: Fact; distance: number }> = [];
   for (const vr of vecResults) {

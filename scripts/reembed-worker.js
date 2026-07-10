@@ -21,7 +21,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql } from '../dist/db.js';
+import { initDatabase, getVecDtype, getVecTableDtype, embeddingToVecBlob, vecParamSql } from '../dist/db.js';
 import { generateEmbedding, generateExchangeEmbedding, initEmbeddings, EMBEDDING_VERSION, EMBEDDING_MODEL } from '../dist/embeddings.js';
 import { getIndexDir } from '../dist/paths.js';
 
@@ -92,19 +92,21 @@ async function reembedFacts(db) {
   let done = 0;
   for (const row of pending) {
     const emb = await generateEmbedding(row.fact);
-    const buf = Buffer.from(new Float32Array(emb).buffer);
+    const buf = Buffer.from(new Float32Array(emb).buffer); // facts.embedding column stays float32 (canonical source)
     // KR vector must be rebuilt together with the EN vector — a model change
     // invalidates both, and vec_facts_kr rows are not version-tracked.
     const krEmb = row.fact_kr ? await generateEmbedding(row.fact_kr) : null;
-    const krBuf = krEmb ? Buffer.from(new Float32Array(krEmb).buffer) : null;
     const tx = db.transaction(() => {
+      // dtype read INSIDE the tx — serialized against a migration swap.
+      const dtF = getVecTableDtype(db, 'vec_facts');
+      const dtK = getVecTableDtype(db, 'vec_facts_kr');
       db.prepare('UPDATE facts SET embedding = ?, embedding_version = ? WHERE id = ?')
         .run(buf, EMBEDDING_VERSION, row.id);
       db.prepare('DELETE FROM vec_facts WHERE id = ?').run(row.id);
-      db.prepare('INSERT INTO vec_facts (id, embedding) VALUES (?, ?)').run(row.id, buf);
+      db.prepare(`INSERT INTO vec_facts (id, embedding) VALUES (?, ${vecParamSql(dtF)})`).run(row.id, embeddingToVecBlob(emb, dtF));
       db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(row.id);
-      if (krBuf) {
-        db.prepare('INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ?)').run(row.id, krBuf);
+      if (krEmb) {
+        db.prepare(`INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ${vecParamSql(dtK)})`).run(row.id, embeddingToVecBlob(krEmb, dtK));
       }
     });
     tx();
@@ -128,10 +130,10 @@ async function embedKoreanFacts(db) {
   let done = 0;
   for (const row of rows) {
     const emb = await generateEmbedding(row.fact_kr);
-    const buf = Buffer.from(new Float32Array(emb).buffer);
     const tx = db.transaction(() => {
+      const dtK = getVecTableDtype(db, 'vec_facts_kr');
       db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(row.id);
-      db.prepare('INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ?)').run(row.id, buf);
+      db.prepare(`INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ${vecParamSql(dtK)})`).run(row.id, embeddingToVecBlob(emb, dtK));
     });
     tx();
     if (++done % 500 === 0) log(`facts-kr: ${done}/${rows.length}`);

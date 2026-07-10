@@ -23327,12 +23327,17 @@ async function queryBaseline(queryEmbedding) {
 
 // src/db.ts
 var VEC_INT8_SCALE = 127;
-function getVecDtype(db) {
+var VEC_TABLES = /* @__PURE__ */ new Set(["vec_exchanges", "vec_facts", "vec_facts_kr", "vec_categories"]);
+function getVecTableDtype(db, table) {
+  if (!VEC_TABLES.has(table)) throw new Error(`not a vec table: ${table}`);
   const row = db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
-  ).get();
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`
+  ).get(table);
   if (!row?.sql) return "int8";
   return /int8\s*\[/i.test(row.sql) ? "int8" : "float32";
+}
+function getVecDtype(db) {
+  return getVecTableDtype(db, "vec_exchanges");
 }
 function embeddingToVecBlob(embedding, dtype) {
   if (dtype === "int8") {
@@ -23535,19 +23540,19 @@ function initDatabase() {
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   db.exec(`
@@ -23639,6 +23644,10 @@ function initDatabase() {
 }
 
 // src/fact-db.ts
+function vecParamFor(db, table, embedding) {
+  const dt = getVecTableDtype(db, table);
+  return { sql: vecParamSql(dt), blob: embeddingToVecBlob(embedding, dt), dt };
+}
 function getRevisions(db, factId) {
   return db.prepare(
     "SELECT * FROM fact_revisions WHERE fact_id = ? ORDER BY created_at DESC"
@@ -23646,16 +23655,18 @@ function getRevisions(db, factId) {
 }
 function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85) {
   const canonProject = project ? canonicalizeProject(db, project) : project;
-  const buf = Buffer.from(new Float32Array(embedding).buffer);
   const candidateFetch = Math.max(limit * 2, 50);
   const fetch2 = (table) => {
     try {
-      return db.prepare(`
+      const p = vecParamFor(db, table, embedding);
+      const rows = db.prepare(`
         SELECT id, distance FROM ${table}
-        WHERE embedding MATCH ?
+        WHERE embedding MATCH ${p.sql}
         ORDER BY distance
         LIMIT ?
-      `).all(buf, candidateFetch);
+      `).all(p.blob, candidateFetch);
+      for (const r of rows) r.distance = normalizeVecDistance(r.distance, p.dt);
+      return rows;
     } catch {
       return [];
     }
@@ -23682,13 +23693,15 @@ function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85)
   return results;
 }
 function searchAllFacts(db, embedding, limit = 10, threshold = 0.6) {
+  const pAll = vecParamFor(db, "vec_facts", embedding);
   const vecResults = db.prepare(`
     SELECT id, distance
     FROM vec_facts
-    WHERE embedding MATCH ?
+    WHERE embedding MATCH ${pAll.sql}
     ORDER BY distance
     LIMIT ?
-  `).all(Buffer.from(new Float32Array(embedding).buffer), limit * 2);
+  `).all(pAll.blob, limit * 2);
+  for (const r of vecResults) r.distance = normalizeVecDistance(r.distance, pAll.dt);
   const results = [];
   for (const vr of vecResults) {
     const similarity = 1 - vr.distance * vr.distance / 2;

@@ -15,11 +15,20 @@ export const VEC_INT8_SCALE = 127;
  * declared column type cannot. Absent table ⇒ 'int8' (that is what
  * initDatabase creates for fresh DBs).
  */
-export function getVecDtype(db) {
-    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`).get();
+const VEC_TABLES = new Set(['vec_exchanges', 'vec_facts', 'vec_facts_kr', 'vec_categories']);
+/** Authoritative dtype of any vec0 table — read from the ACTUAL schema in
+ * sqlite_master (never a flag), so readers/writers can never disagree with a
+ * migration swap. Unknown/absent table defaults to int8 (the fresh-DB DDL). */
+export function getVecTableDtype(db, table) {
+    if (!VEC_TABLES.has(table))
+        throw new Error(`not a vec table: ${table}`);
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`).get(table);
     if (!row?.sql)
         return 'int8';
     return /int8\s*\[/i.test(row.sql) ? 'int8' : 'float32';
+}
+export function getVecDtype(db) {
+    return getVecTableDtype(db, 'vec_exchanges');
 }
 /** Convert a float embedding to the blob matching the table dtype. */
 export function embeddingToVecBlob(embedding, dtype) {
@@ -279,7 +288,7 @@ export function initDatabase() {
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // Korean-text vector index: facts are embedded twice (fact / fact_kr) because
@@ -288,7 +297,7 @@ export function initDatabase() {
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // Category embedding index: lets the ontology classifier retrieve the top-K
@@ -300,7 +309,7 @@ export function initDatabase() {
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // === Ontology Schema ===
