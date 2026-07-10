@@ -90,6 +90,16 @@ export function initDatabase() {
     // Enable WAL mode for better concurrency
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
+    // Cap the -wal file so it is truncated back after each checkpoint. The default
+    // (-1 = unlimited) let the WAL grow WITHOUT BOUND under this workload: many
+    // long-lived MCP-server readers (one per session) keep a read mark active
+    // almost continuously, so SQLite's auto-checkpoint can rarely advance past the
+    // oldest reader and the file only ever grew — observed live at 1.4 GB, which
+    // crawled the re-embed drain from ~13 to ~3 rows/s. Applied on EVERY connection
+    // (every worker + the MCP server), so no single writer can bloat the WAL no
+    // matter which path is active. 64 MiB is far above normal working-set needs; it
+    // only reclaims runaway file space after checkpoints.
+    db.pragma('journal_size_limit = 67108864');
     // Required so the exchanges_fts AFTER DELETE trigger fires when an exchange is
     // re-indexed via `INSERT OR REPLACE` (the REPLACE-induced delete does NOT fire
     // delete triggers unless recursive_triggers is on — verified: without it a

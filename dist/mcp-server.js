@@ -23393,6 +23393,7 @@ function initDatabase() {
   sqliteVec.load(db);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
+  db.pragma("journal_size_limit = 67108864");
   db.pragma("recursive_triggers = ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS exchanges (
