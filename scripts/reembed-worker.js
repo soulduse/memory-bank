@@ -23,7 +23,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { initDatabase, getVecDtype, getVecTableDtype, embeddingToVecBlob, vecParamSql } from '../dist/db.js';
 import { generateEmbedding, generateExchangeEmbedding, initEmbeddings, EMBEDDING_VERSION, EMBEDDING_MODEL } from '../dist/embeddings.js';
-import { getIndexDir, WORKER_PROMPT_PREFIXES } from '../dist/paths.js';
+import { getIndexDir } from '../dist/paths.js';
+import { buildReembedPending } from '../dist/reembed-selector.js';
 
 const FACTS_ONLY = process.argv.includes('--facts-only');
 const maxExArg = process.argv.indexOf('--max-exchanges');
@@ -171,17 +172,10 @@ async function reembedExchanges(db) {
   // would "self-heal" freshly-indexed pollution by embedding it straight into
   // vec_exchanges — re-injecting junk into semantic search. Match the exact
   // system-prompt leads (substr equality; no LIKE metacharacter pitfalls).
-  const notWorker = WORKER_PROMPT_PREFIXES
-    .map(() => 'substr(e.user_message, 1, ?) <> ?')
-    .join(' AND ');
-  const workerParams = WORKER_PROMPT_PREFIXES.flatMap((p) => [p.length, p]);
-  const PENDING = `
-      (e.embedding_version != ?
-       OR NOT EXISTS (SELECT 1 FROM vec_exchanges_rowids v WHERE v.id = e.id))
-      AND (${notWorker})`;
+  const { clause: PENDING, params: pendingParams } = buildReembedPending(EMBEDDING_VERSION);
   const total = db.prepare(
     `SELECT COUNT(*) AS n FROM exchanges e WHERE ${PENDING}`
-  ).get(EMBEDDING_VERSION, ...workerParams).n;
+  ).get(...pendingParams).n;
   if (!total) return 0;
   log(`exchanges: ${total} rows pending (processing newest first, max ${MAX_EXCHANGES})`);
 
@@ -195,7 +189,7 @@ async function reembedExchanges(db) {
       WHERE ${PENDING}
       ORDER BY e.timestamp DESC
       LIMIT ?
-    `).all(EMBEDDING_VERSION, ...workerParams, BATCH);
+    `).all(...pendingParams, BATCH);
     if (batch.length === 0) break;
 
     for (const row of batch) {
