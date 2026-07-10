@@ -11,7 +11,7 @@ import {
 } from './fact-db.js';
 import { initEmbeddings } from './embeddings.js';
 
-const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relationship.
+export const CONSOLIDATION_SYSTEM_PROMPT = `Compare two facts and determine their relationship.
 
 ## Relationship types (choose one)
 - DUPLICATE: same content - merge
