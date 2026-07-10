@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { initDatabase } from '../dist/db.js';
 import { buildReembedPending } from '../dist/reembed-selector.js';
+import { getExtractionConfig, pendingExtractionCoreQuery } from '../dist/pending-extraction.js';
 import { getTopFacts } from '../dist/fact-db.js';
 import { getLastSessionContext, formatSessionContinuity } from '../dist/session-continuity.js';
 import { predictIntent, formatIntentContext } from '../dist/intent-predictor.js';
@@ -115,12 +116,13 @@ async function main() {
     // 2c. Auto-resume cross-project extraction backfill (sessions that ended
     // before the fixed SessionEnd hook existed).
     try {
-      const pendingExtract = db.prepare(`
-        SELECT 1 FROM exchanges e
-        WHERE e.is_sidechain = 0 AND e.session_id IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM extraction_log l WHERE l.session_id = e.session_id)
-        LIMIT 1
-      `).get();
+      // Match the WORKER's exact pending-session predicate (single source:
+      // pendingExtractionCoreQuery) — the old bare NOT-IN-extraction_log check
+      // over-counted by 508 (sessions below MIN_EXCHANGES + memory-bank-llm
+      // pollution that the worker permanently skips), so it spawned the worker
+      // on EVERY session start for phantom work it could never clear.
+      const { sql: exSql, params: exParams } = pendingExtractionCoreQuery(getExtractionConfig());
+      const pendingExtract = db.prepare(`SELECT 1 FROM (${exSql}) LIMIT 1`).get(...exParams);
       if (pendingExtract) spawnDetached('backfill-extract-worker.js');
     } catch { /* non-fatal */ }
     const topFacts = getTopFacts(db, project, 10);
