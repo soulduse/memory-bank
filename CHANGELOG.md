@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`scripts/purge-llm-sessions.mjs`** — one-time cleanup for exchanges indexed
+  from LLM worker sessions BEFORE the v1.3.3 exclusion existed (they remain in
+  the exchanges/FTS/vec_exchanges search indexes and actively pollute both text
+  and semantic search; measured locally: 14,287 exchanges / 3,093 tool_calls /
+  14,287 vectors). Dry-run by default; `--apply` backs up the full polluted rows
+  into a timestamped sqlite file (verified row-for-row) BEFORE deleting inside a
+  single transaction, then post-verifies zero remainder. Discriminator matches
+  `isExcludedProject` exactly (slug ending `-memory-bank-llm`).
+
 ## [1.3.3] - 2026-07-08
 
 ### Fixed
