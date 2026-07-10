@@ -16,3 +16,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 20	-	배치 임베딩(reembed 가속)	-	76%ovl	-	-	discard	transformers.js mean-pooling pad 마스킹 불완전로 배치 드리프트 1.7~2.2e-2 > int8스텝 7.8e-3(batch크기 무관). batch=1만 동일. backfill/live 벡터 불일치 → revert
 21	fece954	reembed WAL checkpoint	-	-	10.3행/s(3.2→)	-	keep	상시리더+writer로 WAL 1.4GB 무한성장→드레인 크롤. 주기적 truncate 체크포인트로 WAL 유계(4MB), 드레인 3.2→10.3행/s
 22	3f93a58	inject 데몬 connect 前 기동	-	E2E응답ok	0.5s소켓	-	keep	데몬을 server.connect 앞으로(게이트 제거) + 실 MCP서버 프로세스 E2E 검증(소켓 0.5s, inject 응답 1034자). iter15 프로덕션 작동 확증
+23	5ad5385	journal_size_limit 64MiB	-	-	WAL유계	-	keep	전 연결 WAL 상한(iter21 reembed한정→근본). journal_size_limit -1→64MiB, 체크포인트후 파일 truncate, 1.4GB 팽창 구조적 차단
