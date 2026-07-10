@@ -29,6 +29,18 @@ const FACTS_ONLY = process.argv.includes('--facts-only');
 const maxExArg = process.argv.indexOf('--max-exchanges');
 const MAX_EXCHANGES = maxExArg > -1 ? parseInt(process.argv[maxExArg + 1], 10) : Infinity;
 const BATCH = 200;
+const WAL_CHECKPOINT_EVERY_BATCHES = 10; // ~2000 rows between WAL truncations
+
+// A heavy writer with many long-lived concurrent readers (every session's MCP
+// server holds the DB open) starves SQLite's auto-checkpoint: the checkpointer
+// can never advance past the oldest reader, so the -wal file grows without
+// bound. Observed live: a 1.4 GB WAL that crawled the drain to ~3 rows/s.
+// Periodically fold the WAL back with a TRUNCATE checkpoint. busy_timeout lets
+// it wait briefly for a checkpoint window; if readers never yield it stays a
+// no-op (PASSIVE-equivalent) rather than blocking the drain — best-effort.
+function checkpointWal(db) {
+  try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* best-effort */ }
+}
 
 const LOCK = path.join(getIndexDir(), 'reembed.lock');
 const MIGRATE_LOCK = path.join(getIndexDir(), 'migrate-vec-int8.lock');
@@ -163,6 +175,7 @@ async function reembedExchanges(db) {
 
   const toolStmt = db.prepare('SELECT tool_name FROM tool_calls WHERE exchange_id = ?');
   let done = 0;
+  let batchNo = 0;
   while (done < MAX_EXCHANGES) {
     if (migrationActive()) { log('int8 migration in progress — yielding (resume later)'); return; }
     const batch = db.prepare(`
@@ -196,8 +209,10 @@ async function reembedExchanges(db) {
       tx.immediate();
       done++;
     }
+    if (++batchNo % WAL_CHECKPOINT_EVERY_BATCHES === 0) checkpointWal(db);
     log(`exchanges: ${done}/${Math.min(total, MAX_EXCHANGES)}`);
   }
+  checkpointWal(db); // final fold-back before returning
   log(`exchanges: done this run (${done}, remaining ${Math.max(0, total - done)})`);
   return done;
 }
