@@ -11,3 +11,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 15	6fc6029	inject 훅 warm 데몬	-	출력동일	0.2s(2.3s→)	-	keep	매 프롬프트 훅 2.27→0.19~0.32s(7~11x): MCP서버 내 socket 사이드카+thin client+폴백, cold도 1.56s로 개선
 16	52467b6	inject-core+repeat-detector	-	출력동일	34ms(내부)	-	keep	요청당 initDatabase x2/재임베딩 제거: 데몬내부 80~224→30~38ms, E2E 0.10~0.13s
 17	91f2d3c	fact/category vec int8	-	22/25ovl(near-tie)	3.8ms(25.4→)	-	keep	fact검색 6.7x + 훅 E2E 0.065s(35x 누적) + sync-import NUL 바이트 발견(grep 불가시) 수정
+18	55748d4	src/search.ts formatResults	-	포맷동일	26ms(199~1600→)	-	keep	MCP search 응답: 줄수 힌트 DB-first(MAX line_end), zst 감압 제거, 재호출 1.4ms
