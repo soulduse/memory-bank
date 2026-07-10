@@ -26,3 +26,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 30	0ae0a63	워커프롬프트 coupling 테스트	-	3/3+drift포착	-	-	keep	프롬프트 튜닝시 오염탐지 조용히 깨지는 fragile coupling→프롬프트 export+3 테스트로 빌드타임 강제, 370 tests
 31	d791a0e	distance→similarity 단일source	-	잔존0	-	-	keep	L2→cosine 공식 9곳 복제→l2DistanceToSimilarity canonical. 관련성 게이트 divergence 방지, 370/370
 32	3ab5555	reembed tool 순서 결정론화	-	-	-	-	keep	reembed tool_calls 조회 ORDER BY rowid — 재임베딩 벡터가 원본 인덱싱 Tools순서와 결정론적 일치(embedding text 중앙화는 이미 확인)
+33	4a1f1f3	parser TODO 명확화	-	tsc클린	-	-	keep	오도성 TODO→known-limitation 경고(is_error always-0 소비자0 확인, 미래 오신뢰 예방). audit 3연속(exchange text/silent catch/parser)은 안전확인=커버리지 증거
