@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { initDatabase } from '../dist/db.js';
+import { buildReembedPending } from '../dist/reembed-selector.js';
 import { getTopFacts } from '../dist/fact-db.js';
 import { getLastSessionContext, formatSessionContinuity } from '../dist/session-continuity.js';
 import { predictIntent, formatIntentContext } from '../dist/intent-predictor.js';
@@ -79,9 +80,16 @@ async function main() {
       const pendingFact = db.prepare(
         'SELECT 1 FROM facts WHERE is_active = 1 AND embedding_version != ? LIMIT 1'
       ).get(EMBEDDING_VERSION);
-      const pendingEx = db.prepare(
-        'SELECT 1 FROM exchanges WHERE embedding_version != ? LIMIT 1'
-      ).get(EMBEDDING_VERSION);
+      // Match the WORKER's own selector exactly (single source: buildReembedPending)
+      // so the spawn condition can't drift from what the worker actually processes.
+      // The old version-only check missed the (b) MISSING-VECTOR backlog — rows
+      // that claim the current version but have no vec_exchanges row — so the
+      // re-embed worker was never auto-spawned to heal them across sessions
+      // (measured: 100k+ such rows sat undrained until manually kicked). It also
+      // excludes worker-prompt pollution, so a pure-pollution DB won't spin the
+      // worker up forever.
+      const { clause, params } = buildReembedPending(EMBEDDING_VERSION);
+      const pendingEx = db.prepare(`SELECT 1 FROM exchanges e WHERE ${clause} LIMIT 1`).get(...params);
       if (pendingFact || pendingEx) spawnDetached('reembed-worker.js');
     } catch {
       // Non-fatal: re-embedding resumes on a later session
