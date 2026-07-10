@@ -27226,9 +27226,9 @@ _Total unique facts discovered: ${allDiscovered.size}_
 });
 async function main() {
   console.error("Episodic Memory MCP server running via stdio");
+  startInjectDaemon();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  startInjectDaemon();
 }
 main().catch((error2) => {
   console.error("Server error:", error2);
