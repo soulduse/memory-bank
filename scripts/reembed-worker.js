@@ -7,7 +7,9 @@
  *   1. facts:     rows with embedding_version != current → re-embed `fact`
  *                 (facts.embedding + vec_facts), set version.
  *   2. facts KR:  rows with fact_kr but no vec_facts_kr row → embed fact_kr.
- *   3. exchanges: rows with embedding_version != current → re-embed
+ *   3. exchanges: rows with embedding_version != current, OR rows whose
+ *      vec_exchanges row is MISSING despite a current version stamp
+ *      (stamp-vector mismatch self-heal) → re-embed
  *                 (exchanges.embedding + vec_exchanges), newest first.
  *
  * Idempotent and resumable — progress is tracked by embedding_version /
@@ -139,8 +141,20 @@ async function embedKoreanFacts(db) {
 }
 
 async function reembedExchanges(db) {
+  // Two repair conditions, both must self-heal:
+  //  (a) stale version   — embedding_version != current (model upgrade)
+  //  (b) MISSING VECTOR  — the row CLAIMS the current version but has no
+  //      vec_exchanges row at all (exact id set-diff via the vec0 shadow
+  //      _rowids table, which carries a UNIQUE index on id). Historical
+  //      non-atomic writers left 197K such rows (measured 2026-07-11:
+  //      53% of the corpus invisible to semantic search while the
+  //      version-only selector saw "nothing pending" forever).
+  // A version-only selector can never see (b) — the stamp lies.
+  const PENDING = `
+      e.embedding_version != ?
+      OR NOT EXISTS (SELECT 1 FROM vec_exchanges_rowids v WHERE v.id = e.id)`;
   const total = db.prepare(
-    'SELECT COUNT(*) AS n FROM exchanges WHERE embedding_version != ?'
+    `SELECT COUNT(*) AS n FROM exchanges e WHERE ${PENDING}`
   ).get(EMBEDDING_VERSION).n;
   if (!total) return 0;
   log(`exchanges: ${total} rows pending (processing newest first, max ${MAX_EXCHANGES})`);
@@ -150,9 +164,9 @@ async function reembedExchanges(db) {
   while (done < MAX_EXCHANGES) {
     if (migrationActive()) { log('int8 migration in progress — yielding (resume later)'); return; }
     const batch = db.prepare(`
-      SELECT id, user_message, assistant_message FROM exchanges
-      WHERE embedding_version != ?
-      ORDER BY timestamp DESC
+      SELECT e.id, e.user_message, e.assistant_message FROM exchanges e
+      WHERE ${PENDING}
+      ORDER BY e.timestamp DESC
       LIMIT ?
     `).all(EMBEDDING_VERSION, BATCH);
     if (batch.length === 0) break;

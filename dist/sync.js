@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
-import { getExcludedProjects, isExcludedProject, detectCodingAgent } from './paths.js';
+import { getExcludedProjects, isExcludedProject, isWorkerPromptMessage, detectCodingAgent } from './paths.js';
 import { archiveFileExists, readArchiveFile, statArchiveFile } from './archive-io.js';
 const EXCLUSION_MARKERS = [
     '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>',
@@ -135,6 +135,9 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 const project = path.basename(path.dirname(file));
                 const exchanges = await parseConversation(file, project, file);
                 for (const exchange of exchanges) {
+                    // Worker-prompt exchange = ephemeral state, not knowledge — never index.
+                    if (isWorkerPromptMessage(exchange.userMessage))
+                        continue;
                     // Tag each exchange with the coding agent
                     exchange.codingAgent = codingAgent;
                     const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
