@@ -5,17 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.4] - 2026-07-11
 
-### Added
-- **`scripts/purge-llm-sessions.mjs`** — one-time cleanup for exchanges indexed
-  from LLM worker sessions BEFORE the v1.3.3 exclusion existed (they remain in
-  the exchanges/FTS/vec_exchanges search indexes and actively pollute both text
-  and semantic search; measured locally: 14,287 exchanges / 3,093 tool_calls /
-  14,287 vectors). Dry-run by default; `--apply` backs up the full polluted rows
-  into a timestamped sqlite file (verified row-for-row) BEFORE deleting inside a
-  single transaction, then post-verifies zero remainder. Discriminator matches
-  `isExcludedProject` exactly (slug ending `-memory-bank-llm`).
+### Performance
+- **Per-prompt context injection: ~2.3s → ~0.07s (35×)** — the UserPromptSubmit
+  hook used to pay a full cold start on EVERY prompt (measured: model load
+  1,130ms + node startup ~400ms + imports 186ms; the actual search was ~30ms).
+  A warm unix-socket sidecar (`startInjectDaemon`) now lives inside the
+  long-lived MCP server (which already has the embedding model loaded); the
+  hook is a thin client with a cold local fallback that behaves exactly as
+  before when no server is running. No new process, no new lifecycle: the
+  sidecar is unref'd and dies with the MCP server; stale sockets are probed
+  and reclaimed; socket mode 600. The shell wrapper also went from 4 node
+  spawns to 1 (JSON parsing moved into the client), so even the cold fallback
+  dropped ~2.3s → ~1.6s.
+- **Fact/category vector search: 25.4ms → 3.8ms (6.7×)** — vec_facts /
+  vec_facts_kr / vec_categories migrated to int8 (scripts/migrate-vec-facts-int8.mjs),
+  same quantization the exchanges index got in v1.3.x. All writers/readers are
+  dtype-aware via the new `getVecTableDtype()` (per-table, read from
+  sqlite_master — never a flag), with distances normalized BEFORE the
+  cross-language-index merge so mixed-dtype states mid-migration stay correct.
+  Fresh DBs now create all vec tables as int8. Measured quality: same-id
+  distance deviation ≤0.0098 (quantization noise), divergent picks are
+  near-ties only.
+- Exchanges vector KNN (int8, migrated on-machine via existing
+  migrate-vec-int8.mjs): 58.5ms → 13.4ms at equal corpus size.
+
+### Fixed
+- **Self-heal for stamp-vector mismatch** — 197K exchanges (53% of one
+  production corpus) claimed the current embedding_version but had NO vector
+  row, leaving them permanently invisible to semantic search AND to the
+  version-only reembed selector. The worker now also selects rows whose
+  vec_exchanges row is missing (exact set-diff via the vec0 shadow `_rowids`
+  table) and repairs them.
+- **Legacy worker-prompt pollution purge + guard** — Haiku worker sessions
+  from BEFORE the fixed LLM workdir ran with the caller project cwd, so their
+  transcripts were indexed under REAL project slugs (measured: 59,940
+  exchanges / ~16% of one corpus) where the v1.3.3 slug exclusion cannot see
+  them. `purge-llm-sessions.mjs --legacy-prompts` removes them (backup-first,
+  batched transactions), and `isWorkerPromptMessage()` now guards every
+  indexing path so re-parsed archives can never re-pollute.
+- `sync-import.ts` contained two literal NUL bytes (dedup-key separators) that
+  made grep treat the file as BINARY — invisible to every code sweep. Replaced
+  with the `\u0000` escape (runtime-identical) and made its vector writes
+  dtype-aware.
+- `bench-perf.mjs` / `bench/setup-bench-db.mjs`: dtype-aware against int8
+  production tables.
+
+### Operations note (per-machine)
+Existing installs get the code via plugin update, but the DB-side migrations
+run per machine: `node scripts/migrate-vec-int8.mjs` (exchanges),
+`node scripts/migrate-vec-facts-int8.mjs` (facts/categories),
+`node scripts/purge-llm-sessions.mjs --legacy-prompts --apply` (legacy
+pollution), then let the reembed worker drain missing vectors. All are
+idempotent, dry-run-first, backup-first.
 
 ## [1.3.3] - 2026-07-08
 
