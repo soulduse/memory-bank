@@ -23,3 +23,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 27	-	병렬 disjoint 드레인 워커	-	-	-	-	discard	10코어중 유휴 2.2뿐(reembed 4.3코어)+load 7.93. 2번째 워커는 oversubscription으로 1.5배에 그치며 부하 12+로 사용자 타 세션 해침(순음수). 배치임베딩(drift)에 이어 안전한 드레인 가속 없음 확정
 28	ac3dadb	오염 판별자 DRY통합+테스트	-	6/6 PASS	-	-	keep	purge LEGACY_PROMPT_PREFIXES 중복→buildPollutionWhere 단일source(drift버그 방지)+삭제술어 6 회귀테스트, 367/367
 29	6ec2641	int8 양자화 canonical 위임	-	바이트동일	-	-	keep	마이그레이션 하드코딩 quant→embeddingToVecBlob(VEC_INT8_SCALE 단일source). 스케일 튜닝시 벡터 corruption 방지, 5샘플 바이트동일 검증
+30	0ae0a63	워커프롬프트 coupling 테스트	-	3/3+drift포착	-	-	keep	프롬프트 튜닝시 오염탐지 조용히 깨지는 fragile coupling→프롬프트 export+3 테스트로 빌드타임 강제, 370 tests
