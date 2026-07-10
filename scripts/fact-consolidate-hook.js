@@ -77,9 +77,17 @@ async function main() {
     };
     try {
       const { EMBEDDING_VERSION } = await import('../dist/embeddings.js');
-      const pendingFact = db.prepare(
-        'SELECT 1 FROM facts WHERE is_active = 1 AND embedding_version != ? LIMIT 1'
-      ).get(EMBEDDING_VERSION);
+      // Match BOTH of the worker's fact conditions (reembedFacts: stale version;
+      // embedKoreanFacts: a fact_kr with no vec_facts_kr row) so a Korean-vector
+      // backlog also auto-spawns the worker — the version-only check missed it,
+      // the same coupling drift that hid the exchange missing-vector backlog.
+      const pendingFact = db.prepare(`
+        SELECT 1 FROM facts f WHERE f.is_active = 1 AND (
+          f.embedding_version != ?
+          OR (f.fact_kr IS NOT NULL AND f.fact_kr != ''
+              AND NOT EXISTS (SELECT 1 FROM vec_facts_kr_rowids v WHERE v.id = f.id))
+        ) LIMIT 1
+      `).get(EMBEDDING_VERSION);
       // Match the WORKER's own selector exactly (single source: buildReembedPending)
       // so the spawn condition can't drift from what the worker actually processes.
       // The old version-only check missed the (b) MISSING-VECTOR backlog — rows
