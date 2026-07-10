@@ -20,3 +20,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 24	b68d66d	reembed 선택자 오염제외	-	제외검증PASS	-	-	keep	self-heal이 워커-프롬프트 오염(벡터없음)을 임베딩해 검색에 재주입하던 것 차단, WORKER_PROMPT_PREFIXES substr 제외
 25	c3fcec0	reembed 선택자 추출+테스트	-	6/6 PASS	-	-	keep	고위험 self-heal/오염제외 선택자를 buildReembedPending로 추출+6 회귀테스트(실 vec0 DB), 361/361
 26	-	two-stage KNN(bit prefilter)	-	현18ms충분	-	-	discard	192k벡터 int8 brute 18ms=체감불가. bit 이중인덱스 유지보수(전write)+binary quant recall손실 리스크 vs 이득 없음(18→5ms 체감불가). 코퍼스 수백만·brute>100ms시 재검토
+27	-	병렬 disjoint 드레인 워커	-	-	-	-	discard	10코어중 유휴 2.2뿐(reembed 4.3코어)+load 7.93. 2번째 워커는 oversubscription으로 1.5배에 그치며 부하 12+로 사용자 타 세션 해침(순음수). 배치임베딩(drift)에 이어 안전한 드레인 가속 없음 확정
