@@ -179,7 +179,11 @@ async function reembedExchanges(db) {
   if (!total) return 0;
   log(`exchanges: ${total} rows pending (processing newest first, max ${MAX_EXCHANGES})`);
 
-  const toolStmt = db.prepare('SELECT tool_name FROM tool_calls WHERE exchange_id = ?');
+  // ORDER BY rowid = insertion order = the parse order the ORIGINAL index used
+  // when it built the 'Tools: a, b, ...' embedding text (exchange.toolCalls in
+  // order). Guarantees a re-embedded vector matches the first-indexed one for
+  // the same row instead of drifting on a nondeterministic tool ordering.
+  const toolStmt = db.prepare('SELECT tool_name FROM tool_calls WHERE exchange_id = ? ORDER BY rowid');
   let done = 0;
   let batchNo = 0;
   while (done < MAX_EXCHANGES) {
