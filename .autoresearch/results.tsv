@@ -24,3 +24,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 28	ac3dadb	오염 판별자 DRY통합+테스트	-	6/6 PASS	-	-	keep	purge LEGACY_PROMPT_PREFIXES 중복→buildPollutionWhere 단일source(drift버그 방지)+삭제술어 6 회귀테스트, 367/367
 29	6ec2641	int8 양자화 canonical 위임	-	바이트동일	-	-	keep	마이그레이션 하드코딩 quant→embeddingToVecBlob(VEC_INT8_SCALE 단일source). 스케일 튜닝시 벡터 corruption 방지, 5샘플 바이트동일 검증
 30	0ae0a63	워커프롬프트 coupling 테스트	-	3/3+drift포착	-	-	keep	프롬프트 튜닝시 오염탐지 조용히 깨지는 fragile coupling→프롬프트 export+3 테스트로 빌드타임 강제, 370 tests
+31	d791a0e	distance→similarity 단일source	-	잔존0	-	-	keep	L2→cosine 공식 9곳 복제→l2DistanceToSimilarity canonical. 관련성 게이트 divergence 방지, 370/370
