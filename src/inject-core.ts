@@ -1,4 +1,4 @@
-import { initDatabase } from './db.js';
+import { getSearchDb } from './search.js';
 import { searchSimilarFacts } from './fact-db.js';
 import { generateEmbedding, initEmbeddings, queryBaseline } from './embeddings.js';
 import { getRelatedFacts } from './ontology-db.js';
@@ -44,8 +44,11 @@ export async function computeInjectContext(
     const embedding = await generateEmbedding(userPrompt, 'query');
     const baseline = await queryBaseline(embedding);
 
-    const db = initDatabase();
-    try {
+    // Cached long-lived handle (file-identity checked) — initDatabase()'s
+    // full migration pass per request costs ~38ms and is pure overhead in the
+    // warm daemon. NOT closed here: getSearchDb owns its lifecycle.
+    const db = getSearchDb();
+    {
       // threshold 0: take top-k by distance, then gate by baseline margin below
       const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
       const results = candidates.filter((r) => {
@@ -83,7 +86,7 @@ export async function computeInjectContext(
 
       // Detect repeated prompts (best-effort)
       try {
-        const repeats = await detectRepeat(userPrompt, project, 2, 0.85);
+        const repeats = await detectRepeat(userPrompt, project, 2, 0.85, { embedding, db });
         const repeatCtx = formatRepeatContext(repeats);
         if (repeatCtx) {
           lines.push('');
@@ -97,8 +100,6 @@ export async function computeInjectContext(
         duration_ms: Date.now() - t0, via,
       });
       return lines.join('\n') + '\n';
-    } finally {
-      db.close();
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

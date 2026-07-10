@@ -27,7 +27,7 @@ function fileIdent(p) {
         return null; // file missing — force reopen (initDatabase recreates it)
     }
 }
-function getSearchDb() {
+export function getSearchDb() {
     const p = getDbPath();
     const ident = fileIdent(p);
     if (cachedSearchDb && cachedSearchDb.open &&

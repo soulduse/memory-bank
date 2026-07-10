@@ -31,7 +31,7 @@ function fileIdent(p: string): string | null {
   }
 }
 
-function getSearchDb(): DatabaseType.Database {
+export function getSearchDb(): DatabaseType.Database {
   const p = getDbPath();
   const ident = fileIdent(p);
   if (

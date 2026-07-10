@@ -23130,7 +23130,7 @@ var StdioServerTransport = class {
 
 // src/inject-daemon.ts
 import net from "node:net";
-import fs4 from "node:fs";
+import fs6 from "node:fs";
 import path4 from "node:path";
 
 // src/paths.ts
@@ -23878,252 +23878,12 @@ function rowToRelation(row) {
   };
 }
 
-// src/repeat-detector.ts
-async function detectRepeat(prompt, project, limit = 3, threshold = 0.82) {
-  await initEmbeddings();
-  const embedding = await generateEmbedding(prompt, "query");
-  const db = initDatabase();
-  try {
-    const vecDtype = getVecDtype(db);
-    const vecResults = db.prepare(`
-      SELECT id, distance
-      FROM vec_exchanges
-      WHERE embedding MATCH ${vecParamSql(vecDtype)}
-      ORDER BY distance
-      LIMIT ?
-    `).all(
-      embeddingToVecBlob(embedding, vecDtype),
-      limit * 3
-    );
-    const matches = [];
-    for (const vr of vecResults) {
-      const d2 = normalizeVecDistance(vr.distance, vecDtype);
-      const similarity = 1 - d2 * d2 / 2;
-      if (similarity < threshold) continue;
-      const row = db.prepare(`
-        SELECT id, project, timestamp, user_message, assistant_message,
-               archive_path, line_start, line_end
-        FROM exchanges WHERE id = ? AND embedding_version = ?
-      `).get(vr.id, EMBEDDING_VERSION);
-      if (!row) continue;
-      if (project && row["project"] !== project) continue;
-      const assistantMsg = row["assistant_message"];
-      const assistantSummary = assistantMsg.split("\n").filter((line) => line.trim().length > 10).slice(0, 3).join("\n").substring(0, 300);
-      matches.push({
-        exchangeId: row["id"],
-        project: row["project"],
-        timestamp: row["timestamp"],
-        userMessage: row["user_message"].substring(0, 200),
-        assistantSummary,
-        similarity,
-        archivePath: row["archive_path"],
-        lineStart: row["line_start"],
-        lineEnd: row["line_end"]
-      });
-      if (matches.length >= limit) break;
-    }
-    return matches;
-  } finally {
-    db.close();
-  }
-}
-function formatRepeatContext(matches) {
-  if (matches.length === 0) return "";
-  const lines = ["\u{1F504} \uBE44\uC2B7\uD55C \uC9C8\uBB38\uC744 \uC774\uC804\uC5D0 \uD558\uC2E0 \uC801\uC774 \uC788\uC2B5\uB2C8\uB2E4:"];
-  for (const m2 of matches) {
-    const date3 = m2.timestamp.slice(0, 10);
-    const sim = Math.round(m2.similarity * 100);
-    lines.push(`
-[${date3}, ${sim}% \uC720\uC0AC] "${m2.userMessage.trim()}..."`);
-    lines.push(`\u2192 ${m2.assistantSummary.trim()}`);
-    lines.push(`  (Lines ${m2.lineStart}-${m2.lineEnd} in ${m2.archivePath})`);
-  }
-  return lines.join("\n");
-}
-
-// src/inject-log.ts
-import fs3 from "fs";
-import path3 from "path";
-var MAX_LOG_BYTES = 5 * 1024 * 1024;
-function getInjectLogPath() {
-  const dir = path3.join(getIndexDir(), "logs");
-  if (!fs3.existsSync(dir)) {
-    fs3.mkdirSync(dir, { recursive: true });
-  }
-  return path3.join(dir, "inject-context.jsonl");
-}
-function appendInjectLog(entry) {
-  try {
-    const logPath = getInjectLogPath();
-    try {
-      const stat = fs3.statSync(logPath);
-      if (stat.size > MAX_LOG_BYTES) {
-        fs3.renameSync(logPath, `${logPath}.old`);
-      }
-    } catch {
-    }
-    const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...entry });
-    fs3.appendFileSync(logPath, line + "\n");
-  } catch {
-  }
-}
-
-// src/inject-core.ts
-var TOP_K = 5;
-var BASELINE_MARGIN = 0.045;
-var MAX_CONTEXT_FACTS = 8;
-async function computeInjectContext(userPrompt, project, via) {
-  const t0 = Date.now();
-  if (!userPrompt || userPrompt.length < 20) {
-    appendInjectLog({ status: "skipped", project, prompt_len: userPrompt?.length ?? 0, via });
-    return "";
-  }
-  try {
-    await initEmbeddings();
-    const embedding = await generateEmbedding(userPrompt, "query");
-    const baseline = await queryBaseline(embedding);
-    const db = initDatabase();
-    try {
-      const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
-      const results = candidates.filter((r) => {
-        const similarity = 1 - r.distance * r.distance / 2;
-        return similarity - baseline >= BASELINE_MARGIN;
-      });
-      if (results.length === 0) {
-        appendInjectLog({
-          status: "no-match",
-          project,
-          prompt_len: userPrompt.length,
-          candidates: candidates.length,
-          injected: 0,
-          duration_ms: Date.now() - t0,
-          via
-        });
-        return "";
-      }
-      const seenIds = new Set(results.map((r) => r.fact.id));
-      const expandedFacts = [...results.map((r) => ({ fact: r.fact, note: "" }))];
-      for (const { fact } of results.slice(0, 3)) {
-        const related = getRelatedFacts(db, fact.id, 1, 0.6, 0.2, project);
-        for (const { fact: relFact, relation } of related) {
-          if (!seenIds.has(relFact.id) && expandedFacts.length < MAX_CONTEXT_FACTS) {
-            seenIds.add(relFact.id);
-            expandedFacts.push({ fact: relFact, note: `[${relation.relation_type}]` });
-          }
-        }
-      }
-      const lines = ["\u{1F4CC} \uAD00\uB828 \uACFC\uAC70 \uACB0\uC815:"];
-      for (const { fact, note } of expandedFacts) {
-        const dateStr = fact.created_at.slice(0, 10);
-        lines.push(`- ${note ? note + " " : ""}[${fact.category}] ${fact.fact} (${dateStr})`);
-      }
-      try {
-        const repeats = await detectRepeat(userPrompt, project, 2, 0.85);
-        const repeatCtx = formatRepeatContext(repeats);
-        if (repeatCtx) {
-          lines.push("");
-          lines.push(repeatCtx);
-        }
-      } catch {
-      }
-      appendInjectLog({
-        status: "injected",
-        project,
-        prompt_len: userPrompt.length,
-        candidates: candidates.length,
-        injected: expandedFacts.length,
-        duration_ms: Date.now() - t0,
-        via
-      });
-      return lines.join("\n") + "\n";
-    } finally {
-      db.close();
-    }
-  } catch (error2) {
-    const message = error2 instanceof Error ? error2.message : String(error2);
-    appendInjectLog({
-      status: "error",
-      project,
-      prompt_len: userPrompt.length,
-      duration_ms: Date.now() - t0,
-      error: message.slice(0, 300),
-      via
-    });
-    return "";
-  }
-}
-
-// src/inject-daemon.ts
-function injectSocketPath() {
-  return path4.join(getIndexDir(), "inject-daemon.sock");
-}
-function startInjectDaemon() {
-  const sockPath = injectSocketPath();
-  const server2 = net.createServer((conn) => {
-    let buf = "";
-    conn.setTimeout(1e4, () => conn.destroy());
-    conn.on("error", () => {
-    });
-    conn.on("data", (chunk) => {
-      buf += chunk.toString("utf8");
-      const nl = buf.indexOf("\n");
-      if (nl < 0) {
-        if (buf.length > 1e6) conn.destroy();
-        return;
-      }
-      const line = buf.slice(0, nl);
-      void (async () => {
-        try {
-          const req = JSON.parse(line);
-          const context = await computeInjectContext(
-            String(req.prompt ?? ""),
-            String(req.cwd ?? process.cwd()),
-            "daemon"
-          );
-          conn.end(JSON.stringify({ ok: true, context }) + "\n");
-        } catch {
-          try {
-            conn.end(JSON.stringify({ ok: false }) + "\n");
-          } catch {
-          }
-        }
-      })();
-    });
-  });
-  server2.on("error", (err) => {
-    if (err.code !== "EADDRINUSE") return;
-    const probe = net.connect(sockPath);
-    probe.setTimeout(500, () => probe.destroy());
-    probe.on("connect", () => probe.destroy());
-    probe.on("error", () => {
-      try {
-        fs4.unlinkSync(sockPath);
-        server2.listen(sockPath, onListen);
-      } catch {
-      }
-    });
-  });
-  const onListen = () => {
-    try {
-      fs4.chmodSync(sockPath, 384);
-    } catch {
-    }
-    void initEmbeddings().catch(() => {
-    });
-  };
-  try {
-    server2.listen(sockPath, onListen);
-    server2.unref();
-  } catch {
-  }
-}
-
 // src/search.ts
-import fs6 from "fs";
+import fs4 from "fs";
 import readline from "readline";
 
 // src/archive-io.ts
-import fs5 from "fs";
+import fs3 from "fs";
 import { Readable, Transform, pipeline as pipeline2 } from "stream";
 import * as zlib from "node:zlib";
 var ZST_SUFFIX = ".zst";
@@ -24140,7 +23900,7 @@ function resolveArchiveFile(filePath) {
   const variant = filePath.endsWith(ZST_SUFFIX) ? filePath.slice(0, -ZST_SUFFIX.length) : filePath + ZST_SUFFIX;
   const statOrNull = (p) => {
     try {
-      return fs5.statSync(p);
+      return fs3.statSync(p);
     } catch {
       return null;
     }
@@ -24185,7 +23945,7 @@ function readArchiveFile(filePath) {
   if (!resolved) {
     throw Object.assign(new Error(`ENOENT: no such file, open '${filePath}'`), { code: "ENOENT" });
   }
-  const buf = fs5.readFileSync(resolved);
+  const buf = fs3.readFileSync(resolved);
   if (resolved.endsWith(ZST_SUFFIX)) {
     return requireZstdSync()(buf).toString("utf-8");
   }
@@ -24194,27 +23954,27 @@ function readArchiveFile(filePath) {
 function createArchiveReadStream(filePath) {
   const resolved = resolveArchiveFile(filePath);
   if (!resolved) {
-    return fs5.createReadStream(filePath);
+    return fs3.createReadStream(filePath);
   }
   if (resolved.endsWith(ZST_SUFFIX)) {
     if (zstd.createZstdDecompress) {
-      const source = fs5.createReadStream(resolved);
+      const source = fs3.createReadStream(resolved);
       const decompress = zstd.createZstdDecompress();
       const limiter = createByteLimit(maxDecompressedBytes());
       pipeline2(source, decompress, limiter, () => {
       });
       return limiter;
     }
-    const content = requireZstdSync()(fs5.readFileSync(resolved));
+    const content = requireZstdSync()(fs3.readFileSync(resolved));
     return Readable.from([content]);
   }
-  return fs5.createReadStream(resolved);
+  return fs3.createReadStream(resolved);
 }
 function statArchiveFile(filePath) {
   const resolved = resolveArchiveFile(filePath);
   if (!resolved) return null;
   try {
-    return fs5.statSync(resolved);
+    return fs3.statSync(resolved);
   } catch {
     return null;
   }
@@ -24226,7 +23986,7 @@ var cachedSearchDbPath = null;
 var cachedSearchDbIdent = null;
 function fileIdent(p) {
   try {
-    const st = fs6.statSync(p);
+    const st = fs4.statSync(p);
     return `${st.dev}:${st.ino}`;
   } catch {
     return null;
@@ -24710,6 +24470,248 @@ async function formatMultiConceptResults(results, concepts) {
 `;
   }
   return output;
+}
+
+// src/repeat-detector.ts
+async function detectRepeat(prompt, project, limit = 3, threshold = 0.82, opts = {}) {
+  let embedding = opts.embedding;
+  if (!embedding) {
+    await initEmbeddings();
+    embedding = await generateEmbedding(prompt, "query");
+  }
+  const ownDb = !opts.db;
+  const db = opts.db ?? initDatabase();
+  try {
+    const vecDtype = getVecDtype(db);
+    const vecResults = db.prepare(`
+      SELECT id, distance
+      FROM vec_exchanges
+      WHERE embedding MATCH ${vecParamSql(vecDtype)}
+      ORDER BY distance
+      LIMIT ?
+    `).all(
+      embeddingToVecBlob(embedding, vecDtype),
+      limit * 3
+    );
+    const matches = [];
+    for (const vr of vecResults) {
+      const d2 = normalizeVecDistance(vr.distance, vecDtype);
+      const similarity = 1 - d2 * d2 / 2;
+      if (similarity < threshold) continue;
+      const row = db.prepare(`
+        SELECT id, project, timestamp, user_message, assistant_message,
+               archive_path, line_start, line_end
+        FROM exchanges WHERE id = ? AND embedding_version = ?
+      `).get(vr.id, EMBEDDING_VERSION);
+      if (!row) continue;
+      if (project && row["project"] !== project) continue;
+      const assistantMsg = row["assistant_message"];
+      const assistantSummary = assistantMsg.split("\n").filter((line) => line.trim().length > 10).slice(0, 3).join("\n").substring(0, 300);
+      matches.push({
+        exchangeId: row["id"],
+        project: row["project"],
+        timestamp: row["timestamp"],
+        userMessage: row["user_message"].substring(0, 200),
+        assistantSummary,
+        similarity,
+        archivePath: row["archive_path"],
+        lineStart: row["line_start"],
+        lineEnd: row["line_end"]
+      });
+      if (matches.length >= limit) break;
+    }
+    return matches;
+  } finally {
+    if (ownDb) db.close();
+  }
+}
+function formatRepeatContext(matches) {
+  if (matches.length === 0) return "";
+  const lines = ["\u{1F504} \uBE44\uC2B7\uD55C \uC9C8\uBB38\uC744 \uC774\uC804\uC5D0 \uD558\uC2E0 \uC801\uC774 \uC788\uC2B5\uB2C8\uB2E4:"];
+  for (const m2 of matches) {
+    const date3 = m2.timestamp.slice(0, 10);
+    const sim = Math.round(m2.similarity * 100);
+    lines.push(`
+[${date3}, ${sim}% \uC720\uC0AC] "${m2.userMessage.trim()}..."`);
+    lines.push(`\u2192 ${m2.assistantSummary.trim()}`);
+    lines.push(`  (Lines ${m2.lineStart}-${m2.lineEnd} in ${m2.archivePath})`);
+  }
+  return lines.join("\n");
+}
+
+// src/inject-log.ts
+import fs5 from "fs";
+import path3 from "path";
+var MAX_LOG_BYTES = 5 * 1024 * 1024;
+function getInjectLogPath() {
+  const dir = path3.join(getIndexDir(), "logs");
+  if (!fs5.existsSync(dir)) {
+    fs5.mkdirSync(dir, { recursive: true });
+  }
+  return path3.join(dir, "inject-context.jsonl");
+}
+function appendInjectLog(entry) {
+  try {
+    const logPath = getInjectLogPath();
+    try {
+      const stat = fs5.statSync(logPath);
+      if (stat.size > MAX_LOG_BYTES) {
+        fs5.renameSync(logPath, `${logPath}.old`);
+      }
+    } catch {
+    }
+    const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...entry });
+    fs5.appendFileSync(logPath, line + "\n");
+  } catch {
+  }
+}
+
+// src/inject-core.ts
+var TOP_K = 5;
+var BASELINE_MARGIN = 0.045;
+var MAX_CONTEXT_FACTS = 8;
+async function computeInjectContext(userPrompt, project, via) {
+  const t0 = Date.now();
+  if (!userPrompt || userPrompt.length < 20) {
+    appendInjectLog({ status: "skipped", project, prompt_len: userPrompt?.length ?? 0, via });
+    return "";
+  }
+  try {
+    await initEmbeddings();
+    const embedding = await generateEmbedding(userPrompt, "query");
+    const baseline = await queryBaseline(embedding);
+    const db = getSearchDb();
+    {
+      const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
+      const results = candidates.filter((r) => {
+        const similarity = 1 - r.distance * r.distance / 2;
+        return similarity - baseline >= BASELINE_MARGIN;
+      });
+      if (results.length === 0) {
+        appendInjectLog({
+          status: "no-match",
+          project,
+          prompt_len: userPrompt.length,
+          candidates: candidates.length,
+          injected: 0,
+          duration_ms: Date.now() - t0,
+          via
+        });
+        return "";
+      }
+      const seenIds = new Set(results.map((r) => r.fact.id));
+      const expandedFacts = [...results.map((r) => ({ fact: r.fact, note: "" }))];
+      for (const { fact } of results.slice(0, 3)) {
+        const related = getRelatedFacts(db, fact.id, 1, 0.6, 0.2, project);
+        for (const { fact: relFact, relation } of related) {
+          if (!seenIds.has(relFact.id) && expandedFacts.length < MAX_CONTEXT_FACTS) {
+            seenIds.add(relFact.id);
+            expandedFacts.push({ fact: relFact, note: `[${relation.relation_type}]` });
+          }
+        }
+      }
+      const lines = ["\u{1F4CC} \uAD00\uB828 \uACFC\uAC70 \uACB0\uC815:"];
+      for (const { fact, note } of expandedFacts) {
+        const dateStr = fact.created_at.slice(0, 10);
+        lines.push(`- ${note ? note + " " : ""}[${fact.category}] ${fact.fact} (${dateStr})`);
+      }
+      try {
+        const repeats = await detectRepeat(userPrompt, project, 2, 0.85, { embedding, db });
+        const repeatCtx = formatRepeatContext(repeats);
+        if (repeatCtx) {
+          lines.push("");
+          lines.push(repeatCtx);
+        }
+      } catch {
+      }
+      appendInjectLog({
+        status: "injected",
+        project,
+        prompt_len: userPrompt.length,
+        candidates: candidates.length,
+        injected: expandedFacts.length,
+        duration_ms: Date.now() - t0,
+        via
+      });
+      return lines.join("\n") + "\n";
+    }
+  } catch (error2) {
+    const message = error2 instanceof Error ? error2.message : String(error2);
+    appendInjectLog({
+      status: "error",
+      project,
+      prompt_len: userPrompt.length,
+      duration_ms: Date.now() - t0,
+      error: message.slice(0, 300),
+      via
+    });
+    return "";
+  }
+}
+
+// src/inject-daemon.ts
+function injectSocketPath() {
+  return path4.join(getIndexDir(), "inject-daemon.sock");
+}
+function startInjectDaemon() {
+  const sockPath = injectSocketPath();
+  const server2 = net.createServer((conn) => {
+    let buf = "";
+    conn.setTimeout(1e4, () => conn.destroy());
+    conn.on("error", () => {
+    });
+    conn.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) {
+        if (buf.length > 1e6) conn.destroy();
+        return;
+      }
+      const line = buf.slice(0, nl);
+      void (async () => {
+        try {
+          const req = JSON.parse(line);
+          const context = await computeInjectContext(
+            String(req.prompt ?? ""),
+            String(req.cwd ?? process.cwd()),
+            "daemon"
+          );
+          conn.end(JSON.stringify({ ok: true, context }) + "\n");
+        } catch {
+          try {
+            conn.end(JSON.stringify({ ok: false }) + "\n");
+          } catch {
+          }
+        }
+      })();
+    });
+  });
+  server2.on("error", (err) => {
+    if (err.code !== "EADDRINUSE") return;
+    const probe = net.connect(sockPath);
+    probe.setTimeout(500, () => probe.destroy());
+    probe.on("connect", () => probe.destroy());
+    probe.on("error", () => {
+      try {
+        fs6.unlinkSync(sockPath);
+        server2.listen(sockPath, onListen);
+      } catch {
+      }
+    });
+  });
+  const onListen = () => {
+    try {
+      fs6.chmodSync(sockPath, 384);
+    } catch {
+    }
+    void initEmbeddings().catch(() => {
+    });
+  };
+  try {
+    server2.listen(sockPath, onListen);
+    server2.unref();
+  } catch {
+  }
 }
 
 // node_modules/marked/lib/marked.esm.js
