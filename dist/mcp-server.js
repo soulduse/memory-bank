@@ -24295,21 +24295,44 @@ async function searchConversations(query2, options = {}) {
     };
   });
 }
+var lineCountCache = /* @__PURE__ */ new Map();
+var LINE_COUNT_CACHE_MAX = 2e3;
 async function countLines(filePath) {
   try {
-    const fileStream = createArchiveReadStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-    let count = 0;
-    for await (const line of rl) {
-      if (line.trim()) count++;
-    }
-    return count;
-  } catch (error2) {
-    return 0;
+    const row = getSearchDb().prepare(
+      "SELECT MAX(line_end) AS n FROM exchanges WHERE archive_path = ?"
+    ).get(filePath);
+    if (row?.n) return row.n;
+  } catch {
   }
+  let key = filePath;
+  try {
+    const st = statArchiveFile(filePath);
+    if (st) key = `${filePath}:${st.mtimeMs}:${st.size}`;
+  } catch {
+  }
+  const hit = lineCountCache.get(key);
+  if (hit !== void 0) return hit;
+  const scan = (async () => {
+    try {
+      const fileStream = createArchiveReadStream(filePath);
+      const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity
+      });
+      let count = 0;
+      for await (const line of rl) {
+        if (line.trim()) count++;
+      }
+      return count;
+    } catch {
+      lineCountCache.delete(key);
+      return 0;
+    }
+  })();
+  if (lineCountCache.size >= LINE_COUNT_CACHE_MAX) lineCountCache.clear();
+  lineCountCache.set(key, scan);
+  return scan;
 }
 function getFileSizeInKB(filePath) {
   const stats = statArchiveFile(filePath);
@@ -24323,6 +24346,7 @@ async function formatResults(results) {
   let output = `Found ${results.length} relevant conversation${results.length > 1 ? "s" : ""}:
 
 `;
+  const lineCounts = await Promise.all(results.map((r) => countLines(r.exchange.archivePath)));
   for (let index = 0; index < results.length; index++) {
     const result = results[index];
     const date3 = new Date(result.exchange.timestamp).toISOString().split("T")[0];
@@ -24350,7 +24374,7 @@ async function formatResults(results) {
 `;
     }
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
+    const totalLines = lineCounts[index];
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
     output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)
 
