@@ -45,20 +45,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { initDatabase } from '../dist/db.js';
 import { getIndexDir } from '../dist/paths.js';
+import { buildPollutionWhere } from '../dist/pollution-predicate.js';
 
-// Same discriminator as paths.ts isExcludedProject's built-in exclusion:
-// the slug must END with -memory-bank-llm.
-const SLUG_SUFFIX = '-memory-bank-llm';
 
-// Exact leading text of every Haiku worker system prompt that ever ran with
-// the caller's cwd (pre-fixed-workdir era). Kept as full first sentences so a
-// prefix can never match ordinary human text by accident.
-const LEGACY_PROMPT_PREFIXES = [
-  'You are an expert at extracting long-term facts from conversations.',       // fact-extractor
-  'You are an ontology classifier for technical decision facts.',              // ontology batch classify
-  'You are analyzing relationships between technical decision facts.',         // ontology relation detect
-  'Compare two facts and determine their relationship.',                       // consolidator
-];
 
 const apply = process.argv.includes('--apply');
 const legacyPrompts = process.argv.includes('--legacy-prompts');
@@ -66,17 +55,10 @@ const legacyPrompts = process.argv.includes('--legacy-prompts');
 function main() {
   const db = initDatabase();
   try {
-    // Build the pollution predicate once; every count / backup / delete below
-    // uses the SAME (where, params) so they can never diverge.
-    const clauses = ['project LIKE ?'];
-    const params = [`%${SLUG_SUFFIX}`];
-    if (legacyPrompts) {
-      for (const p of LEGACY_PROMPT_PREFIXES) {
-        clauses.push('substr(user_message, 1, ?) = ?'); // exact prefix — no LIKE metacharacter pitfalls
-        params.push(p.length, p);
-      }
-    }
-    const where = clauses.join(' OR ');
+    // Build the pollution predicate once (shared src helper, canonical prefixes);
+    // every count / backup / delete below uses the SAME (where, params) so they
+    // can never diverge.
+    const { where, params } = buildPollutionWhere({ legacyPrompts });
 
     const counts = {
       exchanges: db.prepare(`SELECT count(*) AS n FROM exchanges WHERE ${where}`).get(...params).n,
