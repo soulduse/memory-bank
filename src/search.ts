@@ -1,4 +1,4 @@
-import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
 import { getDbPath } from './paths.js';
 import { initEmbeddings, generateEmbedding, EMBEDDING_VERSION } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
@@ -698,7 +698,7 @@ export async function getKnowledgeContext(
     const enrichedFacts: KnowledgeContext['facts'] = [];
 
     for (const { fact, distance } of factResults) {
-      const similarity = parseFloat((1 - (distance * distance) / 2).toFixed(3));
+      const similarity = parseFloat(l2DistanceToSimilarity(distance).toFixed(3));
       const catInfo = fact.ontology_category_id
         ? categoryMap.get(fact.ontology_category_id)
         : undefined;

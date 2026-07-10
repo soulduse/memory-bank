@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import type { Fact, FactRevision } from './types.js';
 import { canonicalizeProject } from './project-canon.js';
 import { EMBEDDING_VERSION } from './embeddings.js';
-import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
 
 type FactVecTable = 'vec_facts' | 'vec_facts_kr' | 'vec_categories';
 
@@ -219,7 +219,7 @@ export function searchSimilarFacts(
   const results: Array<{ fact: Fact; distance: number }> = [];
   for (const vr of merged) {
     // L2 distance -> cosine similarity approximation
-    const similarity = 1 - (vr.distance * vr.distance) / 2;
+    const similarity = l2DistanceToSimilarity(vr.distance);
     if (similarity < threshold) continue;
 
     // embedding_version filter: during a model migration the vector tables
@@ -304,7 +304,7 @@ export function searchSimilarFactsSameScope(
 
     results = [];
     for (const vr of merged) {
-      const similarity = 1 - (vr.distance * vr.distance) / 2;
+      const similarity = l2DistanceToSimilarity(vr.distance);
       if (similarity < threshold) continue;
       const row = db.prepare(
         'SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?'
@@ -472,7 +472,7 @@ export function searchAllFacts(
 
   const results: Array<{ fact: Fact; distance: number }> = [];
   for (const vr of vecResults) {
-    const similarity = 1 - (vr.distance * vr.distance) / 2;
+    const similarity = l2DistanceToSimilarity(vr.distance);
     if (similarity < threshold) continue;
 
     const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1').get(vr.id) as Record<string, unknown> | undefined;

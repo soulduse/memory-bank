@@ -23355,6 +23355,9 @@ function vecParamSql(dtype) {
 function normalizeVecDistance(distance, dtype) {
   return dtype === "int8" ? distance / VEC_INT8_SCALE : distance;
 }
+function l2DistanceToSimilarity(distance) {
+  return 1 - distance * distance / 2;
+}
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
   const columnNames = new Set(columns.map((c) => c.name));
@@ -23680,7 +23683,7 @@ function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85)
   const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b2) => a.distance - b2.distance);
   const results = [];
   for (const vr of merged) {
-    const similarity = 1 - vr.distance * vr.distance / 2;
+    const similarity = l2DistanceToSimilarity(vr.distance);
     if (similarity < threshold) continue;
     const row = db.prepare(
       "SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?"
@@ -23705,7 +23708,7 @@ function searchAllFacts(db, embedding, limit = 10, threshold = 0.6) {
   for (const r of vecResults) r.distance = normalizeVecDistance(r.distance, pAll.dt);
   const results = [];
   for (const vr of vecResults) {
-    const similarity = 1 - vr.distance * vr.distance / 2;
+    const similarity = l2DistanceToSimilarity(vr.distance);
     if (similarity < threshold) continue;
     const row = db.prepare("SELECT * FROM facts WHERE id = ? AND is_active = 1").get(vr.id);
     if (!row) continue;
@@ -24437,7 +24440,7 @@ async function getKnowledgeContext(query2, project, limit = 5) {
     const categoryMap = new Map(categories.map((c) => [c.id, { name: c.name, domainId: c.domain_id }]));
     const enrichedFacts = [];
     for (const { fact, distance } of factResults) {
-      const similarity = parseFloat((1 - distance * distance / 2).toFixed(3));
+      const similarity = parseFloat(l2DistanceToSimilarity(distance).toFixed(3));
       const catInfo = fact.ontology_category_id ? categoryMap.get(fact.ontology_category_id) : void 0;
       const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "Unclassified" : "Unclassified";
       const catName = catInfo ? catInfo.name : "Unclassified";
@@ -24534,7 +24537,7 @@ async function detectRepeat(prompt, project, limit = 3, threshold = 0.82, opts =
     const matches = [];
     for (const vr of vecResults) {
       const d2 = normalizeVecDistance(vr.distance, vecDtype);
-      const similarity = 1 - d2 * d2 / 2;
+      const similarity = l2DistanceToSimilarity(d2);
       if (similarity < threshold) continue;
       const row = db.prepare(`
         SELECT id, project, timestamp, user_message, assistant_message,
@@ -24622,7 +24625,7 @@ async function computeInjectContext(userPrompt, project, via) {
     {
       const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
       const results = candidates.filter((r) => {
-        const similarity = 1 - r.distance * r.distance / 2;
+        const similarity = l2DistanceToSimilarity(r.distance);
         return similarity - baseline >= BASELINE_MARGIN;
       });
       if (results.length === 0) {
@@ -26306,7 +26309,7 @@ async function askAvatar(db, question, project) {
   }
   const factContextLines = [];
   for (const { fact, distance } of vectorResults) {
-    const similarity = (1 - distance * distance / 2).toFixed(2);
+    const similarity = l2DistanceToSimilarity(distance).toFixed(2);
     const catInfo = fact.ontology_category_id ? categoryMap.get(fact.ontology_category_id) : void 0;
     const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "Unknown" : "Unknown";
     const catName = catInfo ? catInfo.name : "Unknown";
@@ -26343,7 +26346,7 @@ async function askAvatar(db, question, project) {
     const catInfo = fact.ontology_category_id ? categoryMap.get(fact.ontology_category_id) : void 0;
     const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "Unknown" : "Unknown";
     const catName = catInfo ? catInfo.name : "Unknown";
-    const relevance = parseFloat((1 - distance * distance / 2).toFixed(3));
+    const relevance = parseFloat(l2DistanceToSimilarity(distance).toFixed(3));
     return {
       fact,
       domain: domainName,

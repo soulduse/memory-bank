@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { canonicalizeProject } from './project-canon.js';
 import { EMBEDDING_VERSION } from './embeddings.js';
-import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
 /** dtype-aware MATCH/INSERT param for a fact-side vec table: the SQL
  * placeholder (vec_int8(?) wrap for int8) and the correctly-encoded blob.
  * float32 tables (pre-migration DBs) and int8 tables (fresh DBs / migrated)
@@ -147,7 +147,7 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
     const results = [];
     for (const vr of merged) {
         // L2 distance -> cosine similarity approximation
-        const similarity = 1 - (vr.distance * vr.distance) / 2;
+        const similarity = l2DistanceToSimilarity(vr.distance);
         if (similarity < threshold)
             continue;
         // embedding_version filter: during a model migration the vector tables
@@ -223,7 +223,7 @@ export function searchSimilarFactsSameScope(db, embedding, scope, limit = 5, thr
         const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((x, y) => x.distance - y.distance);
         results = [];
         for (const vr of merged) {
-            const similarity = 1 - (vr.distance * vr.distance) / 2;
+            const similarity = l2DistanceToSimilarity(vr.distance);
             if (similarity < threshold)
                 continue;
             const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?').get(vr.id, EMBEDDING_VERSION);
@@ -372,7 +372,7 @@ export function searchAllFacts(db, embedding, limit = 10, threshold = 0.6) {
         r.distance = normalizeVecDistance(r.distance, pAll.dt);
     const results = [];
     for (const vr of vecResults) {
-        const similarity = 1 - (vr.distance * vr.distance) / 2;
+        const similarity = l2DistanceToSimilarity(vr.distance);
         if (similarity < threshold)
             continue;
         const row = db.prepare('SELECT * FROM facts WHERE id = ? AND is_active = 1').get(vr.id);

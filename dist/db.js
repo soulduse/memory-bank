@@ -49,6 +49,18 @@ export function vecParamSql(dtype) {
 export function normalizeVecDistance(distance, dtype) {
     return dtype === 'int8' ? distance / VEC_INT8_SCALE : distance;
 }
+/**
+ * Convert a (float32-scale) L2 distance between UNIT vectors to cosine
+ * similarity. e5 embeddings are L2-normalized, so ‖a-b‖² = 2(1 - cos) and
+ * cos = 1 - d²/2. Single source of truth: every relevance gate / threshold in
+ * search, fact search, repeat detection, ontology and the avatar responder
+ * used to inline this identical expression (9 copies) — a metric change in one
+ * place would silently make those gates disagree. Pass a NORMALIZED distance
+ * (run it through normalizeVecDistance first for int8 tables).
+ */
+export function l2DistanceToSimilarity(distance) {
+    return 1 - (distance * distance) / 2;
+}
 export function migrateSchema(db) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
     const columnNames = new Set(columns.map(c => c.name));

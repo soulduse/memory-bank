@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { l2DistanceToSimilarity } from './db.js';
 import type { Fact, RelationType } from './types.js';
 import { callHaiku, parseJsonResponse } from './llm.js';
 import { generateEmbedding } from './embeddings.js';
@@ -46,7 +47,7 @@ function detGate(): number {
 
 /** vec0 L2 distance on normalized embeddings → cosine similarity. */
 function l2ToCosine(distance: number): number {
-  return 1 - (distance * distance) / 2;
+  return l2DistanceToSimilarity(distance);
 }
 
 /**

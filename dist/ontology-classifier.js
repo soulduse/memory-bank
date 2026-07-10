@@ -1,3 +1,4 @@
+import { l2DistanceToSimilarity } from './db.js';
 import { callHaiku, parseJsonResponse } from './llm.js';
 import { generateEmbedding } from './embeddings.js';
 import { searchSimilarFacts } from './fact-db.js';
@@ -30,7 +31,7 @@ function detGate() {
 }
 /** vec0 L2 distance on normalized embeddings → cosine similarity. */
 function l2ToCosine(distance) {
-    return 1 - (distance * distance) / 2;
+    return l2DistanceToSimilarity(distance);
 }
 /**
  * The LLM CALL itself failed (SDK/network/spawn/empty stream) — the fact is

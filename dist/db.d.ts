@@ -13,6 +13,16 @@ export declare function embeddingToVecBlob(embedding: number[], dtype: VecDtype)
 export declare function vecParamSql(dtype: VecDtype): string;
 /** Normalize a vec KNN distance back to float32 scale (int8 distances are ×127). */
 export declare function normalizeVecDistance(distance: number, dtype: VecDtype): number;
+/**
+ * Convert a (float32-scale) L2 distance between UNIT vectors to cosine
+ * similarity. e5 embeddings are L2-normalized, so ‖a-b‖² = 2(1 - cos) and
+ * cos = 1 - d²/2. Single source of truth: every relevance gate / threshold in
+ * search, fact search, repeat detection, ontology and the avatar responder
+ * used to inline this identical expression (9 copies) — a metric change in one
+ * place would silently make those gates disagree. Pass a NORMALIZED distance
+ * (run it through normalizeVecDistance first for int8 tables).
+ */
+export declare function l2DistanceToSimilarity(distance: number): number;
 export declare function migrateSchema(db: Database.Database): void;
 export declare function initDatabase(): Database.Database;
 export declare function insertExchange(db: Database.Database, exchange: ConversationExchange, embedding: number[], _toolNames?: string[]): void;

@@ -1,5 +1,5 @@
 import { generateEmbedding, initEmbeddings, EMBEDDING_VERSION } from './embeddings.js';
-import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
 
 export interface RepeatMatch {
   exchangeId: string;
@@ -58,7 +58,7 @@ export async function detectRepeat(
 
     for (const vr of vecResults) {
       const d = normalizeVecDistance(vr.distance, vecDtype);
-      const similarity = 1 - (d * d) / 2;
+      const similarity = l2DistanceToSimilarity(d);
       if (similarity < threshold) continue;
 
       // embedding_version filter: skip rows the re-embed worker has not
