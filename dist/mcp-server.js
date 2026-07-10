@@ -3225,8 +3225,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path6) {
-      let input = path6;
+    function removeDotSegments(path8) {
+      let input = path8;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3425,8 +3425,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path6, query2] = wsComponent.resourceName.split("?");
-        wsComponent.path = path6 && path6 !== "/" ? path6 : void 0;
+        const [path8, query2] = wsComponent.resourceName.split("?");
+        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
         wsComponent.query = query2;
         wsComponent.resourceName = void 0;
       }
@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs7, exportName) {
+    function addFormats(ajv, list, fs9, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs7[f]);
+        ajv.addFormat(f, fs9[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -8275,17 +8275,17 @@ var init_stainless_helper_header = __esm({
 function encodeURIPath(str) {
   return str.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@]+/g, encodeURIComponent);
 }
-var EMPTY, createPathTagFunction, path3;
+var EMPTY, createPathTagFunction, path5;
 var init_path = __esm({
   "node_modules/@anthropic-ai/sdk/internal/utils/path.mjs"() {
     init_error();
     EMPTY = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction = (pathEncoder = encodeURIPath) => function path6(statics, ...params) {
+    createPathTagFunction = (pathEncoder = encodeURIPath) => function path8(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path7 = statics.reduce((previousValue, currentValue, index) => {
+      const path9 = statics.reduce((previousValue, currentValue, index) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -8302,7 +8302,7 @@ var init_path = __esm({
         }
         return previousValue + currentValue + (index === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path7.split(/[?#]/, 1)[0];
+      const pathOnly = path9.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -8323,12 +8323,12 @@ var init_path = __esm({
         }, "");
         throw new AnthropicError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e) => e.error).join("\n")}
-${path7}
+${path9}
 ${underline}`);
       }
-      return path7;
+      return path9;
     };
-    path3 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
+    path5 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
   }
 });
 
@@ -8377,7 +8377,7 @@ var init_files = __esm({
        */
       delete(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path3`/v1/files/${fileID}`, {
+        return this._client.delete(path5`/v1/files/${fileID}`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "files-api-2025-04-14"].toString() },
@@ -8400,7 +8400,7 @@ var init_files = __esm({
        */
       download(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/files/${fileID}/content`, {
+        return this._client.get(path5`/v1/files/${fileID}/content`, {
           ...options,
           headers: buildHeaders([
             {
@@ -8423,7 +8423,7 @@ var init_files = __esm({
        */
       retrieveMetadata(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/files/${fileID}`, {
+        return this._client.get(path5`/v1/files/${fileID}`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "files-api-2025-04-14"].toString() },
@@ -8481,7 +8481,7 @@ var init_models = __esm({
        */
       retrieve(modelID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/models/${modelID}?beta=true`, {
+        return this._client.get(path5`/v1/models/${modelID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { ...betas?.toString() != null ? { "anthropic-beta": betas?.toString() } : void 0 },
@@ -9948,7 +9948,7 @@ var init_batches = __esm({
        */
       retrieve(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/messages/batches/${messageBatchID}?beta=true`, {
+        return this._client.get(path5`/v1/messages/batches/${messageBatchID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10001,7 +10001,7 @@ var init_batches = __esm({
        */
       delete(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path3`/v1/messages/batches/${messageBatchID}?beta=true`, {
+        return this._client.delete(path5`/v1/messages/batches/${messageBatchID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10033,7 +10033,7 @@ var init_batches = __esm({
        */
       cancel(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.post(path3`/v1/messages/batches/${messageBatchID}/cancel?beta=true`, {
+        return this._client.post(path5`/v1/messages/batches/${messageBatchID}/cancel?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10256,7 +10256,7 @@ var init_versions = __esm({
        */
       create(skillID, params = {}, options) {
         const { betas, ...body } = params ?? {};
-        return this._client.post(path3`/v1/skills/${skillID}/versions?beta=true`, multipartFormRequestOptions({
+        return this._client.post(path5`/v1/skills/${skillID}/versions?beta=true`, multipartFormRequestOptions({
           body,
           ...options,
           headers: buildHeaders([
@@ -10278,7 +10278,7 @@ var init_versions = __esm({
        */
       retrieve(version2, params, options) {
         const { skill_id, betas } = params;
-        return this._client.get(path3`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
+        return this._client.get(path5`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10301,7 +10301,7 @@ var init_versions = __esm({
        */
       list(skillID, params = {}, options) {
         const { betas, ...query2 } = params ?? {};
-        return this._client.getAPIList(path3`/v1/skills/${skillID}/versions?beta=true`, PageCursor, {
+        return this._client.getAPIList(path5`/v1/skills/${skillID}/versions?beta=true`, PageCursor, {
           query: query2,
           ...options,
           headers: buildHeaders([
@@ -10323,7 +10323,7 @@ var init_versions = __esm({
        */
       delete(version2, params, options) {
         const { skill_id, betas } = params;
-        return this._client.delete(path3`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
+        return this._client.delete(path5`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10380,7 +10380,7 @@ var init_skills = __esm({
        */
       retrieve(skillID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/skills/${skillID}?beta=true`, {
+        return this._client.get(path5`/v1/skills/${skillID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10420,7 +10420,7 @@ var init_skills = __esm({
        */
       delete(skillID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path3`/v1/skills/${skillID}?beta=true`, {
+        return this._client.delete(path5`/v1/skills/${skillID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -11187,7 +11187,7 @@ var init_batches2 = __esm({
        * ```
        */
       retrieve(messageBatchID, options) {
-        return this._client.get(path3`/v1/messages/batches/${messageBatchID}`, options);
+        return this._client.get(path5`/v1/messages/batches/${messageBatchID}`, options);
       }
       /**
        * List all Message Batches within a Workspace. Most recently created batches are
@@ -11223,7 +11223,7 @@ var init_batches2 = __esm({
        * ```
        */
       delete(messageBatchID, options) {
-        return this._client.delete(path3`/v1/messages/batches/${messageBatchID}`, options);
+        return this._client.delete(path5`/v1/messages/batches/${messageBatchID}`, options);
       }
       /**
        * Batches may be canceled any time before processing ends. Once cancellation is
@@ -11247,7 +11247,7 @@ var init_batches2 = __esm({
        * ```
        */
       cancel(messageBatchID, options) {
-        return this._client.post(path3`/v1/messages/batches/${messageBatchID}/cancel`, options);
+        return this._client.post(path5`/v1/messages/batches/${messageBatchID}/cancel`, options);
       }
       /**
        * Streams the results of a Message Batch as a `.jsonl` file.
@@ -11424,7 +11424,7 @@ var init_models2 = __esm({
        */
       retrieve(modelID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/models/${modelID}`, {
+        return this._client.get(path5`/v1/models/${modelID}`, {
           ...options,
           headers: buildHeaders([
             { ...betas?.toString() != null ? { "anthropic-beta": betas?.toString() } : void 0 },
@@ -11628,9 +11628,9 @@ var init_client = __esm({
       makeStatusError(status, error2, message, headers) {
         return APIError.generate(status, error2, message, headers);
       }
-      buildURL(path6, query2, defaultBaseURL) {
+      buildURL(path8, query2, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet(this, _BaseAnthropic_instances, "m", _BaseAnthropic_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL(path6) ? new URL(path6) : new URL(baseURL + (baseURL.endsWith("/") && path6.startsWith("/") ? path6.slice(1) : path6));
+        const url = isAbsoluteURL(path8) ? new URL(path8) : new URL(baseURL + (baseURL.endsWith("/") && path8.startsWith("/") ? path8.slice(1) : path8));
         const defaultQuery = this.defaultQuery();
         if (!isEmptyObj(defaultQuery)) {
           query2 = { ...defaultQuery, ...query2 };
@@ -11661,24 +11661,24 @@ var init_client = __esm({
        */
       async prepareRequest(request, { url, options }) {
       }
-      get(path6, opts) {
-        return this.methodRequest("get", path6, opts);
+      get(path8, opts) {
+        return this.methodRequest("get", path8, opts);
       }
-      post(path6, opts) {
-        return this.methodRequest("post", path6, opts);
+      post(path8, opts) {
+        return this.methodRequest("post", path8, opts);
       }
-      patch(path6, opts) {
-        return this.methodRequest("patch", path6, opts);
+      patch(path8, opts) {
+        return this.methodRequest("patch", path8, opts);
       }
-      put(path6, opts) {
-        return this.methodRequest("put", path6, opts);
+      put(path8, opts) {
+        return this.methodRequest("put", path8, opts);
       }
-      delete(path6, opts) {
-        return this.methodRequest("delete", path6, opts);
+      delete(path8, opts) {
+        return this.methodRequest("delete", path8, opts);
       }
-      methodRequest(method, path6, opts) {
+      methodRequest(method, path8, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path6, ...opts2 };
+          return { method, path: path8, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -11782,8 +11782,8 @@ var init_client = __esm({
         }));
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path6, Page2, opts) {
-        return this.requestAPIList(Page2, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path6, ...opts2 })) : { method: "get", path: path6, ...opts });
+      getAPIList(path8, Page2, opts) {
+        return this.requestAPIList(Page2, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path8, ...opts2 })) : { method: "get", path: path8, ...opts });
       }
       requestAPIList(Page2, options) {
         const request = this.makeRequest(options, null, void 0);
@@ -11871,8 +11871,8 @@ var init_client = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path6, query: query2, defaultBaseURL } = options;
-        const url = this.buildURL(path6, query2, defaultBaseURL);
+        const { method, path: path8, query: query2, defaultBaseURL } = options;
+        const url = this.buildURL(path8, query2, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -12496,8 +12496,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path6, errorMaps, issueData } = params;
-  const fullPath = [...path6, ...issueData.path || []];
+  const { data, path: path8, errorMaps, issueData } = params;
+  const fullPath = [...path8, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -12613,11 +12613,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path6, key) {
+  constructor(parent, value, path8, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path6;
+    this._path = path8;
     this._key = key;
   }
   get path() {
@@ -16255,10 +16255,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path6) {
-  if (!path6)
+function getElementAtPath(obj, path8) {
+  if (!path8)
     return obj;
-  return path6.reduce((acc, key) => acc?.[key], obj);
+  return path8.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16578,11 +16578,11 @@ function aborted(x2, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path6, issues) {
+function prefixIssues(path8, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path6);
+    iss.path.unshift(path8);
     return iss;
   });
 }
@@ -23128,11 +23128,10 @@ var StdioServerTransport = class {
   }
 };
 
-// src/db.ts
-import Database from "better-sqlite3";
-import path2 from "path";
-import fs2 from "fs";
-import * as sqliteVec from "sqlite-vec";
+// src/inject-daemon.ts
+import net from "node:net";
+import fs4 from "node:fs";
+import path4 from "node:path";
 
 // src/paths.ts
 import os from "os";
@@ -23179,6 +23178,12 @@ function getProjectsDir() {
   return process.env.TEST_PROJECTS_DIR || path.join(os.homedir(), ".claude", "projects");
 }
 var LLM_WORKDIR_BASENAME = "memory-bank-llm";
+
+// src/db.ts
+import Database from "better-sqlite3";
+import path2 from "path";
+import fs2 from "fs";
+import * as sqliteVec from "sqlite-vec";
 
 // src/project-canon.ts
 var slugCache = /* @__PURE__ */ new Map();
@@ -23292,6 +23297,32 @@ async function generateEmbedding(text, mode = "passage") {
     }
   }
   return embedding;
+}
+var BACKGROUND_PROBES = [
+  "\uC624\uB298 \uB0A0\uC528\uAC00 \uCC38 \uC88B\uB124\uC694",
+  "\uC8FC\uB9D0\uC5D0 \uBB50 \uD560\uC9C0 \uACE0\uBBFC \uC911\uC774\uC57C",
+  "\uB9DB\uC788\uB294 \uC800\uB141 \uC2DD\uC0AC\uB97C \uD588\uB2E4",
+  "The weather is nice today",
+  "I went for a walk in the park",
+  "\uC74C\uC545\uC744 \uB4E4\uC73C\uBA74\uC11C \uD734\uC2DD\uC744 \uCDE8\uD588\uB2E4",
+  "\uC0C8\uB85C\uC6B4 \uCDE8\uBBF8\uB97C \uC2DC\uC791\uD574\uBCFC\uAE4C \uC0DD\uAC01 \uC911",
+  "Let me think about what to do next"
+];
+var probeEmbeddings = null;
+async function queryBaseline(queryEmbedding) {
+  if (!probeEmbeddings) {
+    probeEmbeddings = [];
+    for (const p of BACKGROUND_PROBES) {
+      probeEmbeddings.push(await generateEmbedding(p, "passage"));
+    }
+  }
+  let max = -1;
+  for (const probe of probeEmbeddings) {
+    let dot = 0;
+    for (let i = 0; i < probe.length; i++) dot += probe[i] * queryEmbedding[i];
+    if (dot > max) max = dot;
+  }
+  return max;
 }
 
 // src/db.ts
@@ -23847,12 +23878,252 @@ function rowToRelation(row) {
   };
 }
 
+// src/repeat-detector.ts
+async function detectRepeat(prompt, project, limit = 3, threshold = 0.82) {
+  await initEmbeddings();
+  const embedding = await generateEmbedding(prompt, "query");
+  const db = initDatabase();
+  try {
+    const vecDtype = getVecDtype(db);
+    const vecResults = db.prepare(`
+      SELECT id, distance
+      FROM vec_exchanges
+      WHERE embedding MATCH ${vecParamSql(vecDtype)}
+      ORDER BY distance
+      LIMIT ?
+    `).all(
+      embeddingToVecBlob(embedding, vecDtype),
+      limit * 3
+    );
+    const matches = [];
+    for (const vr of vecResults) {
+      const d2 = normalizeVecDistance(vr.distance, vecDtype);
+      const similarity = 1 - d2 * d2 / 2;
+      if (similarity < threshold) continue;
+      const row = db.prepare(`
+        SELECT id, project, timestamp, user_message, assistant_message,
+               archive_path, line_start, line_end
+        FROM exchanges WHERE id = ? AND embedding_version = ?
+      `).get(vr.id, EMBEDDING_VERSION);
+      if (!row) continue;
+      if (project && row["project"] !== project) continue;
+      const assistantMsg = row["assistant_message"];
+      const assistantSummary = assistantMsg.split("\n").filter((line) => line.trim().length > 10).slice(0, 3).join("\n").substring(0, 300);
+      matches.push({
+        exchangeId: row["id"],
+        project: row["project"],
+        timestamp: row["timestamp"],
+        userMessage: row["user_message"].substring(0, 200),
+        assistantSummary,
+        similarity,
+        archivePath: row["archive_path"],
+        lineStart: row["line_start"],
+        lineEnd: row["line_end"]
+      });
+      if (matches.length >= limit) break;
+    }
+    return matches;
+  } finally {
+    db.close();
+  }
+}
+function formatRepeatContext(matches) {
+  if (matches.length === 0) return "";
+  const lines = ["\u{1F504} \uBE44\uC2B7\uD55C \uC9C8\uBB38\uC744 \uC774\uC804\uC5D0 \uD558\uC2E0 \uC801\uC774 \uC788\uC2B5\uB2C8\uB2E4:"];
+  for (const m2 of matches) {
+    const date3 = m2.timestamp.slice(0, 10);
+    const sim = Math.round(m2.similarity * 100);
+    lines.push(`
+[${date3}, ${sim}% \uC720\uC0AC] "${m2.userMessage.trim()}..."`);
+    lines.push(`\u2192 ${m2.assistantSummary.trim()}`);
+    lines.push(`  (Lines ${m2.lineStart}-${m2.lineEnd} in ${m2.archivePath})`);
+  }
+  return lines.join("\n");
+}
+
+// src/inject-log.ts
+import fs3 from "fs";
+import path3 from "path";
+var MAX_LOG_BYTES = 5 * 1024 * 1024;
+function getInjectLogPath() {
+  const dir = path3.join(getIndexDir(), "logs");
+  if (!fs3.existsSync(dir)) {
+    fs3.mkdirSync(dir, { recursive: true });
+  }
+  return path3.join(dir, "inject-context.jsonl");
+}
+function appendInjectLog(entry) {
+  try {
+    const logPath = getInjectLogPath();
+    try {
+      const stat = fs3.statSync(logPath);
+      if (stat.size > MAX_LOG_BYTES) {
+        fs3.renameSync(logPath, `${logPath}.old`);
+      }
+    } catch {
+    }
+    const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...entry });
+    fs3.appendFileSync(logPath, line + "\n");
+  } catch {
+  }
+}
+
+// src/inject-core.ts
+var TOP_K = 5;
+var BASELINE_MARGIN = 0.045;
+var MAX_CONTEXT_FACTS = 8;
+async function computeInjectContext(userPrompt, project, via) {
+  const t0 = Date.now();
+  if (!userPrompt || userPrompt.length < 20) {
+    appendInjectLog({ status: "skipped", project, prompt_len: userPrompt?.length ?? 0, via });
+    return "";
+  }
+  try {
+    await initEmbeddings();
+    const embedding = await generateEmbedding(userPrompt, "query");
+    const baseline = await queryBaseline(embedding);
+    const db = initDatabase();
+    try {
+      const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
+      const results = candidates.filter((r) => {
+        const similarity = 1 - r.distance * r.distance / 2;
+        return similarity - baseline >= BASELINE_MARGIN;
+      });
+      if (results.length === 0) {
+        appendInjectLog({
+          status: "no-match",
+          project,
+          prompt_len: userPrompt.length,
+          candidates: candidates.length,
+          injected: 0,
+          duration_ms: Date.now() - t0,
+          via
+        });
+        return "";
+      }
+      const seenIds = new Set(results.map((r) => r.fact.id));
+      const expandedFacts = [...results.map((r) => ({ fact: r.fact, note: "" }))];
+      for (const { fact } of results.slice(0, 3)) {
+        const related = getRelatedFacts(db, fact.id, 1, 0.6, 0.2, project);
+        for (const { fact: relFact, relation } of related) {
+          if (!seenIds.has(relFact.id) && expandedFacts.length < MAX_CONTEXT_FACTS) {
+            seenIds.add(relFact.id);
+            expandedFacts.push({ fact: relFact, note: `[${relation.relation_type}]` });
+          }
+        }
+      }
+      const lines = ["\u{1F4CC} \uAD00\uB828 \uACFC\uAC70 \uACB0\uC815:"];
+      for (const { fact, note } of expandedFacts) {
+        const dateStr = fact.created_at.slice(0, 10);
+        lines.push(`- ${note ? note + " " : ""}[${fact.category}] ${fact.fact} (${dateStr})`);
+      }
+      try {
+        const repeats = await detectRepeat(userPrompt, project, 2, 0.85);
+        const repeatCtx = formatRepeatContext(repeats);
+        if (repeatCtx) {
+          lines.push("");
+          lines.push(repeatCtx);
+        }
+      } catch {
+      }
+      appendInjectLog({
+        status: "injected",
+        project,
+        prompt_len: userPrompt.length,
+        candidates: candidates.length,
+        injected: expandedFacts.length,
+        duration_ms: Date.now() - t0,
+        via
+      });
+      return lines.join("\n") + "\n";
+    } finally {
+      db.close();
+    }
+  } catch (error2) {
+    const message = error2 instanceof Error ? error2.message : String(error2);
+    appendInjectLog({
+      status: "error",
+      project,
+      prompt_len: userPrompt.length,
+      duration_ms: Date.now() - t0,
+      error: message.slice(0, 300),
+      via
+    });
+    return "";
+  }
+}
+
+// src/inject-daemon.ts
+function injectSocketPath() {
+  return path4.join(getIndexDir(), "inject-daemon.sock");
+}
+function startInjectDaemon() {
+  const sockPath = injectSocketPath();
+  const server2 = net.createServer((conn) => {
+    let buf = "";
+    conn.setTimeout(1e4, () => conn.destroy());
+    conn.on("error", () => {
+    });
+    conn.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) {
+        if (buf.length > 1e6) conn.destroy();
+        return;
+      }
+      const line = buf.slice(0, nl);
+      void (async () => {
+        try {
+          const req = JSON.parse(line);
+          const context = await computeInjectContext(
+            String(req.prompt ?? ""),
+            String(req.cwd ?? process.cwd()),
+            "daemon"
+          );
+          conn.end(JSON.stringify({ ok: true, context }) + "\n");
+        } catch {
+          try {
+            conn.end(JSON.stringify({ ok: false }) + "\n");
+          } catch {
+          }
+        }
+      })();
+    });
+  });
+  server2.on("error", (err) => {
+    if (err.code !== "EADDRINUSE") return;
+    const probe = net.connect(sockPath);
+    probe.setTimeout(500, () => probe.destroy());
+    probe.on("connect", () => probe.destroy());
+    probe.on("error", () => {
+      try {
+        fs4.unlinkSync(sockPath);
+        server2.listen(sockPath, onListen);
+      } catch {
+      }
+    });
+  });
+  const onListen = () => {
+    try {
+      fs4.chmodSync(sockPath, 384);
+    } catch {
+    }
+    void initEmbeddings().catch(() => {
+    });
+  };
+  try {
+    server2.listen(sockPath, onListen);
+    server2.unref();
+  } catch {
+  }
+}
+
 // src/search.ts
-import fs4 from "fs";
+import fs6 from "fs";
 import readline from "readline";
 
 // src/archive-io.ts
-import fs3 from "fs";
+import fs5 from "fs";
 import { Readable, Transform, pipeline as pipeline2 } from "stream";
 import * as zlib from "node:zlib";
 var ZST_SUFFIX = ".zst";
@@ -23869,7 +24140,7 @@ function resolveArchiveFile(filePath) {
   const variant = filePath.endsWith(ZST_SUFFIX) ? filePath.slice(0, -ZST_SUFFIX.length) : filePath + ZST_SUFFIX;
   const statOrNull = (p) => {
     try {
-      return fs3.statSync(p);
+      return fs5.statSync(p);
     } catch {
       return null;
     }
@@ -23914,7 +24185,7 @@ function readArchiveFile(filePath) {
   if (!resolved) {
     throw Object.assign(new Error(`ENOENT: no such file, open '${filePath}'`), { code: "ENOENT" });
   }
-  const buf = fs3.readFileSync(resolved);
+  const buf = fs5.readFileSync(resolved);
   if (resolved.endsWith(ZST_SUFFIX)) {
     return requireZstdSync()(buf).toString("utf-8");
   }
@@ -23923,27 +24194,27 @@ function readArchiveFile(filePath) {
 function createArchiveReadStream(filePath) {
   const resolved = resolveArchiveFile(filePath);
   if (!resolved) {
-    return fs3.createReadStream(filePath);
+    return fs5.createReadStream(filePath);
   }
   if (resolved.endsWith(ZST_SUFFIX)) {
     if (zstd.createZstdDecompress) {
-      const source = fs3.createReadStream(resolved);
+      const source = fs5.createReadStream(resolved);
       const decompress = zstd.createZstdDecompress();
       const limiter = createByteLimit(maxDecompressedBytes());
       pipeline2(source, decompress, limiter, () => {
       });
       return limiter;
     }
-    const content = requireZstdSync()(fs3.readFileSync(resolved));
+    const content = requireZstdSync()(fs5.readFileSync(resolved));
     return Readable.from([content]);
   }
-  return fs3.createReadStream(resolved);
+  return fs5.createReadStream(resolved);
 }
 function statArchiveFile(filePath) {
   const resolved = resolveArchiveFile(filePath);
   if (!resolved) return null;
   try {
-    return fs3.statSync(resolved);
+    return fs5.statSync(resolved);
   } catch {
     return null;
   }
@@ -23955,7 +24226,7 @@ var cachedSearchDbPath = null;
 var cachedSearchDbIdent = null;
 function fileIdent(p) {
   try {
-    const st = fs4.statSync(p);
+    const st = fs6.statSync(p);
     return `${st.dev}:${st.ino}`;
   } catch {
     return null;
@@ -25813,19 +26084,19 @@ ${JSON.stringify(value, null, 2)}
 
 // src/llm.ts
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import fs5 from "node:fs";
-import path4 from "node:path";
+import fs7 from "node:fs";
+import path6 from "node:path";
 import os2 from "node:os";
-var LLM_WORKDIR = path4.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
+var LLM_WORKDIR = path6.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
 function llmWorkdir() {
   try {
-    fs5.mkdirSync(LLM_WORKDIR, { recursive: true });
+    fs7.mkdirSync(LLM_WORKDIR, { recursive: true });
   } catch {
   }
   pruneLlmTranscripts();
   return LLM_WORKDIR;
 }
-var PRUNE_MARKER = path4.join(LLM_WORKDIR, ".last-transcript-prune");
+var PRUNE_MARKER = path6.join(LLM_WORKDIR, ".last-transcript-prune");
 var PRUNE_THROTTLE_MS = 60 * 60 * 1e3;
 function transcriptTtlMs() {
   const raw = process.env.MEMORY_BANK_LLM_TRANSCRIPT_TTL_HOURS;
@@ -25835,49 +26106,49 @@ function transcriptTtlMs() {
 function pruneLlmTranscripts(now = Date.now()) {
   try {
     try {
-      const markerAge = now - fs5.statSync(PRUNE_MARKER).mtimeMs;
+      const markerAge = now - fs7.statSync(PRUNE_MARKER).mtimeMs;
       if (markerAge >= 0 && markerAge < PRUNE_THROTTLE_MS) return;
     } catch {
     }
     try {
-      fs5.writeFileSync(PRUNE_MARKER, new Date(now).toISOString());
+      fs7.writeFileSync(PRUNE_MARKER, new Date(now).toISOString());
     } catch {
     }
     const projectsDir = getProjectsDir();
     const ttl = transcriptTtlMs();
     let entries;
     try {
-      entries = fs5.readdirSync(projectsDir);
+      entries = fs7.readdirSync(projectsDir);
     } catch {
       return;
     }
     for (const entry of entries) {
       if (entry !== LLM_WORKDIR_BASENAME && !entry.endsWith(`-${LLM_WORKDIR_BASENAME}`)) continue;
-      const dir = path4.join(projectsDir, entry);
+      const dir = path6.join(projectsDir, entry);
       let stat;
       try {
-        stat = fs5.lstatSync(dir);
+        stat = fs7.lstatSync(dir);
       } catch {
         continue;
       }
       if (!stat.isDirectory()) continue;
       let files;
       try {
-        files = fs5.readdirSync(dir);
+        files = fs7.readdirSync(dir);
       } catch {
         continue;
       }
       for (const file of files) {
         if (!file.endsWith(".jsonl") && !file.endsWith("-summary.txt")) continue;
-        const filePath = path4.join(dir, file);
+        const filePath = path6.join(dir, file);
         try {
-          const fstat = fs5.lstatSync(filePath);
-          if (fstat.isFile() && now - fstat.mtimeMs > ttl) fs5.unlinkSync(filePath);
+          const fstat = fs7.lstatSync(filePath);
+          if (fstat.isFile() && now - fstat.mtimeMs > ttl) fs7.unlinkSync(filePath);
         } catch {
         }
       }
       try {
-        fs5.rmdirSync(dir);
+        fs7.rmdirSync(dir);
       } catch {
       }
     }
@@ -26049,8 +26320,8 @@ async function askAvatar(db, question, project) {
 }
 
 // src/mcp-server.ts
-import path5 from "path";
-import fs6 from "fs";
+import path7 from "path";
+import fs8 from "fs";
 import os3 from "os";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
@@ -26387,7 +26658,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (name === "read") {
       const params = ShowConversationInputSchema.parse(args);
-      const resolvedPath = path5.resolve(params.path);
+      const resolvedPath = path7.resolve(params.path);
       if (!resolvedPath.endsWith(".jsonl") && !resolvedPath.endsWith(".jsonl.zst")) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
@@ -26395,19 +26666,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const realFile = fs6.realpathSync(resolvedFile);
+      const realFile = fs8.realpathSync(resolvedFile);
       const allowedRoots = [
         getArchiveDir(),
-        path5.join(os3.homedir(), ".claude", "projects")
+        path7.join(os3.homedir(), ".claude", "projects")
       ].map((root) => {
         try {
-          return fs6.realpathSync(root);
+          return fs8.realpathSync(root);
         } catch {
-          return path5.resolve(root);
+          return path7.resolve(root);
         }
       });
       const isAllowed = allowedRoots.some(
-        (root) => realFile === root || realFile.startsWith(root + path5.sep)
+        (root) => realFile === root || realFile.startsWith(root + path7.sep)
       );
       if (!isAllowed) {
         throw new Error("Access denied: path is outside the conversation archive");
@@ -26918,6 +27189,7 @@ async function main() {
   console.error("Episodic Memory MCP server running via stdio");
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  startInjectDaemon();
 }
 main().catch((error2) => {
   console.error("Server error:", error2);
