@@ -12,3 +12,5 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 16	52467b6	inject-core+repeat-detector	-	출력동일	34ms(내부)	-	keep	요청당 initDatabase x2/재임베딩 제거: 데몬내부 80~224→30~38ms, E2E 0.10~0.13s
 17	91f2d3c	fact/category vec int8	-	22/25ovl(near-tie)	3.8ms(25.4→)	-	keep	fact검색 6.7x + 훅 E2E 0.065s(35x 누적) + sync-import NUL 바이트 발견(grep 불가시) 수정
 18	55748d4	src/search.ts formatResults	-	포맷동일	26ms(199~1600→)	-	keep	MCP search 응답: 줄수 힌트 DB-first(MAX line_end), zst 감압 제거, 재호출 1.4ms
+19	-	SQLite mmap/cache pragma	-	-	-	-	discard	mmap4G ABAB 3라운드 일관 악화(35~50ms→220~359ms, macOS UBC 특성). 첫 실험의 1142→21ms는 콜드캐시 순서 아티팩트로 판명 — 코드 무변경
+20	-	배치 임베딩(reembed 가속)	-	76%ovl	-	-	discard	transformers.js mean-pooling pad 마스킹 불완전로 배치 드리프트 1.7~2.2e-2 > int8스텝 7.8e-3(batch크기 무관). batch=1만 동일. backfill/live 벡터 불일치 → revert
