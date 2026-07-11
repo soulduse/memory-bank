@@ -44,7 +44,17 @@ async function main() {
   out.exchange_embedding_versions = ev;
   out.current_embedding_version = EMBEDDING_VERSION;
   const stale = ev.filter(r => String(r.v) !== String(EMBEDDING_VERSION)).reduce((s, r) => s + r.c, 0);
-  out.exchanges_invisible_to_vector_search = stale;
+  out.exchanges_stale_version = stale;
+  // TRUE invisibility to vector search = the search JOINs vec_exchanges and filters
+  // embedding_version, so a row is unreachable if it is stale-version OR has NO
+  // vec row at all. Counting only stale (the old metric) reported 0 while ~90k
+  // current-version rows sat vector-less and unsearchable — the same missing-vector
+  // blind spot fixed in the re-embed selector (iter 34).
+  out.exchanges_invisible_to_vector_search = db.prepare(`
+    SELECT count(*) c FROM exchanges e
+    WHERE e.embedding_version != ?
+       OR NOT EXISTS (SELECT 1 FROM vec_exchanges_rowids v WHERE v.id = e.id)
+  `).get(EMBEDDING_VERSION).c;
   out.ontology = {
     domains: db.prepare('SELECT count(*) c FROM ontology_domains').get().c,
     categories: db.prepare('SELECT count(*) c FROM ontology_categories').get().c,
