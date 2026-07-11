@@ -47,7 +47,7 @@ function injectSocketPath() {
 
 /** Ask the warm daemon; resolve null (not reject) on ANY failure so the caller
  * falls back — the hook must never break a user prompt. */
-function askDaemon(prompt, cwd) {
+function askDaemon(prompt, cwd, sessionId) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -61,7 +61,7 @@ function askDaemon(prompt, cwd) {
     conn.on('connect', () => {
       clearTimeout(connectTimer);
       conn.setTimeout(SOCKET_RESPONSE_TIMEOUT_MS, () => { conn.destroy(); done(null); });
-      conn.write(JSON.stringify({ prompt, cwd }) + '\n');
+      conn.write(JSON.stringify({ prompt, cwd, session_id: sessionId }) + '\n');
       let buf = '';
       conn.on('data', (c) => {
         buf += c.toString('utf8');
@@ -85,22 +85,25 @@ async function main() {
   const raw = await readStdin();
   let prompt = '';
   let cwd = '';
+  let sessionId = '';
   if (raw) {
     try {
       const j = JSON.parse(raw);
       prompt = String(j.prompt ?? '');
       cwd = String(j.cwd ?? '');
+      sessionId = String(j.session_id ?? ''); // 세션 dedup 원장 키 (hook stdin 계약)
     } catch {
       prompt = raw; // plain-text stdin = the prompt itself
     }
   }
   if (!prompt) prompt = process.env.USER_PROMPT || '';
   if (!cwd) cwd = process.env.CWD || process.cwd();
+  if (!sessionId) sessionId = process.env.SESSION_ID || '';
 
   if (!prompt || prompt.length < 20) return; // not worth an injection
 
   // FAST PATH — warm daemon inside a running MCP server.
-  const daemonContext = await askDaemon(prompt, cwd);
+  const daemonContext = await askDaemon(prompt, cwd, sessionId);
   if (daemonContext !== null) {
     if (daemonContext) process.stdout.write(daemonContext + '\n');
     return;
@@ -109,7 +112,7 @@ async function main() {
   // COLD FALLBACK — compute locally (heavy imports load only here).
   try {
     const { computeInjectContext } = await import(path.join(__dirname, '../dist/inject-core.js'));
-    const context = await computeInjectContext(prompt, cwd, 'fallback');
+    const context = await computeInjectContext(prompt, cwd, 'fallback', sessionId || undefined);
     if (context) process.stdout.write(context + '\n');
   } catch (error) {
     process.stderr.write(`inject-context: error: ${error instanceof Error ? error.message : error}\n`);
