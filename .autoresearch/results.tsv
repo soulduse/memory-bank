@@ -32,3 +32,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 36	c0bfdc2	pendingExtract 무익spawn 제거	-	shared==원본	-	-	keep	훅이 phantom 508세션(2미만/오염)을 백로그로 봐 매세션 backfill-extract 무익spawn. pendingExtractionCoreQuery 단일source로 워커일치, over-spawn 509→1
 37	12accf7	consolidation 모델로드 제거	-	1s→3ms	-	-	keep	consolidateAllPending의 vestigial initEmbeddings(~1s) 제거 — consolidation은 stored벡터+Haiku만 사용. 매세션 spawn되는 founding워커의 무익 모델로드 근절, 370/370
 38	7cc7037	bench-perf 미가시 지표 정확화	-	87727정확	-	-	keep	exchanges_invisible이 stale-version만 세어 missing-vector 90k를 0 오보고. stale OR missing-vector로 수정, 최종 기준선 정직화(iter34 blind spot을 측정 harness에서)
+43	38cc5a2	드레인 완료 + 최종 기준선	87727→0미가시	전체검색가능	-	-	keep	벡터 드레인 완료(87,727→0 미가시, 313,183 전체 검색가능). 최종 기준선: vector검색 p50 20.9ms/p95 498ms, fts 3.4ms, fact 3.1ms, embedding-gen 3.3ms. 일회성 v2→v3 마이그레이션 부채를 원자 워커가 self-heal 완료
