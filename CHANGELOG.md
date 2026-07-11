@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-07-12
+
+### Fixed
+- **Dependency self-heal**: `claude plugin update` non-deterministically skips
+  `npm install` for the new cache dir (observed: 1.4.0 got node_modules,
+  1.4.1 did not — every hook then died with `Cannot find package
+  'better-sqlite3'`), and cc-sync ships plugin caches to other machines
+  WITHOUT node_modules by design. The injection thin client (the only
+  dep-free entry point, runs on every prompt) now detects
+  ERR_MODULE_NOT_FOUND in its cold fallback and spawns a one-shot detached
+  `npm install` in the plugin root, gated by an atomic `wx` marker file so it
+  can never loop. Verified in isolation: detect → spawn → marker suppresses
+  repeats → better-sqlite3 installed.
+
 ## [1.4.1] - 2026-07-12
 
 ### Fixed

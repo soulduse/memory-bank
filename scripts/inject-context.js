@@ -20,9 +20,42 @@
 import net from 'node:net';
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Self-heal missing runtime deps (better-sqlite3 등 native 모듈).
+ *
+ * 왜: (a) `claude plugin update` 가 npm install 을 비결정적으로 누락한다
+ * (실측: 1.4.0 캐시엔 node_modules 생성, 1.4.1 캐시엔 미생성 → 콜드 경로
+ * 전체가 Cannot find package 로 사망). (b) cc-sync 는 node_modules 를
+ * 제외하고 plugins/cache 를 타 머신에 실어 나르므로, 동기화로 받은 캐시는
+ * 항상 deps 가 없다. 두 경우 모두 첫 프롬프트에서 감지해 1회 한정으로
+ * detached npm install 을 시도한다 (marker 파일 'wx' 원자 생성으로 중복
+ * 방지 — 실패해도 다음 설치 디렉토리에서만 재시도, 무한 루프 없음).
+ */
+function selfHealDeps(pluginRoot) {
+  const marker = path.join(pluginRoot, '.deps-heal-attempted');
+  try {
+    fs.writeFileSync(marker, new Date().toISOString(), { flag: 'wx' }); // 원자적 1회 게이트
+  } catch {
+    return false; // 이미 시도됨 (성공/실패 무관 — 재폭주 방지)
+  }
+  try {
+    const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
+      cwd: pluginRoot, detached: true, stdio: 'ignore',
+    });
+    child.unref();
+    process.stderr.write('inject-context: missing deps detected — spawned background npm install (one-shot)\n');
+    return true;
+  } catch (e) {
+    process.stderr.write(`inject-context: self-heal spawn failed: ${e && e.message}\n`);
+    return false;
+  }
+}
 
 const SOCKET_CONNECT_TIMEOUT_MS = 300;
 const SOCKET_RESPONSE_TIMEOUT_MS = 3000;
@@ -115,7 +148,12 @@ async function main() {
     const context = await computeInjectContext(prompt, cwd, 'fallback', sessionId || undefined);
     if (context) process.stdout.write(context + '\n');
   } catch (error) {
-    process.stderr.write(`inject-context: error: ${error instanceof Error ? error.message : error}\n`);
+    const msg = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`inject-context: error: ${msg}\n`);
+    // deps 누락(plugin update 미설치 / cc-sync 로 받은 캐시)이면 1회 자가치유
+    if (/Cannot find (package|module)|ERR_MODULE_NOT_FOUND/.test(msg)) {
+      selfHealDeps(path.join(__dirname, '..'));
+    }
   }
 }
 
