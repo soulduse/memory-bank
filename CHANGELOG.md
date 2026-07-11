@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-12
+
+### Added
+- **Injection pipeline v2 — session dedup ledger** (`src/inject-ledger.ts`):
+  a fact is injected at most ONCE per session. Measured waste before: 74%
+  inject rate × 5.5–8 facts × ~140 chars ≈ ~470 tokens/prompt with the SAME
+  facts re-injected across a session (~10k tokens per 30-prompt session).
+  Ledger is bounded (400 ids, oldest-evict), TTL-pruned (7 days), session-id
+  sanitized (path-traversal safe), atomic-write, and fail-open (a corrupt
+  ledger never blocks injection). E2E: 2nd call in the same session injects
+  0 bytes (`status:deduped`, ~330 tokens saved per repeated prompt).
+- **Token budget**: per-fact 160-char truncation + 1,000-char block budget
+  (lowest-relevance facts dropped first).
+- **Observability**: inject log gains `chars` (block size) and `deduped`
+  (facts saved by the ledger) so real-world savings are continuously measured.
+- **Knowledge Galaxy** (`ui/relations/`): Three.js 3D visualization of the
+  ontology — 32 domains / 4.2k categories / 24.7k facts / 27.8k typed
+  relations, with search, per-type edge toggles, relation-navigating detail
+  panel, and adaptive performance (compositor-only labels, point-size cap,
+  eco-mode DPR degrade).
+
+### Fixed
+- `session_id` is now plumbed end-to-end through the injection path
+  (hook stdin → thin client → daemon payload → core), which the dedup
+  ledger requires.
+- `detectRepeat` is time-boxed to 250ms (its 313k-exchange vector search has
+  a measured p95 of 498ms that dominated injection tail latency).
+- bench-perf `exchanges_invisible_to_vector_search` counted only
+  stale-version rows and reported 0 while ~90k missing-vector rows were
+  unsearchable; it now counts true invisibility (stale OR missing vector).
+- Vector drain completed: 87,727 invisible exchanges → 0 (all 313k
+  exchanges searchable; final baseline: vector p50 20.9ms, fts 3.4ms).
+
 ## [1.3.4] - 2026-07-11
 
 ### Performance
