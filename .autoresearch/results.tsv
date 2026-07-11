@@ -30,3 +30,4 @@ iter	commit	target_file	score	recall@10	p50_ms	idx_db_kb	status	description
 34	b19fc49	reembed spawn 조건 근본수정	-	라이브검증	-	-	keep	SessionStart 훅 pendingEx가 stale-version만 봐 missing-vector 100910 백로그 불가시→세션간 자동재개 안됨. buildReembedPending 단일source로 교체(iter12 워커수정과 coupling 일치). 드레인 수동재시작 근본 해소
 35	0319866	pendingFact KR백로그 감지	-	라이브검증	-	-	keep	iter34 동일클래스 완결: pendingFact가 embedKoreanFacts의 missing-KR 백로그 놓치던 latent drift 수정, 훅 전 spawn조건이 워커와 일치
 36	c0bfdc2	pendingExtract 무익spawn 제거	-	shared==원본	-	-	keep	훅이 phantom 508세션(2미만/오염)을 백로그로 봐 매세션 backfill-extract 무익spawn. pendingExtractionCoreQuery 단일source로 워커일치, over-spawn 509→1
+37	12accf7	consolidation 모델로드 제거	-	1s→3ms	-	-	keep	consolidateAllPending의 vestigial initEmbeddings(~1s) 제거 — consolidation은 stored벡터+Haiku만 사용. 매세션 spawn되는 founding워커의 무익 모델로드 근절, 370/370
