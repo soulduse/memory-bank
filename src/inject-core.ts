@@ -21,8 +21,10 @@ const MAX_CONTEXT_FACTS = 8;
 const FACT_CHAR_CAP = 160;
 const BLOCK_CHAR_BUDGET = 1000;
 // detectRepeat 는 313k exchanges 벡터검색 (p50 21ms / p95 498ms 실측) — tail 이
-// 주입 지연 p90 을 끌어올린다. 250ms 안에 못 끝나면 그 프롬프트는 반복감지 생략.
-const REPEAT_TIMEBOX_MS = 250;
+// 주입 지연 p90 을 끌어올린다. better-sqlite3 는 동기라 시작한 검색을 타이머로
+// 선점할 수 없다(Promise.race 는 무효 — Codex 리뷰 지적). 대신 시작 "전" 경과
+// 예산을 확인해, 파이프라인이 이미 이만큼 썼으면 반복감지를 통째로 생략한다.
+const REPEAT_ELAPSED_BUDGET_MS = 700;
 
 function truncateFact(text: string): string {
   const t = text.replace(/\s+/g, ' ').trim();
@@ -120,18 +122,18 @@ export async function computeInjectContext(
         injectedIds.push(fact.id);
       }
 
-      // Detect repeated prompts (best-effort, 250ms timebox — p95 tail 절단)
-      try {
-        const repeats = await Promise.race([
-          detectRepeat(userPrompt, project, 2, 0.85, { embedding, db }),
-          new Promise<null>((res) => setTimeout(res, REPEAT_TIMEBOX_MS, null).unref?.()),
-        ]);
-        const repeatCtx = repeats ? formatRepeatContext(repeats) : '';
-        if (repeatCtx) {
-          lines.push('');
-          lines.push(repeatCtx);
-        }
-      } catch { /* best-effort */ }
+      // Detect repeated prompts (best-effort). 동기 sqlite 검색이라 시작 후엔
+      // 선점 불가 — 주입이 이미 예산을 소진했으면 시작 자체를 생략 (tail 상한).
+      if (Date.now() - t0 < REPEAT_ELAPSED_BUDGET_MS) {
+        try {
+          const repeats = await detectRepeat(userPrompt, project, 2, 0.85, { embedding, db });
+          const repeatCtx = formatRepeatContext(repeats);
+          if (repeatCtx) {
+            lines.push('');
+            lines.push(repeatCtx);
+          }
+        } catch { /* best-effort */ }
+      }
 
       appendLedger(sessionId, ledger, injectedIds);
       const block = lines.join('\n') + '\n';

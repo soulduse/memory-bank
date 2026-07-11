@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-07-12
+
+### Fixed
+- **Ineffective repeat-detection timebox replaced** (found by adversarial
+  review): the v1.4.0 `Promise.race` 250ms timebox could never preempt
+  `detectRepeat`'s synchronous better-sqlite3 vector search — the timer only
+  fires after the blocking call completes. Replaced with an elapsed-budget
+  gate: repeat detection is skipped entirely when injection has already spent
+  >700ms, which actually bounds tail latency.
+
 ## [1.4.2] - 2026-07-12
 
 ### Fixed
@@ -53,8 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `session_id` is now plumbed end-to-end through the injection path
   (hook stdin → thin client → daemon payload → core), which the dedup
   ledger requires.
-- `detectRepeat` is time-boxed to 250ms (its 313k-exchange vector search has
-  a measured p95 of 498ms that dominated injection tail latency).
+- `detectRepeat` tail latency bounded (its 313k-exchange vector search has a
+  measured p95 of 498ms): the search is synchronous and cannot be preempted
+  once started, so it is skipped when injection has already spent >700ms
+  (v1.4.0 shipped a Promise.race "timebox" that could not actually preempt
+  the sync work — replaced in v1.4.3 with this elapsed-budget gate).
 - bench-perf `exchanges_invisible_to_vector_search` counted only
   stale-version rows and reported 0 while ~90k missing-vector rows were
   unsearchable; it now counts true invisibility (stale OR missing vector).

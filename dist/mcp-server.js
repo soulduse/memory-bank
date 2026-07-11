@@ -24671,7 +24671,7 @@ var BASELINE_MARGIN = 0.045;
 var MAX_CONTEXT_FACTS = 8;
 var FACT_CHAR_CAP = 160;
 var BLOCK_CHAR_BUDGET = 1e3;
-var REPEAT_TIMEBOX_MS = 250;
+var REPEAT_ELAPSED_BUDGET_MS = 700;
 function truncateFact(text) {
   const t = text.replace(/\s+/g, " ").trim();
   return t.length > FACT_CHAR_CAP ? t.slice(0, FACT_CHAR_CAP - 1) + "\u2026" : t;
@@ -24743,17 +24743,16 @@ async function computeInjectContext(userPrompt, project, via, sessionId) {
         blockChars += line.length + 1;
         injectedIds.push(fact.id);
       }
-      try {
-        const repeats = await Promise.race([
-          detectRepeat(userPrompt, project, 2, 0.85, { embedding, db }),
-          new Promise((res) => setTimeout(res, REPEAT_TIMEBOX_MS, null).unref?.())
-        ]);
-        const repeatCtx = repeats ? formatRepeatContext(repeats) : "";
-        if (repeatCtx) {
-          lines.push("");
-          lines.push(repeatCtx);
+      if (Date.now() - t0 < REPEAT_ELAPSED_BUDGET_MS) {
+        try {
+          const repeats = await detectRepeat(userPrompt, project, 2, 0.85, { embedding, db });
+          const repeatCtx = formatRepeatContext(repeats);
+          if (repeatCtx) {
+            lines.push("");
+            lines.push(repeatCtx);
+          }
+        } catch {
         }
-      } catch {
       }
       appendLedger(sessionId, ledger, injectedIds);
       const block = lines.join("\n") + "\n";
