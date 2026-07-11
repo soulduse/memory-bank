@@ -13,3 +13,6 @@ supabase/.temp/
 !.autoresearch/results.tsv
 !.autoresearch/results-may-dashboard.tsv
 .qa-cycle-passed
+ui/relations/data.json
+galaxy-*.png
+/tmp/mbgalaxy-server.log
