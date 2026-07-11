@@ -3225,8 +3225,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path8) {
-      let input = path8;
+    function removeDotSegments(path9) {
+      let input = path9;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3425,8 +3425,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path8, query2] = wsComponent.resourceName.split("?");
-        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
+        const [path9, query2] = wsComponent.resourceName.split("?");
+        wsComponent.path = path9 && path9 !== "/" ? path9 : void 0;
         wsComponent.query = query2;
         wsComponent.resourceName = void 0;
       }
@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs9, exportName) {
+    function addFormats(ajv, list, fs10, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs9[f]);
+        ajv.addFormat(f, fs10[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -8275,17 +8275,17 @@ var init_stainless_helper_header = __esm({
 function encodeURIPath(str) {
   return str.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@]+/g, encodeURIComponent);
 }
-var EMPTY, createPathTagFunction, path5;
+var EMPTY, createPathTagFunction, path6;
 var init_path = __esm({
   "node_modules/@anthropic-ai/sdk/internal/utils/path.mjs"() {
     init_error();
     EMPTY = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction = (pathEncoder = encodeURIPath) => function path8(statics, ...params) {
+    createPathTagFunction = (pathEncoder = encodeURIPath) => function path9(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path9 = statics.reduce((previousValue, currentValue, index) => {
+      const path10 = statics.reduce((previousValue, currentValue, index) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -8302,7 +8302,7 @@ var init_path = __esm({
         }
         return previousValue + currentValue + (index === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path9.split(/[?#]/, 1)[0];
+      const pathOnly = path10.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -8323,12 +8323,12 @@ var init_path = __esm({
         }, "");
         throw new AnthropicError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e) => e.error).join("\n")}
-${path9}
+${path10}
 ${underline}`);
       }
-      return path9;
+      return path10;
     };
-    path5 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
+    path6 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
   }
 });
 
@@ -8377,7 +8377,7 @@ var init_files = __esm({
        */
       delete(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path5`/v1/files/${fileID}`, {
+        return this._client.delete(path6`/v1/files/${fileID}`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "files-api-2025-04-14"].toString() },
@@ -8400,7 +8400,7 @@ var init_files = __esm({
        */
       download(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path5`/v1/files/${fileID}/content`, {
+        return this._client.get(path6`/v1/files/${fileID}/content`, {
           ...options,
           headers: buildHeaders([
             {
@@ -8423,7 +8423,7 @@ var init_files = __esm({
        */
       retrieveMetadata(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path5`/v1/files/${fileID}`, {
+        return this._client.get(path6`/v1/files/${fileID}`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "files-api-2025-04-14"].toString() },
@@ -8481,7 +8481,7 @@ var init_models = __esm({
        */
       retrieve(modelID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path5`/v1/models/${modelID}?beta=true`, {
+        return this._client.get(path6`/v1/models/${modelID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { ...betas?.toString() != null ? { "anthropic-beta": betas?.toString() } : void 0 },
@@ -9948,7 +9948,7 @@ var init_batches = __esm({
        */
       retrieve(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path5`/v1/messages/batches/${messageBatchID}?beta=true`, {
+        return this._client.get(path6`/v1/messages/batches/${messageBatchID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10001,7 +10001,7 @@ var init_batches = __esm({
        */
       delete(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path5`/v1/messages/batches/${messageBatchID}?beta=true`, {
+        return this._client.delete(path6`/v1/messages/batches/${messageBatchID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10033,7 +10033,7 @@ var init_batches = __esm({
        */
       cancel(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.post(path5`/v1/messages/batches/${messageBatchID}/cancel?beta=true`, {
+        return this._client.post(path6`/v1/messages/batches/${messageBatchID}/cancel?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10256,7 +10256,7 @@ var init_versions = __esm({
        */
       create(skillID, params = {}, options) {
         const { betas, ...body } = params ?? {};
-        return this._client.post(path5`/v1/skills/${skillID}/versions?beta=true`, multipartFormRequestOptions({
+        return this._client.post(path6`/v1/skills/${skillID}/versions?beta=true`, multipartFormRequestOptions({
           body,
           ...options,
           headers: buildHeaders([
@@ -10278,7 +10278,7 @@ var init_versions = __esm({
        */
       retrieve(version2, params, options) {
         const { skill_id, betas } = params;
-        return this._client.get(path5`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
+        return this._client.get(path6`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10301,7 +10301,7 @@ var init_versions = __esm({
        */
       list(skillID, params = {}, options) {
         const { betas, ...query2 } = params ?? {};
-        return this._client.getAPIList(path5`/v1/skills/${skillID}/versions?beta=true`, PageCursor, {
+        return this._client.getAPIList(path6`/v1/skills/${skillID}/versions?beta=true`, PageCursor, {
           query: query2,
           ...options,
           headers: buildHeaders([
@@ -10323,7 +10323,7 @@ var init_versions = __esm({
        */
       delete(version2, params, options) {
         const { skill_id, betas } = params;
-        return this._client.delete(path5`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
+        return this._client.delete(path6`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10380,7 +10380,7 @@ var init_skills = __esm({
        */
       retrieve(skillID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path5`/v1/skills/${skillID}?beta=true`, {
+        return this._client.get(path6`/v1/skills/${skillID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10420,7 +10420,7 @@ var init_skills = __esm({
        */
       delete(skillID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path5`/v1/skills/${skillID}?beta=true`, {
+        return this._client.delete(path6`/v1/skills/${skillID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -11187,7 +11187,7 @@ var init_batches2 = __esm({
        * ```
        */
       retrieve(messageBatchID, options) {
-        return this._client.get(path5`/v1/messages/batches/${messageBatchID}`, options);
+        return this._client.get(path6`/v1/messages/batches/${messageBatchID}`, options);
       }
       /**
        * List all Message Batches within a Workspace. Most recently created batches are
@@ -11223,7 +11223,7 @@ var init_batches2 = __esm({
        * ```
        */
       delete(messageBatchID, options) {
-        return this._client.delete(path5`/v1/messages/batches/${messageBatchID}`, options);
+        return this._client.delete(path6`/v1/messages/batches/${messageBatchID}`, options);
       }
       /**
        * Batches may be canceled any time before processing ends. Once cancellation is
@@ -11247,7 +11247,7 @@ var init_batches2 = __esm({
        * ```
        */
       cancel(messageBatchID, options) {
-        return this._client.post(path5`/v1/messages/batches/${messageBatchID}/cancel`, options);
+        return this._client.post(path6`/v1/messages/batches/${messageBatchID}/cancel`, options);
       }
       /**
        * Streams the results of a Message Batch as a `.jsonl` file.
@@ -11424,7 +11424,7 @@ var init_models2 = __esm({
        */
       retrieve(modelID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path5`/v1/models/${modelID}`, {
+        return this._client.get(path6`/v1/models/${modelID}`, {
           ...options,
           headers: buildHeaders([
             { ...betas?.toString() != null ? { "anthropic-beta": betas?.toString() } : void 0 },
@@ -11628,9 +11628,9 @@ var init_client = __esm({
       makeStatusError(status, error2, message, headers) {
         return APIError.generate(status, error2, message, headers);
       }
-      buildURL(path8, query2, defaultBaseURL) {
+      buildURL(path9, query2, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet(this, _BaseAnthropic_instances, "m", _BaseAnthropic_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL(path8) ? new URL(path8) : new URL(baseURL + (baseURL.endsWith("/") && path8.startsWith("/") ? path8.slice(1) : path8));
+        const url = isAbsoluteURL(path9) ? new URL(path9) : new URL(baseURL + (baseURL.endsWith("/") && path9.startsWith("/") ? path9.slice(1) : path9));
         const defaultQuery = this.defaultQuery();
         if (!isEmptyObj(defaultQuery)) {
           query2 = { ...defaultQuery, ...query2 };
@@ -11661,24 +11661,24 @@ var init_client = __esm({
        */
       async prepareRequest(request, { url, options }) {
       }
-      get(path8, opts) {
-        return this.methodRequest("get", path8, opts);
+      get(path9, opts) {
+        return this.methodRequest("get", path9, opts);
       }
-      post(path8, opts) {
-        return this.methodRequest("post", path8, opts);
+      post(path9, opts) {
+        return this.methodRequest("post", path9, opts);
       }
-      patch(path8, opts) {
-        return this.methodRequest("patch", path8, opts);
+      patch(path9, opts) {
+        return this.methodRequest("patch", path9, opts);
       }
-      put(path8, opts) {
-        return this.methodRequest("put", path8, opts);
+      put(path9, opts) {
+        return this.methodRequest("put", path9, opts);
       }
-      delete(path8, opts) {
-        return this.methodRequest("delete", path8, opts);
+      delete(path9, opts) {
+        return this.methodRequest("delete", path9, opts);
       }
-      methodRequest(method, path8, opts) {
+      methodRequest(method, path9, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path8, ...opts2 };
+          return { method, path: path9, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -11782,8 +11782,8 @@ var init_client = __esm({
         }));
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path8, Page2, opts) {
-        return this.requestAPIList(Page2, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path8, ...opts2 })) : { method: "get", path: path8, ...opts });
+      getAPIList(path9, Page2, opts) {
+        return this.requestAPIList(Page2, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path9, ...opts2 })) : { method: "get", path: path9, ...opts });
       }
       requestAPIList(Page2, options) {
         const request = this.makeRequest(options, null, void 0);
@@ -11871,8 +11871,8 @@ var init_client = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path8, query: query2, defaultBaseURL } = options;
-        const url = this.buildURL(path8, query2, defaultBaseURL);
+        const { method, path: path9, query: query2, defaultBaseURL } = options;
+        const url = this.buildURL(path9, query2, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -12496,8 +12496,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path8, errorMaps, issueData } = params;
-  const fullPath = [...path8, ...issueData.path || []];
+  const { data, path: path9, errorMaps, issueData } = params;
+  const fullPath = [...path9, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -12613,11 +12613,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path8, key) {
+  constructor(parent, value, path9, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path8;
+    this._path = path9;
     this._key = key;
   }
   get path() {
@@ -16255,10 +16255,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path8) {
-  if (!path8)
+function getElementAtPath(obj, path9) {
+  if (!path9)
     return obj;
-  return path8.reduce((acc, key) => acc?.[key], obj);
+  return path9.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16578,11 +16578,11 @@ function aborted(x2, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path8, issues) {
+function prefixIssues(path9, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path8);
+    iss.path.unshift(path9);
     return iss;
   });
 }
@@ -23130,8 +23130,8 @@ var StdioServerTransport = class {
 
 // src/inject-daemon.ts
 import net from "node:net";
-import fs6 from "node:fs";
-import path4 from "node:path";
+import fs7 from "node:fs";
+import path5 from "node:path";
 
 // src/paths.ts
 import os from "os";
@@ -24607,11 +24607,76 @@ function appendInjectLog(entry) {
   }
 }
 
+// src/inject-ledger.ts
+import fs6 from "node:fs";
+import path4 from "node:path";
+var MAX_IDS = 400;
+var TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+function ledgerDir() {
+  return path4.join(getIndexDir(), "state", "inject-ledger");
+}
+function sanitizeSessionId(sessionId) {
+  if (!sessionId) return null;
+  const clean = String(sessionId).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+  return clean.length >= 4 ? clean : null;
+}
+function ledgerPath(cleanId) {
+  return path4.join(ledgerDir(), cleanId + ".json");
+}
+function loadLedger(sessionId) {
+  const id = sanitizeSessionId(sessionId);
+  if (!id) return /* @__PURE__ */ new Set();
+  try {
+    const raw = fs6.readFileSync(ledgerPath(id), "utf8");
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return new Set(arr.filter((x2) => typeof x2 === "string"));
+  } catch {
+  }
+  return /* @__PURE__ */ new Set();
+}
+function appendLedger(sessionId, existing, newIds) {
+  const id = sanitizeSessionId(sessionId);
+  if (!id || newIds.length === 0) return;
+  try {
+    const dir = ledgerDir();
+    fs6.mkdirSync(dir, { recursive: true });
+    const ordered = [...existing, ...newIds.filter((n) => !existing.has(n))];
+    const bounded = ordered.length > MAX_IDS ? ordered.slice(ordered.length - MAX_IDS) : ordered;
+    const p = ledgerPath(id);
+    const tmp = p + ".tmp";
+    fs6.writeFileSync(tmp, JSON.stringify(bounded));
+    fs6.renameSync(tmp, p);
+    pruneOldLedgers(dir);
+  } catch {
+  }
+}
+function pruneOldLedgers(dir) {
+  try {
+    const now = Date.now();
+    for (const f of fs6.readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      const fp = path4.join(dir, f);
+      try {
+        if (now - fs6.statSync(fp).mtimeMs > TTL_MS) fs6.unlinkSync(fp);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+
 // src/inject-core.ts
 var TOP_K = 5;
 var BASELINE_MARGIN = 0.045;
 var MAX_CONTEXT_FACTS = 8;
-async function computeInjectContext(userPrompt, project, via) {
+var FACT_CHAR_CAP = 160;
+var BLOCK_CHAR_BUDGET = 1e3;
+var REPEAT_TIMEBOX_MS = 250;
+function truncateFact(text) {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > FACT_CHAR_CAP ? t.slice(0, FACT_CHAR_CAP - 1) + "\u2026" : t;
+}
+async function computeInjectContext(userPrompt, project, via, sessionId) {
   const t0 = Date.now();
   if (!userPrompt || userPrompt.length < 20) {
     appendInjectLog({ status: "skipped", project, prompt_len: userPrompt?.length ?? 0, via });
@@ -24651,30 +24716,59 @@ async function computeInjectContext(userPrompt, project, via) {
           }
         }
       }
+      const ledger = loadLedger(sessionId);
+      const fresh = expandedFacts.filter(({ fact }) => !ledger.has(fact.id));
+      const dedupedCount = expandedFacts.length - fresh.length;
+      if (fresh.length === 0) {
+        appendInjectLog({
+          status: "deduped",
+          project,
+          prompt_len: userPrompt.length,
+          candidates: candidates.length,
+          injected: 0,
+          deduped: dedupedCount,
+          duration_ms: Date.now() - t0,
+          via
+        });
+        return "";
+      }
       const lines = ["\u{1F4CC} \uAD00\uB828 \uACFC\uAC70 \uACB0\uC815:"];
-      for (const { fact, note } of expandedFacts) {
+      let blockChars = lines[0].length;
+      const injectedIds = [];
+      for (const { fact, note } of fresh) {
         const dateStr = fact.created_at.slice(0, 10);
-        lines.push(`- ${note ? note + " " : ""}[${fact.category}] ${fact.fact} (${dateStr})`);
+        const line = `- ${note ? note + " " : ""}[${fact.category}] ${truncateFact(fact.fact)} (${dateStr})`;
+        if (blockChars + line.length > BLOCK_CHAR_BUDGET && injectedIds.length > 0) break;
+        lines.push(line);
+        blockChars += line.length + 1;
+        injectedIds.push(fact.id);
       }
       try {
-        const repeats = await detectRepeat(userPrompt, project, 2, 0.85, { embedding, db });
-        const repeatCtx = formatRepeatContext(repeats);
+        const repeats = await Promise.race([
+          detectRepeat(userPrompt, project, 2, 0.85, { embedding, db }),
+          new Promise((res) => setTimeout(res, REPEAT_TIMEBOX_MS, null).unref?.())
+        ]);
+        const repeatCtx = repeats ? formatRepeatContext(repeats) : "";
         if (repeatCtx) {
           lines.push("");
           lines.push(repeatCtx);
         }
       } catch {
       }
+      appendLedger(sessionId, ledger, injectedIds);
+      const block = lines.join("\n") + "\n";
       appendInjectLog({
         status: "injected",
         project,
         prompt_len: userPrompt.length,
         candidates: candidates.length,
-        injected: expandedFacts.length,
+        injected: injectedIds.length,
+        deduped: dedupedCount,
+        chars: block.length,
         duration_ms: Date.now() - t0,
         via
       });
-      return lines.join("\n") + "\n";
+      return block;
     }
   } catch (error2) {
     const message = error2 instanceof Error ? error2.message : String(error2);
@@ -24692,7 +24786,7 @@ async function computeInjectContext(userPrompt, project, via) {
 
 // src/inject-daemon.ts
 function injectSocketPath() {
-  return path4.join(getIndexDir(), "inject-daemon.sock");
+  return path5.join(getIndexDir(), "inject-daemon.sock");
 }
 function startInjectDaemon() {
   const sockPath = injectSocketPath();
@@ -24715,7 +24809,8 @@ function startInjectDaemon() {
           const context = await computeInjectContext(
             String(req.prompt ?? ""),
             String(req.cwd ?? process.cwd()),
-            "daemon"
+            "daemon",
+            req.session_id ? String(req.session_id) : void 0
           );
           conn.end(JSON.stringify({ ok: true, context }) + "\n");
         } catch {
@@ -24734,7 +24829,7 @@ function startInjectDaemon() {
     probe.on("connect", () => probe.destroy());
     probe.on("error", () => {
       try {
-        fs6.unlinkSync(sockPath);
+        fs7.unlinkSync(sockPath);
         server2.listen(sockPath, onListen);
       } catch {
       }
@@ -24742,7 +24837,7 @@ function startInjectDaemon() {
   });
   const onListen = () => {
     try {
-      fs6.chmodSync(sockPath, 384);
+      fs7.chmodSync(sockPath, 384);
     } catch {
     }
     void initEmbeddings().catch(() => {
@@ -26127,19 +26222,19 @@ ${JSON.stringify(value, null, 2)}
 
 // src/llm.ts
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import fs7 from "node:fs";
-import path6 from "node:path";
+import fs8 from "node:fs";
+import path7 from "node:path";
 import os2 from "node:os";
-var LLM_WORKDIR = path6.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
+var LLM_WORKDIR = path7.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
 function llmWorkdir() {
   try {
-    fs7.mkdirSync(LLM_WORKDIR, { recursive: true });
+    fs8.mkdirSync(LLM_WORKDIR, { recursive: true });
   } catch {
   }
   pruneLlmTranscripts();
   return LLM_WORKDIR;
 }
-var PRUNE_MARKER = path6.join(LLM_WORKDIR, ".last-transcript-prune");
+var PRUNE_MARKER = path7.join(LLM_WORKDIR, ".last-transcript-prune");
 var PRUNE_THROTTLE_MS = 60 * 60 * 1e3;
 function transcriptTtlMs() {
   const raw = process.env.MEMORY_BANK_LLM_TRANSCRIPT_TTL_HOURS;
@@ -26149,49 +26244,49 @@ function transcriptTtlMs() {
 function pruneLlmTranscripts(now = Date.now()) {
   try {
     try {
-      const markerAge = now - fs7.statSync(PRUNE_MARKER).mtimeMs;
+      const markerAge = now - fs8.statSync(PRUNE_MARKER).mtimeMs;
       if (markerAge >= 0 && markerAge < PRUNE_THROTTLE_MS) return;
     } catch {
     }
     try {
-      fs7.writeFileSync(PRUNE_MARKER, new Date(now).toISOString());
+      fs8.writeFileSync(PRUNE_MARKER, new Date(now).toISOString());
     } catch {
     }
     const projectsDir = getProjectsDir();
     const ttl = transcriptTtlMs();
     let entries;
     try {
-      entries = fs7.readdirSync(projectsDir);
+      entries = fs8.readdirSync(projectsDir);
     } catch {
       return;
     }
     for (const entry of entries) {
       if (entry !== LLM_WORKDIR_BASENAME && !entry.endsWith(`-${LLM_WORKDIR_BASENAME}`)) continue;
-      const dir = path6.join(projectsDir, entry);
+      const dir = path7.join(projectsDir, entry);
       let stat;
       try {
-        stat = fs7.lstatSync(dir);
+        stat = fs8.lstatSync(dir);
       } catch {
         continue;
       }
       if (!stat.isDirectory()) continue;
       let files;
       try {
-        files = fs7.readdirSync(dir);
+        files = fs8.readdirSync(dir);
       } catch {
         continue;
       }
       for (const file of files) {
         if (!file.endsWith(".jsonl") && !file.endsWith("-summary.txt")) continue;
-        const filePath = path6.join(dir, file);
+        const filePath = path7.join(dir, file);
         try {
-          const fstat = fs7.lstatSync(filePath);
-          if (fstat.isFile() && now - fstat.mtimeMs > ttl) fs7.unlinkSync(filePath);
+          const fstat = fs8.lstatSync(filePath);
+          if (fstat.isFile() && now - fstat.mtimeMs > ttl) fs8.unlinkSync(filePath);
         } catch {
         }
       }
       try {
-        fs7.rmdirSync(dir);
+        fs8.rmdirSync(dir);
       } catch {
       }
     }
@@ -26363,8 +26458,8 @@ async function askAvatar(db, question, project) {
 }
 
 // src/mcp-server.ts
-import path7 from "path";
-import fs8 from "fs";
+import path8 from "path";
+import fs9 from "fs";
 import os3 from "os";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
@@ -26701,7 +26796,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (name === "read") {
       const params = ShowConversationInputSchema.parse(args);
-      const resolvedPath = path7.resolve(params.path);
+      const resolvedPath = path8.resolve(params.path);
       if (!resolvedPath.endsWith(".jsonl") && !resolvedPath.endsWith(".jsonl.zst")) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
@@ -26709,19 +26804,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const realFile = fs8.realpathSync(resolvedFile);
+      const realFile = fs9.realpathSync(resolvedFile);
       const allowedRoots = [
         getArchiveDir(),
-        path7.join(os3.homedir(), ".claude", "projects")
+        path8.join(os3.homedir(), ".claude", "projects")
       ].map((root) => {
         try {
-          return fs8.realpathSync(root);
+          return fs9.realpathSync(root);
         } catch {
-          return path7.resolve(root);
+          return path8.resolve(root);
         }
       });
       const isAllowed = allowedRoots.some(
-        (root) => realFile === root || realFile.startsWith(root + path7.sep)
+        (root) => realFile === root || realFile.startsWith(root + path8.sep)
       );
       if (!isAllowed) {
         throw new Error("Access denied: path is outside the conversation archive");
