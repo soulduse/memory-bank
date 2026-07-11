@@ -40,6 +40,10 @@
   const mouse = new THREE.Vector2(-2, -2);
   const labelEls = [];             // 도메인 라벨 오버레이
   let factRels = null;             // factIdx → [{o:otherIdx, ty, dir}]  인접 관계
+  // perf: raycast 는 마우스 이동(dirty) 또는 150ms 주기로만 (매 프레임 24k 검사 방지)
+  let rayDirty = false, lastRayAt = 0;
+  const RAY_INTERVAL_MS = 150;
+  const _labelV = new THREE.Vector3(); // updateLabels 재사용 (per-frame 할당 제거)
 
   const GALAXY_R = 420;
 
@@ -87,8 +91,11 @@
     const st = $('#stage');
     camera = new THREE.PerspectiveCamera(58, st.clientWidth / st.clientHeight, 1, 6000);
     camera.position.set(0, 120, 900);
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    // perf: glow galaxy 는 전부 소프트 스프라이트라 dpr>1.25 에서 MSAA 시각 이득이 없다 —
+    // retina 백버퍼 + MSAA 동시 비용 제거. GPU 힌트도 명시.
+    const maxDpr = Math.min(devicePixelRatio, 2);
+    renderer = new THREE.WebGLRenderer({ antialias: maxDpr <= 1.25, alpha: false, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(maxDpr);
     renderer.setSize(st.clientWidth, st.clientHeight);
     renderer.setClearColor(0x000000, 1);
     st.appendChild(renderer.domElement);
@@ -113,6 +120,7 @@
       const r = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
       mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+      rayDirty = true; // raycast 는 실제 이동 시에만 즉시
     });
     renderer.domElement.addEventListener('click', () => { if (hovered >= 0) openPanel(hovered); });
     // starfield 배경
@@ -189,7 +197,8 @@
       vertexShader: `
         attribute float size; attribute vec3 color; varying vec3 vColor; uniform float uScale;
         void main(){ vColor=color; vec4 mv=modelViewMatrix*vec4(position,1.0);
-          gl_PointSize=size*(uScale/-mv.z); gl_Position=projectionMatrix*mv; }`,
+          // 상한 26px: 줌인 시 스프라이트 fill-rate 폭발(버벅임 주범) 차단
+          gl_PointSize=min(size*(uScale/-mv.z), 26.0); gl_Position=projectionMatrix*mv; }`,
       fragmentShader: `
         varying vec3 vColor;
         void main(){ vec2 uv=gl_PointCoord-0.5; float d=length(uv);
@@ -279,8 +288,14 @@
       });
       b.addEventListener('mouseleave', () => $('#railTip').classList.remove('show'));
     });
-    // 검색
-    $('#searchInput').addEventListener('input', (e) => runSearch(e.target.value));
+    // 검색 (perf: 키스트로크마다 24k 스캔 방지 — 300ms 디바운스 + 최소 2자)
+    let searchT = null;
+    $('#searchInput').addEventListener('input', (e) => {
+      clearTimeout(searchT);
+      const q = e.target.value;
+      if (q.trim().length < 2) return;
+      searchT = setTimeout(() => runSearch(q), 300);
+    });
     $('#mpSearch').addEventListener('input', () => renderDomainList($('#mpSearch').value));
     window.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#searchInput').focus(); }
@@ -306,12 +321,16 @@
   }
 
   // ── hover / raycast ─────────────────────────
-  function updateHover() {
+  function updateHover(now) {
     if (!factPoints) return;
+    // 마우스가 움직였거나(즉시) 150ms 주기(자동회전 보정)에만 24k 검사 실행
+    if (!rayDirty && now - lastRayAt < RAY_INTERVAL_MS) return;
+    const moved = rayDirty;
+    rayDirty = false; lastRayAt = now;
     raycaster.setFromCamera(mouse, camera);
     const hit = raycaster.intersectObject(factPoints, false)[0];
     const idx = hit ? hit.index : -1;
-    if (idx === hovered) { if (idx >= 0) positionHover(); return; }
+    if (idx === hovered) { if (idx >= 0 && moved) positionHover(); return; }
     hovered = idx;
     const hc = $('#hover');
     if (idx < 0) { hc.classList.remove('show'); renderer.domElement.style.cursor = ''; return; }
@@ -458,22 +477,27 @@
   function updateStats() { /* stats 는 buildHeader 에서 채움 */ }
 
   // ── 라벨 위치 갱신 (3D→2D 투영) ──────────────
+  // perf: 대형 blur text-shadow 라벨을 left/top 으로 옮기면 매 프레임 repaint —
+  // transform(translate3d)은 compositor 전용이라 블러 래스터가 레이어 텍스처로 캐시된다.
   function updateLabels() {
     if (!showLabels) return;
     const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight;
     for (const { el, i } of labelEls) {
-      const c = domCenters[i]; const v = new THREE.Vector3(c.x, c.y + c.r * 0.9, c.z).project(camera);
-      if (v.z > 1) { el.style.display = 'none'; continue; }
+      const c = domCenters[i];
+      _labelV.set(c.x, c.y + c.r * 0.9, c.z).project(camera);
+      if (_labelV.z > 1) { el.style.display = 'none'; continue; }
       el.style.display = '';
-      el.style.left = ((v.x + 1) / 2 * w) + 'px';
-      el.style.top = ((1 - v.y) / 2 * h) + 'px';
-      el.style.opacity = Math.max(0.15, 1 - Math.max(0, (v.z - 0.9)) * 8);
+      const x = (_labelV.x + 1) / 2 * w, y = (1 - _labelV.y) / 2 * h;
+      el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0) translate(-50%,-50%)';
+      el.style.opacity = Math.max(0.15, 1 - Math.max(0, (_labelV.z - 0.9)) * 8).toFixed(3);
     }
   }
 
-  // ── 렌더 루프 ───────────────────────────────
+  // ── 렌더 루프 (+ eco-mode: 느린 기기에서 pixelRatio 단계 강등, nagix 패턴) ──
+  let _ecoPrev = 0, _ecoAcc = 0, _ecoN = 0, _ecoDpr = 0;
   function animate() {
     requestAnimationFrame(animate);
+    const now = performance.now();
     if (camAnim) {
       camAnim.t = Math.min(1, camAnim.t + 0.045); const e = 1 - Math.pow(1 - camAnim.t, 3);
       controls.target.lerpVectors(camAnim.fromT, camAnim.toT, e);
@@ -481,8 +505,24 @@
       if (camAnim.t >= 1) camAnim = null;
     }
     controls.update();
-    updateHover();
+    updateHover(now);
     updateLabels();
     renderer.render(scene, camera);
+    // eco-mode: 90프레임 롤링 평균 > 28ms → dpr 0.25 강등 (degrade-only, oscillation 방지)
+    if (_ecoDpr === 0) _ecoDpr = renderer.getPixelRatio();
+    if (_ecoPrev > 0) {
+      const dt = Math.min(now - _ecoPrev, 100); // 탭 비활성 gap 클램프
+      _ecoAcc += dt; _ecoN++;
+      if (_ecoN >= 90) {
+        const avg = _ecoAcc / _ecoN; _ecoAcc = 0; _ecoN = 0;
+        if (avg > 28 && _ecoDpr > 1) {
+          _ecoDpr = Math.max(1, _ecoDpr - 0.25);
+          const st = renderer.domElement.parentElement;
+          renderer.setPixelRatio(_ecoDpr);
+          renderer.setSize(st.clientWidth, st.clientHeight);
+        }
+      }
+    }
+    _ecoPrev = now;
   }
 })();
