@@ -4,6 +4,7 @@ import { writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
+import { llmWorkdir } from './llm.js';
 /**
  * Get API environment overrides for summarization calls.
  * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
@@ -54,6 +55,15 @@ async function callClaudeViaAgentSdk(prompt, sessionId, useFallback = false) {
             max_tokens: 4096,
             env: getApiEnv(),
             resume: sessionId,
+            // Same containment as llm.ts callHaiku: transcripts land in the reserved
+            // memory-bank-llm slug (never indexed, TTL-pruned), and the spawned
+            // session must not load user settings/plugins — its SessionStart/End
+            // hooks would re-spawn sync/backfill workers and cascade into more
+            // sessions. Resume works because every call shares this fixed cwd.
+            cwd: llmWorkdir(),
+            settingSources: [],
+            // Don't override systemPrompt when resuming - it uses the original session's prompt
+            // Instead, the prompt itself should provide clear instructions
             ...(sessionId ? {} : {
                 systemPrompt: 'Write concise, factual summaries. Output ONLY the summary - no preamble, no "Here is", no "I will". Your output will be indexed directly.'
             })

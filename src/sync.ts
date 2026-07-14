@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
-import { getExcludedProjects, detectCodingAgent } from './paths.js';
+import { getExcludedProjects, isExcludedProject, isWorkerPromptMessage, detectCodingAgent } from './paths.js';
 import { archiveFileExists, readArchiveFile, statArchiveFile } from './archive-io.js';
 
 const EXCLUSION_MARKERS = [
@@ -105,7 +105,7 @@ export async function syncConversations(
   const excludedProjects = getExcludedProjects();
 
   for (const project of projects) {
-    if (excludedProjects.includes(project)) {
+    if (isExcludedProject(project, excludedProjects)) {
       console.error("\nSkipping excluded project: " + project);
       continue;
     }
@@ -169,6 +169,8 @@ export async function syncConversations(
         const exchanges = await parseConversation(file, project, file);
 
         for (const exchange of exchanges) {
+          // Worker-prompt exchange = ephemeral state, not knowledge — never index.
+          if (isWorkerPromptMessage(exchange.userMessage)) continue;
           // Tag each exchange with the coding agent
           exchange.codingAgent = codingAgent;
 

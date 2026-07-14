@@ -5,6 +5,245 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-07-12
+
+### Fixed
+- **Ineffective repeat-detection timebox replaced** (found by adversarial
+  review): the v1.4.0 `Promise.race` 250ms timebox could never preempt
+  `detectRepeat`'s synchronous better-sqlite3 vector search — the timer only
+  fires after the blocking call completes. Replaced with an elapsed-budget
+  gate: repeat detection is skipped entirely when injection has already spent
+  >700ms, which actually bounds tail latency.
+
+## [1.4.2] - 2026-07-12
+
+### Fixed
+- **Dependency self-heal**: `claude plugin update` non-deterministically skips
+  `npm install` for the new cache dir (observed: 1.4.0 got node_modules,
+  1.4.1 did not — every hook then died with `Cannot find package
+  'better-sqlite3'`), and cc-sync ships plugin caches to other machines
+  WITHOUT node_modules by design. The injection thin client (the only
+  dep-free entry point, runs on every prompt) now detects
+  ERR_MODULE_NOT_FOUND in its cold fallback and spawns a one-shot detached
+  `npm install` in the plugin root, gated by an atomic `wx` marker file so it
+  can never loop. Verified in isolation: detect → spawn → marker suppresses
+  repeats → better-sqlite3 installed.
+
+## [1.4.1] - 2026-07-12
+
+### Fixed
+- **Packaging**: v1.4.0 shipped a stale committed `dist/` (the injection-v2
+  build output was not committed with its sources), so fresh installs got the
+  new thin client but an old core without the dedup ledger. `dist/` is now
+  rebuilt and committed; release checklist gains a HARD check that
+  `git status dist/` is clean before tagging.
+
+## [1.4.0] - 2026-07-12
+
+### Added
+- **Injection pipeline v2 — session dedup ledger** (`src/inject-ledger.ts`):
+  a fact is injected at most ONCE per session. Measured waste before: 74%
+  inject rate × 5.5–8 facts × ~140 chars ≈ ~470 tokens/prompt with the SAME
+  facts re-injected across a session (~10k tokens per 30-prompt session).
+  Ledger is bounded (400 ids, oldest-evict), TTL-pruned (7 days), session-id
+  sanitized (path-traversal safe), atomic-write, and fail-open (a corrupt
+  ledger never blocks injection). E2E: 2nd call in the same session injects
+  0 bytes (`status:deduped`, ~330 tokens saved per repeated prompt).
+- **Token budget**: per-fact 160-char truncation + 1,000-char block budget
+  (lowest-relevance facts dropped first).
+- **Observability**: inject log gains `chars` (block size) and `deduped`
+  (facts saved by the ledger) so real-world savings are continuously measured.
+- **Knowledge Galaxy** (`ui/relations/`): Three.js 3D visualization of the
+  ontology — 32 domains / 4.2k categories / 24.7k facts / 27.8k typed
+  relations, with search, per-type edge toggles, relation-navigating detail
+  panel, and adaptive performance (compositor-only labels, point-size cap,
+  eco-mode DPR degrade).
+
+### Fixed
+- `session_id` is now plumbed end-to-end through the injection path
+  (hook stdin → thin client → daemon payload → core), which the dedup
+  ledger requires.
+- `detectRepeat` tail latency bounded (its 313k-exchange vector search has a
+  measured p95 of 498ms): the search is synchronous and cannot be preempted
+  once started, so it is skipped when injection has already spent >700ms
+  (v1.4.0 shipped a Promise.race "timebox" that could not actually preempt
+  the sync work — replaced in v1.4.3 with this elapsed-budget gate).
+- bench-perf `exchanges_invisible_to_vector_search` counted only
+  stale-version rows and reported 0 while ~90k missing-vector rows were
+  unsearchable; it now counts true invisibility (stale OR missing vector).
+- Vector drain completed: 87,727 invisible exchanges → 0 (all 313k
+  exchanges searchable; final baseline: vector p50 20.9ms, fts 3.4ms).
+
+## [1.3.4] - 2026-07-11
+
+### Performance
+- **Per-prompt context injection: ~2.3s → ~0.07s (35×)** — the UserPromptSubmit
+  hook used to pay a full cold start on EVERY prompt (measured: model load
+  1,130ms + node startup ~400ms + imports 186ms; the actual search was ~30ms).
+  A warm unix-socket sidecar (`startInjectDaemon`) now lives inside the
+  long-lived MCP server (which already has the embedding model loaded); the
+  hook is a thin client with a cold local fallback that behaves exactly as
+  before when no server is running. No new process, no new lifecycle: the
+  sidecar is unref'd and dies with the MCP server; stale sockets are probed
+  and reclaimed; socket mode 600. The shell wrapper also went from 4 node
+  spawns to 1 (JSON parsing moved into the client), so even the cold fallback
+  dropped ~2.3s → ~1.6s.
+- **Fact/category vector search: 25.4ms → 3.8ms (6.7×)** — vec_facts /
+  vec_facts_kr / vec_categories migrated to int8 (scripts/migrate-vec-facts-int8.mjs),
+  same quantization the exchanges index got in v1.3.x. All writers/readers are
+  dtype-aware via the new `getVecTableDtype()` (per-table, read from
+  sqlite_master — never a flag), with distances normalized BEFORE the
+  cross-language-index merge so mixed-dtype states mid-migration stay correct.
+  Fresh DBs now create all vec tables as int8. Measured quality: same-id
+  distance deviation ≤0.0098 (quantization noise), divergent picks are
+  near-ties only.
+- Exchanges vector KNN (int8, migrated on-machine via existing
+  migrate-vec-int8.mjs): 58.5ms → 13.4ms at equal corpus size.
+
+### Fixed
+- **Self-heal for stamp-vector mismatch** — 197K exchanges (53% of one
+  production corpus) claimed the current embedding_version but had NO vector
+  row, leaving them permanently invisible to semantic search AND to the
+  version-only reembed selector. The worker now also selects rows whose
+  vec_exchanges row is missing (exact set-diff via the vec0 shadow `_rowids`
+  table) and repairs them.
+- **Legacy worker-prompt pollution purge + guard** — Haiku worker sessions
+  from BEFORE the fixed LLM workdir ran with the caller project cwd, so their
+  transcripts were indexed under REAL project slugs (measured: 59,940
+  exchanges / ~16% of one corpus) where the v1.3.3 slug exclusion cannot see
+  them. `purge-llm-sessions.mjs --legacy-prompts` removes them (backup-first,
+  batched transactions), and `isWorkerPromptMessage()` now guards every
+  indexing path so re-parsed archives can never re-pollute.
+- `sync-import.ts` contained two literal NUL bytes (dedup-key separators) that
+  made grep treat the file as BINARY — invisible to every code sweep. Replaced
+  with the `\u0000` escape (runtime-identical) and made its vector writes
+  dtype-aware.
+- `bench-perf.mjs` / `bench/setup-bench-db.mjs`: dtype-aware against int8
+  production tables.
+
+### Operations note (per-machine)
+Existing installs get the code via plugin update, but the DB-side migrations
+run per machine: `node scripts/migrate-vec-int8.mjs` (exchanges),
+`node scripts/migrate-vec-facts-int8.mjs` (facts/categories),
+`node scripts/purge-llm-sessions.mjs --legacy-prompts --apply` (legacy
+pollution), then let the reembed worker drain missing vectors. All are
+idempotent, dry-run-first, backup-first.
+
+## [1.3.3] - 2026-07-08
+
+### Fixed
+- **LLM worker sessions no longer pollute the conversation index** — every Haiku
+  call spawns a one-shot headless CLI session under `<tmpdir>/memory-bank-llm`;
+  those transcripts were being indexed like real conversations (measured: 4,351
+  sessions / 6.7k exchange rows). `isExcludedProject()` (paths.ts) now built-in
+  excludes any project slug ending with `-memory-bank-llm` (current fixed workdir
+  and legacy mkdtemp variants alike) and is applied at every exchange-inserting
+  walk: `indexConversations` / `indexSession` / `indexUnprocessed` (indexer.ts),
+  sync (sync.ts) and verify (verify.ts). Ephemeral worker state is not knowledge.
+- **Worker transcripts no longer accumulate forever** — nothing ever deleted the
+  one-shot session transcripts (measured: 11,573 files / 99MB under
+  `~/.claude/projects/*-memory-bank-llm`). `pruneLlmTranscripts()` (llm.ts) now
+  runs opportunistically (throttled to at most hourly) on each LLM call: deletes
+  only `.jsonl` / `-summary.txt` files older than a TTL
+  (`MEMORY_BANK_LLM_TRANSCRIPT_TTL_HOURS`, default 24h, hard floor 1h so an
+  in-flight transcript can never be reaped), strictly inside the reserved
+  `*-memory-bank-llm` slug namespace, never following symlinks, removing legacy
+  slug dirs once emptied, and never throwing into the LLM call path.
+- **Polluted rows cannot become extraction candidates** (defense in depth) —
+  `backfill-extract-worker` drops sessions whose `cwd` ends with
+  `/memory-bank-llm` from the pending queue, so exchanges indexed before this
+  fix cannot feed fact extraction (which would spawn yet more Haiku sessions —
+  a self-referential loop). The `NOT IN` subquery filters `session_id IS NOT
+  NULL` explicitly: one NULL inside `NOT IN` nulls the whole predicate
+  (3-valued logic) and would silently drain the entire backfill.
+- **All Agent SDK spawn sites are now contained** — summarizer.ts and
+  translate-facts.mjs ran `query()` without `cwd`/`settingSources`, so their
+  sessions landed in the caller's project slug (indexable, unpruned) and loaded
+  user settings whose SessionStart/End hooks re-spawn sync/backfill workers
+  (session cascade). Both now share the same containment as llm.ts `callHaiku`:
+  `cwd: llmWorkdir()`, `settingSources: []`.
+- `BACKFILL_MIN_EXCHANGES` is validated via `boundedInt` before being
+  interpolated into SQL — a garbage value (`'abc'` → `NaN`) used to produce
+  invalid query text at runtime.
+
+## [1.3.2] - 2026-07-05
+
+### Fixed
+- **`fact-consolidate-worker` had no single-instance lock** — the SessionStart hook
+  spawns it detached on every session with no lock, so orphaned workers (ppid=1) piled
+  up (measured 14 at once), each spawning a headless Claude session per LLM call and
+  flooding the proxy across the account pool. Added a GLOBAL atomic `wx` pid-lock (same
+  pattern as the ontology/extract/reembed workers). The lock is global, not per-project,
+  because consolidation touches shared global-scope facts — concurrent per-project
+  workers would race on the same rows.
+- **Consolidation now processes the whole backlog in one pass** (`consolidateAllPending`
+  / `getAllNewFactsSince`): the single lock-holder walks every new fact across all
+  scopes/projects exactly once under a single Haiku budget, instead of looping
+  `consolidateFacts` per project — which re-examined shared global facts once per project
+  (up to `MAX_HAIKU_CALLS × projectCount` calls, since INDEPENDENT/CONTRADICTION verdicts
+  keep the fact active) and could starve a project whose only pending work was an old
+  fact matching a new global one. Same orphan-flood class fixed for the backfill workers
+  in v1.3.0; the consolidate worker was the last detached worker missing a lock.
+- **Same-scope-only consolidation** (`searchSimilarFactsSameScope`): a fact is compared
+  ONLY within its own scope — a project fact against its own project's facts, a global
+  fact against other global facts — with the scope gate applied to the full candidate
+  overfetch BEFORE truncation, so an in-scope match is never starved out by closer
+  out-of-scope rows. This closes a cross-scope data-leak/mutation path in both directions:
+  a global driver reaching into a project's private rows, AND a project-private driver
+  rewriting a shared global fact via EVOLUTION (leaking private text to every project) or
+  deactivating it via CONTRADICTION. The old per-project `consolidateFacts()` (which used
+  a project-scoped search that still included globals) was removed — all consolidation
+  now goes through the single-pass, scope-isolated `consolidateAllPending`. The
+  same-scope search pages the KNN fetch (growing until enough in-scope hits or the
+  whole index is scanned) so even >200 closer out-of-scope rows cannot hide a valid
+  in-scope match. `consolidateFacts` is kept as a deprecated, now-scope-safe back-compat
+  export so existing importers don't crash at module load.
+- **Unparseable comparison output is a no-op, not a hard stop**: consolidation is a
+  best-effort background dedup, so a comparison whose LLM output isn't valid JSON is
+  treated as "no verdict" and the cursor advances past it (the call still counts against
+  the per-run Haiku budget). The pair is not lost — both facts stay active and the
+  comparison re-triggers whenever either is a driver/candidate later — and no single fact
+  (a transient non-JSON response, or a deliberately crafted one) can hold the cursor and
+  starve the rest of the backlog. Only TRANSIENT call failures (callHaiku rejected — infra
+  down) hold the cursor to retry, which is safe because during an outage nothing else
+  would progress either.
+- **Keyset consolidation cursor `(created_at, id)`**: the progress cursor was keyed on
+  `created_at` alone, which stalled forever when a single timestamp group held more facts
+  than the per-run Haiku budget (the cursor couldn't advance into a shared timestamp
+  without risking a skip, so every run reprocessed the same oldest N and never reached the
+  rest of the backlog). Keying on the unique `(created_at, id)` pair lets the drain advance
+  one fact at a time — no stall, no same-timestamp skip. The cursor is persisted as JSON;
+  an absent/legacy/corrupt cursor makes the drain start from the BEGINNING (no active fact
+  is skipped — the per-run budget only caps actual consolidation calls, so the whole
+  backlog drains across a few runs regardless of age). A fact imported mid-drain with an
+  old timestamp is not re-driven by the current pass but is still a candidate for future
+  comparisons (best-effort dedup, documented).
+- **Bounded drain page + index**: the consolidation query pages the keyset (LIMIT 2000)
+  instead of materializing every active fact, and a new `idx_facts_active_created_id`
+  index serves the `(is_active, created_at, id)` filter+sort — so a from-the-beginning
+  drain over tens of thousands of facts can't OOM or trigger a full-table temp sort.
+- **Error-classified consolidation failure handling** (`classifyLlmError`): a comparison
+  CALL rejection is three-valued — TRANSIENT (429/5xx/timeout/network/auth), DETERMINISTIC
+  (400/413/422/oversized-prompt), or UNKNOWN (unrecognized). The status is read from the
+  structured error (`status`/`statusCode`) OR the nested SDK/axios shape
+  (`error.response.status`) OR a status number explicitly labelled in the message
+  ("status code 400") — never a bare incidental number ("retry after 400 ms"). The drain
+  loop SKIPS (advances after `facts.consolidation_attempts` reaches MAX, idempotent
+  migration) **only** on a recognized DETERMINISTIC rejection — the one case where the fact
+  itself is provably at fault. TRANSIENT, UNKNOWN, and any non-LLM internal error
+  (parser/DB bug, tagged apart via `LlmCallError`) all HOLD the cursor and retry — an
+  outage or an unrecognized error never silently drains the backlog, and a code bug never
+  gets miscounted as a "bad fact". Skipping only on a certain per-request rejection is the
+  narrowest, safest criterion that satisfies both "an outage must not silently drain the
+  backlog" and "one un-processable fact must not wedge the cursor".
+- **Persisted consolidation cursor**: the worker records the last fully-examined
+  `created_at` (`fact-consolidate-cursor.txt`) and resumes after it, so the single Haiku
+  budget reaches newer/project backlog instead of re-spending every run on the same
+  oldest INDEPENDENT facts. The cursor only advances past a timestamp strictly older than
+  the first unexamined fact, so same-millisecond facts at the budget wall are never
+  skipped; a fact whose comparison errors (transient LLM failure) also holds the cursor
+  back so it is retried, not permanently skipped.
+
 ## [1.3.1] - 2026-07-05
 
 ### Documentation

@@ -1,137 +1,159 @@
 #!/usr/bin/env node
 /**
- * UserPromptSubmit context injection script.
+ * UserPromptSubmit context injection — thin client.
  *
- * Reads USER_PROMPT from env, searches memory-bank for relevant facts
- * (vector similarity), expands with 1-hop ontology relations,
- * then prints a context block to stdout.
+ * Fast path: connect to the warm inject daemon (a unix-socket sidecar inside
+ * any running MCP server, which already has the embedding model loaded) and
+ * get the context back in ~150ms. Cold fallback: compute locally exactly as
+ * before (~2.3s, dominated by model load) when no daemon answers — first
+ * session start, daemon disabled, or any socket hiccup.
  *
- * Environment:
- *   CWD         - current working directory
- *   USER_PROMPT - the user's message text
+ * Input (either):
+ *   stdin JSON  { "prompt": "...", "cwd": "..." }   ← Claude Code hook contract
+ *   env         USER_PROMPT / CWD                   ← manual invocation
+ *
+ * IMPORTANT: keep the import list here LIGHT — the fast path must not pay for
+ * better-sqlite3/transformers imports. Heavy modules load lazily only in the
+ * fallback.
  */
 
-import { initDatabase } from '../dist/db.js';
-import { searchSimilarFacts } from '../dist/fact-db.js';
-import { generateEmbedding, initEmbeddings, queryBaseline } from '../dist/embeddings.js';
-import { getRelatedFacts } from '../dist/ontology-db.js';
-import { detectRepeat, formatRepeatContext } from '../dist/repeat-detector.js';
-import { appendInjectLog } from '../dist/inject-log.js';
+import net from 'node:net';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const TOP_K = 5;
-// Probe-baseline relevance gate (e5 scores are compressed, so absolute
-// thresholds cannot separate relevant from irrelevant). A fact is injected
-// only when sim(query, fact) exceeds the query's own background baseline by
-// this margin. Measured on KR/EN real-DB pairs: related +0.047~+0.123,
-// unrelated -0.028~-0.091; long compound "memory" facts can leak in at
-// +0.04~+0.045, so the margin sits just above that noise band.
-const BASELINE_MARGIN = 0.045;
-const MAX_CONTEXT_FACTS = 8;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Self-heal missing runtime deps (better-sqlite3 등 native 모듈).
+ *
+ * 왜: (a) `claude plugin update` 가 npm install 을 비결정적으로 누락한다
+ * (실측: 1.4.0 캐시엔 node_modules 생성, 1.4.1 캐시엔 미생성 → 콜드 경로
+ * 전체가 Cannot find package 로 사망). (b) cc-sync 는 node_modules 를
+ * 제외하고 plugins/cache 를 타 머신에 실어 나르므로, 동기화로 받은 캐시는
+ * 항상 deps 가 없다. 두 경우 모두 첫 프롬프트에서 감지해 1회 한정으로
+ * detached npm install 을 시도한다 (marker 파일 'wx' 원자 생성으로 중복
+ * 방지 — 실패해도 다음 설치 디렉토리에서만 재시도, 무한 루프 없음).
+ */
+function selfHealDeps(pluginRoot) {
+  const marker = path.join(pluginRoot, '.deps-heal-attempted');
+  try {
+    fs.writeFileSync(marker, new Date().toISOString(), { flag: 'wx' }); // 원자적 1회 게이트
+  } catch {
+    return false; // 이미 시도됨 (성공/실패 무관 — 재폭주 방지)
+  }
+  try {
+    const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
+      cwd: pluginRoot, detached: true, stdio: 'ignore',
+    });
+    child.unref();
+    process.stderr.write('inject-context: missing deps detected — spawned background npm install (one-shot)\n');
+    return true;
+  } catch (e) {
+    process.stderr.write(`inject-context: self-heal spawn failed: ${e && e.message}\n`);
+    return false;
+  }
+}
+
+const SOCKET_CONNECT_TIMEOUT_MS = 300;
+const SOCKET_RESPONSE_TIMEOUT_MS = 3000;
+
+function readStdin(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) return resolve('');
+    let data = '';
+    const timer = setTimeout(() => resolve(data), timeoutMs);
+    process.stdin.on('data', (c) => (data += c));
+    process.stdin.on('end', () => { clearTimeout(timer); resolve(data); });
+    process.stdin.on('error', () => { clearTimeout(timer); resolve(data); });
+  });
+}
+
+function injectSocketPath() {
+  // Mirrors paths.ts getIndexDir() without importing the heavy dist chain.
+  const base = process.env.MEMORY_BANK_CONFIG_DIR
+    || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'superpowers');
+  return path.join(base, 'conversation-index', 'inject-daemon.sock');
+}
+
+/** Ask the warm daemon; resolve null (not reject) on ANY failure so the caller
+ * falls back — the hook must never break a user prompt. */
+function askDaemon(prompt, cwd, sessionId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let conn;
+    try {
+      conn = net.connect(injectSocketPath());
+    } catch {
+      return done(null);
+    }
+    const connectTimer = setTimeout(() => { conn.destroy(); done(null); }, SOCKET_CONNECT_TIMEOUT_MS);
+    conn.on('connect', () => {
+      clearTimeout(connectTimer);
+      conn.setTimeout(SOCKET_RESPONSE_TIMEOUT_MS, () => { conn.destroy(); done(null); });
+      conn.write(JSON.stringify({ prompt, cwd, session_id: sessionId }) + '\n');
+      let buf = '';
+      conn.on('data', (c) => {
+        buf += c.toString('utf8');
+        const nl = buf.indexOf('\n');
+        if (nl < 0) return;
+        try {
+          const res = JSON.parse(buf.slice(0, nl));
+          done(res && res.ok ? String(res.context ?? '') : null);
+        } catch {
+          done(null);
+        }
+        conn.destroy();
+      });
+    });
+    conn.on('error', () => { clearTimeout(connectTimer); done(null); });
+  });
+}
 
 async function main() {
-  const project = process.env.CWD || process.cwd();
-  const userPrompt = process.env.USER_PROMPT || '';
-  const t0 = Date.now();
+  // Parse hook input: stdin JSON first, env fallback (manual runs).
+  const raw = await readStdin();
+  let prompt = '';
+  let cwd = '';
+  let sessionId = '';
+  if (raw) {
+    try {
+      const j = JSON.parse(raw);
+      prompt = String(j.prompt ?? '');
+      cwd = String(j.cwd ?? '');
+      sessionId = String(j.session_id ?? ''); // 세션 dedup 원장 키 (hook stdin 계약)
+    } catch {
+      prompt = raw; // plain-text stdin = the prompt itself
+    }
+  }
+  if (!prompt) prompt = process.env.USER_PROMPT || '';
+  if (!cwd) cwd = process.env.CWD || process.cwd();
+  if (!sessionId) sessionId = process.env.SESSION_ID || '';
 
-  if (!userPrompt || userPrompt.length < 20) {
-    appendInjectLog({ status: 'skipped', project, prompt_len: userPrompt.length });
-    process.exit(0);
+  if (!prompt || prompt.length < 20) return; // not worth an injection
+
+  // FAST PATH — warm daemon inside a running MCP server.
+  const daemonContext = await askDaemon(prompt, cwd, sessionId);
+  if (daemonContext !== null) {
+    if (daemonContext) process.stdout.write(daemonContext + '\n');
+    return;
   }
 
+  // COLD FALLBACK — compute locally (heavy imports load only here).
   try {
-    await initEmbeddings();
-    const embedding = await generateEmbedding(userPrompt, 'query');
-    const baseline = await queryBaseline(embedding);
-
-    const db = initDatabase();
-    // threshold 0: take top-k by distance, then gate by baseline margin below
-    const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
-    const results = candidates.filter((r) => {
-      const similarity = 1 - (r.distance * r.distance) / 2;
-      return similarity - baseline >= BASELINE_MARGIN;
-    });
-
-    if (results.length === 0) {
-      db.close();
-      appendInjectLog({
-        status: 'no-match',
-        project,
-        prompt_len: userPrompt.length,
-        candidates: candidates.length,
-        injected: 0,
-        duration_ms: Date.now() - t0,
-      });
-      process.exit(0);
-    }
-
-    // Expand with 1-hop relations
-    const seenIds = new Set(results.map(r => r.fact.id));
-    const expandedFacts = [...results.map(r => ({ fact: r.fact, note: '' }))];
-
-    for (const { fact } of results.slice(0, 3)) {
-      const related = getRelatedFacts(db, fact.id, 1, 0.6, 0.2, project);
-      for (const { fact: relFact, relation } of related) {
-        if (!seenIds.has(relFact.id) && expandedFacts.length < MAX_CONTEXT_FACTS) {
-          seenIds.add(relFact.id);
-          expandedFacts.push({ fact: relFact, note: `[${relation.relation_type}]` });
-        }
-      }
-    }
-
-    db.close();
-
-    if (expandedFacts.length === 0) {
-      appendInjectLog({
-        status: 'no-match',
-        project,
-        prompt_len: userPrompt.length,
-        candidates: candidates.length,
-        injected: 0,
-        duration_ms: Date.now() - t0,
-      });
-      process.exit(0);
-    }
-
-    // Format context block
-    const lines = ['📌 관련 과거 결정:'];
-    for (const { fact, note } of expandedFacts) {
-      const dateStr = fact.created_at.slice(0, 10);
-      lines.push(`- ${note ? note + ' ' : ''}[${fact.category}] ${fact.fact} (${dateStr})`);
-    }
-
-    // Detect repeated prompts
-    try {
-      const repeats = await detectRepeat(userPrompt, project, 2, 0.85);
-      const repeatCtx = formatRepeatContext(repeats);
-      if (repeatCtx) {
-        lines.push('');
-        lines.push(repeatCtx);
-      }
-    } catch {
-      // Repeat detection is best-effort
-    }
-
-    process.stdout.write(lines.join('\n') + '\n');
-    appendInjectLog({
-      status: 'injected',
-      project,
-      prompt_len: userPrompt.length,
-      candidates: candidates.length,
-      injected: expandedFacts.length,
-      duration_ms: Date.now() - t0,
-    });
+    const { computeInjectContext } = await import(path.join(__dirname, '../dist/inject-core.js'));
+    const context = await computeInjectContext(prompt, cwd, 'fallback', sessionId || undefined);
+    if (context) process.stdout.write(context + '\n');
   } catch (error) {
-    // Non-fatal: don't disrupt user workflow
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`inject-context: error: ${message}\n`);
-    appendInjectLog({
-      status: 'error',
-      project,
-      prompt_len: userPrompt.length,
-      duration_ms: Date.now() - t0,
-      error: message.slice(0, 300),
-    });
-    process.exit(0);
+    const msg = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`inject-context: error: ${msg}\n`);
+    // deps 누락(plugin update 미설치 / cc-sync 로 받은 캐시)이면 1회 자가치유
+    if (/Cannot find (package|module)|ERR_MODULE_NOT_FOUND/.test(msg)) {
+      selfHealDeps(path.join(__dirname, '..'));
+    }
   }
 }
 

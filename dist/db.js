@@ -15,11 +15,20 @@ export const VEC_INT8_SCALE = 127;
  * declared column type cannot. Absent table ⇒ 'int8' (that is what
  * initDatabase creates for fresh DBs).
  */
-export function getVecDtype(db) {
-    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`).get();
+const VEC_TABLES = new Set(['vec_exchanges', 'vec_facts', 'vec_facts_kr', 'vec_categories']);
+/** Authoritative dtype of any vec0 table — read from the ACTUAL schema in
+ * sqlite_master (never a flag), so readers/writers can never disagree with a
+ * migration swap. Unknown/absent table defaults to int8 (the fresh-DB DDL). */
+export function getVecTableDtype(db, table) {
+    if (!VEC_TABLES.has(table))
+        throw new Error(`not a vec table: ${table}`);
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`).get(table);
     if (!row?.sql)
         return 'int8';
     return /int8\s*\[/i.test(row.sql) ? 'int8' : 'float32';
+}
+export function getVecDtype(db) {
+    return getVecTableDtype(db, 'vec_exchanges');
 }
 /** Convert a float embedding to the blob matching the table dtype. */
 export function embeddingToVecBlob(embedding, dtype) {
@@ -39,6 +48,18 @@ export function vecParamSql(dtype) {
 /** Normalize a vec KNN distance back to float32 scale (int8 distances are ×127). */
 export function normalizeVecDistance(distance, dtype) {
     return dtype === 'int8' ? distance / VEC_INT8_SCALE : distance;
+}
+/**
+ * Convert a (float32-scale) L2 distance between UNIT vectors to cosine
+ * similarity. e5 embeddings are L2-normalized, so ‖a-b‖² = 2(1 - cos) and
+ * cos = 1 - d²/2. Single source of truth: every relevance gate / threshold in
+ * search, fact search, repeat detection, ontology and the avatar responder
+ * used to inline this identical expression (9 copies) — a metric change in one
+ * place would silently make those gates disagree. Pass a NORMALIZED distance
+ * (run it through normalizeVecDistance first for int8 tables).
+ */
+export function l2DistanceToSimilarity(distance) {
+    return 1 - (distance * distance) / 2;
 }
 export function migrateSchema(db) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
@@ -81,6 +102,16 @@ export function initDatabase() {
     // Enable WAL mode for better concurrency
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
+    // Cap the -wal file so it is truncated back after each checkpoint. The default
+    // (-1 = unlimited) let the WAL grow WITHOUT BOUND under this workload: many
+    // long-lived MCP-server readers (one per session) keep a read mark active
+    // almost continuously, so SQLite's auto-checkpoint can rarely advance past the
+    // oldest reader and the file only ever grew — observed live at 1.4 GB, which
+    // crawled the re-embed drain from ~13 to ~3 rows/s. Applied on EVERY connection
+    // (every worker + the MCP server), so no single writer can bloat the WAL no
+    // matter which path is active. 64 MiB is far above normal working-set needs; it
+    // only reclaims runaway file space after checkpoints.
+    db.pragma('journal_size_limit = 67108864');
     // Required so the exchanges_fts AFTER DELETE trigger fires when an exchange is
     // re-indexed via `INSERT OR REPLACE` (the REPLACE-induced delete does NOT fire
     // delete triggers unless recursive_triggers is on — verified: without it a
@@ -279,7 +310,7 @@ export function initDatabase() {
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // Korean-text vector index: facts are embedded twice (fact / fact_kr) because
@@ -288,7 +319,7 @@ export function initDatabase() {
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // Category embedding index: lets the ontology classifier retrieve the top-K
@@ -300,7 +331,7 @@ export function initDatabase() {
     db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
     // === Ontology Schema ===
@@ -347,6 +378,16 @@ export function initDatabase() {
     if (!factColumnNames.has('ontology_attempts')) {
         db.prepare('ALTER TABLE facts ADD COLUMN ontology_attempts INTEGER NOT NULL DEFAULT 0').run();
     }
+    // Consolidation attempt ledger (cross-run): a driver fact whose comparison
+    // CALL keeps failing is held (retried) up to MAX attempts, then skipped so it
+    // can't wedge the cursor. This distinguishes a short/transient outage (a few
+    // attempts, then it succeeds and the counter resets) from a persistently
+    // un-processable fact (reaches MAX and is skipped) WITHOUT inspecting the
+    // provider-specific error — run-local counting alone can't, because a real
+    // outage spans separate worker runs.
+    if (!factColumnNames.has('consolidation_attempts')) {
+        db.prepare('ALTER TABLE facts ADD COLUMN consolidation_attempts INTEGER NOT NULL DEFAULT 0').run();
+    }
     if (!factColumnNames.has('ontology_last_attempt_at')) {
         db.prepare('ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT').run();
     }
@@ -387,6 +428,10 @@ export function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_target ON ontology_relations(target_fact_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
+    // Keyset pagination for the consolidation drain (getAllNewFactsSince): serves
+    // both `WHERE is_active = 1 AND (created_at, id) > cursor` and the
+    // `ORDER BY created_at, id` without a temp sort over the whole table.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_active_created_id ON facts(is_active, created_at, id)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
     // Tracks which sessions have been through fact extraction (SessionEnd hook
     // or the backfill worker). Makes extraction idempotent and lets the backfill

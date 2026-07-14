@@ -3225,8 +3225,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path6) {
-      let input = path6;
+    function removeDotSegments(path9) {
+      let input = path9;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3425,8 +3425,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path6, query2] = wsComponent.resourceName.split("?");
-        wsComponent.path = path6 && path6 !== "/" ? path6 : void 0;
+        const [path9, query2] = wsComponent.resourceName.split("?");
+        wsComponent.path = path9 && path9 !== "/" ? path9 : void 0;
         wsComponent.query = query2;
         wsComponent.resourceName = void 0;
       }
@@ -6788,12 +6788,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs7, exportName) {
+    function addFormats(ajv, list, fs10, exportName) {
       var _a2;
       var _b;
       (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== void 0 ? _a2 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs7[f]);
+        ajv.addFormat(f, fs10[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -8275,17 +8275,17 @@ var init_stainless_helper_header = __esm({
 function encodeURIPath(str) {
   return str.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@]+/g, encodeURIComponent);
 }
-var EMPTY, createPathTagFunction, path3;
+var EMPTY, createPathTagFunction, path6;
 var init_path = __esm({
   "node_modules/@anthropic-ai/sdk/internal/utils/path.mjs"() {
     init_error();
     EMPTY = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.create(null));
-    createPathTagFunction = (pathEncoder = encodeURIPath) => function path6(statics, ...params) {
+    createPathTagFunction = (pathEncoder = encodeURIPath) => function path9(statics, ...params) {
       if (statics.length === 1)
         return statics[0];
       let postPath = false;
       const invalidSegments = [];
-      const path7 = statics.reduce((previousValue, currentValue, index) => {
+      const path10 = statics.reduce((previousValue, currentValue, index) => {
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
@@ -8302,7 +8302,7 @@ var init_path = __esm({
         }
         return previousValue + currentValue + (index === params.length ? "" : encoded);
       }, "");
-      const pathOnly = path7.split(/[?#]/, 1)[0];
+      const pathOnly = path10.split(/[?#]/, 1)[0];
       const invalidSegmentPattern = /(?<=^|\/)(?:\.|%2e){1,2}(?=\/|$)/gi;
       let match;
       while ((match = invalidSegmentPattern.exec(pathOnly)) !== null) {
@@ -8323,12 +8323,12 @@ var init_path = __esm({
         }, "");
         throw new AnthropicError(`Path parameters result in path with invalid segments:
 ${invalidSegments.map((e) => e.error).join("\n")}
-${path7}
+${path10}
 ${underline}`);
       }
-      return path7;
+      return path10;
     };
-    path3 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
+    path6 = /* @__PURE__ */ createPathTagFunction(encodeURIPath);
   }
 });
 
@@ -8377,7 +8377,7 @@ var init_files = __esm({
        */
       delete(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path3`/v1/files/${fileID}`, {
+        return this._client.delete(path6`/v1/files/${fileID}`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "files-api-2025-04-14"].toString() },
@@ -8400,7 +8400,7 @@ var init_files = __esm({
        */
       download(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/files/${fileID}/content`, {
+        return this._client.get(path6`/v1/files/${fileID}/content`, {
           ...options,
           headers: buildHeaders([
             {
@@ -8423,7 +8423,7 @@ var init_files = __esm({
        */
       retrieveMetadata(fileID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/files/${fileID}`, {
+        return this._client.get(path6`/v1/files/${fileID}`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "files-api-2025-04-14"].toString() },
@@ -8481,7 +8481,7 @@ var init_models = __esm({
        */
       retrieve(modelID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/models/${modelID}?beta=true`, {
+        return this._client.get(path6`/v1/models/${modelID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { ...betas?.toString() != null ? { "anthropic-beta": betas?.toString() } : void 0 },
@@ -9948,7 +9948,7 @@ var init_batches = __esm({
        */
       retrieve(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/messages/batches/${messageBatchID}?beta=true`, {
+        return this._client.get(path6`/v1/messages/batches/${messageBatchID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10001,7 +10001,7 @@ var init_batches = __esm({
        */
       delete(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path3`/v1/messages/batches/${messageBatchID}?beta=true`, {
+        return this._client.delete(path6`/v1/messages/batches/${messageBatchID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10033,7 +10033,7 @@ var init_batches = __esm({
        */
       cancel(messageBatchID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.post(path3`/v1/messages/batches/${messageBatchID}/cancel?beta=true`, {
+        return this._client.post(path6`/v1/messages/batches/${messageBatchID}/cancel?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "message-batches-2024-09-24"].toString() },
@@ -10256,7 +10256,7 @@ var init_versions = __esm({
        */
       create(skillID, params = {}, options) {
         const { betas, ...body } = params ?? {};
-        return this._client.post(path3`/v1/skills/${skillID}/versions?beta=true`, multipartFormRequestOptions({
+        return this._client.post(path6`/v1/skills/${skillID}/versions?beta=true`, multipartFormRequestOptions({
           body,
           ...options,
           headers: buildHeaders([
@@ -10278,7 +10278,7 @@ var init_versions = __esm({
        */
       retrieve(version2, params, options) {
         const { skill_id, betas } = params;
-        return this._client.get(path3`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
+        return this._client.get(path6`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10301,7 +10301,7 @@ var init_versions = __esm({
        */
       list(skillID, params = {}, options) {
         const { betas, ...query2 } = params ?? {};
-        return this._client.getAPIList(path3`/v1/skills/${skillID}/versions?beta=true`, PageCursor, {
+        return this._client.getAPIList(path6`/v1/skills/${skillID}/versions?beta=true`, PageCursor, {
           query: query2,
           ...options,
           headers: buildHeaders([
@@ -10323,7 +10323,7 @@ var init_versions = __esm({
        */
       delete(version2, params, options) {
         const { skill_id, betas } = params;
-        return this._client.delete(path3`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
+        return this._client.delete(path6`/v1/skills/${skill_id}/versions/${version2}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10380,7 +10380,7 @@ var init_skills = __esm({
        */
       retrieve(skillID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/skills/${skillID}?beta=true`, {
+        return this._client.get(path6`/v1/skills/${skillID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -10420,7 +10420,7 @@ var init_skills = __esm({
        */
       delete(skillID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.delete(path3`/v1/skills/${skillID}?beta=true`, {
+        return this._client.delete(path6`/v1/skills/${skillID}?beta=true`, {
           ...options,
           headers: buildHeaders([
             { "anthropic-beta": [...betas ?? [], "skills-2025-10-02"].toString() },
@@ -11187,7 +11187,7 @@ var init_batches2 = __esm({
        * ```
        */
       retrieve(messageBatchID, options) {
-        return this._client.get(path3`/v1/messages/batches/${messageBatchID}`, options);
+        return this._client.get(path6`/v1/messages/batches/${messageBatchID}`, options);
       }
       /**
        * List all Message Batches within a Workspace. Most recently created batches are
@@ -11223,7 +11223,7 @@ var init_batches2 = __esm({
        * ```
        */
       delete(messageBatchID, options) {
-        return this._client.delete(path3`/v1/messages/batches/${messageBatchID}`, options);
+        return this._client.delete(path6`/v1/messages/batches/${messageBatchID}`, options);
       }
       /**
        * Batches may be canceled any time before processing ends. Once cancellation is
@@ -11247,7 +11247,7 @@ var init_batches2 = __esm({
        * ```
        */
       cancel(messageBatchID, options) {
-        return this._client.post(path3`/v1/messages/batches/${messageBatchID}/cancel`, options);
+        return this._client.post(path6`/v1/messages/batches/${messageBatchID}/cancel`, options);
       }
       /**
        * Streams the results of a Message Batch as a `.jsonl` file.
@@ -11424,7 +11424,7 @@ var init_models2 = __esm({
        */
       retrieve(modelID, params = {}, options) {
         const { betas } = params ?? {};
-        return this._client.get(path3`/v1/models/${modelID}`, {
+        return this._client.get(path6`/v1/models/${modelID}`, {
           ...options,
           headers: buildHeaders([
             { ...betas?.toString() != null ? { "anthropic-beta": betas?.toString() } : void 0 },
@@ -11628,9 +11628,9 @@ var init_client = __esm({
       makeStatusError(status, error2, message, headers) {
         return APIError.generate(status, error2, message, headers);
       }
-      buildURL(path6, query2, defaultBaseURL) {
+      buildURL(path9, query2, defaultBaseURL) {
         const baseURL = !__classPrivateFieldGet(this, _BaseAnthropic_instances, "m", _BaseAnthropic_baseURLOverridden).call(this) && defaultBaseURL || this.baseURL;
-        const url = isAbsoluteURL(path6) ? new URL(path6) : new URL(baseURL + (baseURL.endsWith("/") && path6.startsWith("/") ? path6.slice(1) : path6));
+        const url = isAbsoluteURL(path9) ? new URL(path9) : new URL(baseURL + (baseURL.endsWith("/") && path9.startsWith("/") ? path9.slice(1) : path9));
         const defaultQuery = this.defaultQuery();
         if (!isEmptyObj(defaultQuery)) {
           query2 = { ...defaultQuery, ...query2 };
@@ -11661,24 +11661,24 @@ var init_client = __esm({
        */
       async prepareRequest(request, { url, options }) {
       }
-      get(path6, opts) {
-        return this.methodRequest("get", path6, opts);
+      get(path9, opts) {
+        return this.methodRequest("get", path9, opts);
       }
-      post(path6, opts) {
-        return this.methodRequest("post", path6, opts);
+      post(path9, opts) {
+        return this.methodRequest("post", path9, opts);
       }
-      patch(path6, opts) {
-        return this.methodRequest("patch", path6, opts);
+      patch(path9, opts) {
+        return this.methodRequest("patch", path9, opts);
       }
-      put(path6, opts) {
-        return this.methodRequest("put", path6, opts);
+      put(path9, opts) {
+        return this.methodRequest("put", path9, opts);
       }
-      delete(path6, opts) {
-        return this.methodRequest("delete", path6, opts);
+      delete(path9, opts) {
+        return this.methodRequest("delete", path9, opts);
       }
-      methodRequest(method, path6, opts) {
+      methodRequest(method, path9, opts) {
         return this.request(Promise.resolve(opts).then((opts2) => {
-          return { method, path: path6, ...opts2 };
+          return { method, path: path9, ...opts2 };
         }));
       }
       request(options, remainingRetries = null) {
@@ -11782,8 +11782,8 @@ var init_client = __esm({
         }));
         return { response, options, controller, requestLogID, retryOfRequestLogID, startTime };
       }
-      getAPIList(path6, Page2, opts) {
-        return this.requestAPIList(Page2, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path6, ...opts2 })) : { method: "get", path: path6, ...opts });
+      getAPIList(path9, Page2, opts) {
+        return this.requestAPIList(Page2, opts && "then" in opts ? opts.then((opts2) => ({ method: "get", path: path9, ...opts2 })) : { method: "get", path: path9, ...opts });
       }
       requestAPIList(Page2, options) {
         const request = this.makeRequest(options, null, void 0);
@@ -11871,8 +11871,8 @@ var init_client = __esm({
       }
       async buildRequest(inputOptions, { retryCount = 0 } = {}) {
         const options = { ...inputOptions };
-        const { method, path: path6, query: query2, defaultBaseURL } = options;
-        const url = this.buildURL(path6, query2, defaultBaseURL);
+        const { method, path: path9, query: query2, defaultBaseURL } = options;
+        const url = this.buildURL(path9, query2, defaultBaseURL);
         if ("timeout" in options)
           validatePositiveInteger("timeout", options.timeout);
         options.timeout = options.timeout ?? this.timeout;
@@ -12496,8 +12496,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path6, errorMaps, issueData } = params;
-  const fullPath = [...path6, ...issueData.path || []];
+  const { data, path: path9, errorMaps, issueData } = params;
+  const fullPath = [...path9, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -12613,11 +12613,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path6, key) {
+  constructor(parent, value, path9, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path6;
+    this._path = path9;
     this._key = key;
   }
   get path() {
@@ -16255,10 +16255,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path6) {
-  if (!path6)
+function getElementAtPath(obj, path9) {
+  if (!path9)
     return obj;
-  return path6.reduce((acc, key) => acc?.[key], obj);
+  return path9.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16578,11 +16578,11 @@ function aborted(x2, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path6, issues) {
+function prefixIssues(path9, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path6);
+    iss.path.unshift(path9);
     return iss;
   });
 }
@@ -23134,11 +23134,10 @@ var StdioServerTransport = class {
   }
 };
 
-// src/db.ts
-import Database from "better-sqlite3";
-import path2 from "path";
-import fs2 from "fs";
-import * as sqliteVec from "sqlite-vec";
+// src/inject-daemon.ts
+import net from "node:net";
+import fs7 from "node:fs";
+import path5 from "node:path";
 
 // src/paths.ts
 import os from "os";
@@ -23181,6 +23180,16 @@ function getDbPath() {
   }
   return path.join(getIndexDir(), "db.sqlite");
 }
+function getProjectsDir() {
+  return process.env.TEST_PROJECTS_DIR || path.join(os.homedir(), ".claude", "projects");
+}
+var LLM_WORKDIR_BASENAME = "memory-bank-llm";
+
+// src/db.ts
+import Database from "better-sqlite3";
+import path2 from "path";
+import fs2 from "fs";
+import * as sqliteVec from "sqlite-vec";
 
 // src/project-canon.ts
 var slugCache = /* @__PURE__ */ new Map();
@@ -23295,15 +23304,46 @@ async function generateEmbedding(text, mode = "passage") {
   }
   return embedding;
 }
+var BACKGROUND_PROBES = [
+  "\uC624\uB298 \uB0A0\uC528\uAC00 \uCC38 \uC88B\uB124\uC694",
+  "\uC8FC\uB9D0\uC5D0 \uBB50 \uD560\uC9C0 \uACE0\uBBFC \uC911\uC774\uC57C",
+  "\uB9DB\uC788\uB294 \uC800\uB141 \uC2DD\uC0AC\uB97C \uD588\uB2E4",
+  "The weather is nice today",
+  "I went for a walk in the park",
+  "\uC74C\uC545\uC744 \uB4E4\uC73C\uBA74\uC11C \uD734\uC2DD\uC744 \uCDE8\uD588\uB2E4",
+  "\uC0C8\uB85C\uC6B4 \uCDE8\uBBF8\uB97C \uC2DC\uC791\uD574\uBCFC\uAE4C \uC0DD\uAC01 \uC911",
+  "Let me think about what to do next"
+];
+var probeEmbeddings = null;
+async function queryBaseline(queryEmbedding) {
+  if (!probeEmbeddings) {
+    probeEmbeddings = [];
+    for (const p of BACKGROUND_PROBES) {
+      probeEmbeddings.push(await generateEmbedding(p, "passage"));
+    }
+  }
+  let max = -1;
+  for (const probe of probeEmbeddings) {
+    let dot = 0;
+    for (let i = 0; i < probe.length; i++) dot += probe[i] * queryEmbedding[i];
+    if (dot > max) max = dot;
+  }
+  return max;
+}
 
 // src/db.ts
 var VEC_INT8_SCALE = 127;
-function getVecDtype(db) {
+var VEC_TABLES = /* @__PURE__ */ new Set(["vec_exchanges", "vec_facts", "vec_facts_kr", "vec_categories"]);
+function getVecTableDtype(db, table) {
+  if (!VEC_TABLES.has(table)) throw new Error(`not a vec table: ${table}`);
   const row = db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_exchanges'`
-  ).get();
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`
+  ).get(table);
   if (!row?.sql) return "int8";
   return /int8\s*\[/i.test(row.sql) ? "int8" : "float32";
+}
+function getVecDtype(db) {
+  return getVecTableDtype(db, "vec_exchanges");
 }
 function embeddingToVecBlob(embedding, dtype) {
   if (dtype === "int8") {
@@ -23320,6 +23360,9 @@ function vecParamSql(dtype) {
 }
 function normalizeVecDistance(distance, dtype) {
   return dtype === "int8" ? distance / VEC_INT8_SCALE : distance;
+}
+function l2DistanceToSimilarity(distance) {
+  return 1 - distance * distance / 2;
 }
 function migrateSchema(db) {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
@@ -23359,6 +23402,7 @@ function initDatabase() {
   sqliteVec.load(db);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
+  db.pragma("journal_size_limit = 67108864");
   db.pragma("recursive_triggers = ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS exchanges (
@@ -23506,19 +23550,19 @@ function initDatabase() {
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts_kr USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_categories USING vec0(
       id TEXT PRIMARY KEY,
-      embedding FLOAT[384]
+      embedding int8[384]
     )
   `);
   db.exec(`
@@ -23557,6 +23601,9 @@ function initDatabase() {
   if (!factColumnNames.has("ontology_attempts")) {
     db.prepare("ALTER TABLE facts ADD COLUMN ontology_attempts INTEGER NOT NULL DEFAULT 0").run();
   }
+  if (!factColumnNames.has("consolidation_attempts")) {
+    db.prepare("ALTER TABLE facts ADD COLUMN consolidation_attempts INTEGER NOT NULL DEFAULT 0").run();
+  }
   if (!factColumnNames.has("ontology_last_attempt_at")) {
     db.prepare("ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT").run();
   }
@@ -23592,6 +23639,7 @@ function initDatabase() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_relations_target ON ontology_relations(target_fact_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_ontology ON facts(ontology_category_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_coding_agent ON facts(coding_agent)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_facts_active_created_id ON facts(is_active, created_at, id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ontology_categories_domain ON ontology_categories(domain_id)`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS extraction_log (
@@ -23606,6 +23654,10 @@ function initDatabase() {
 }
 
 // src/fact-db.ts
+function vecParamFor(db, table, embedding) {
+  const dt = getVecTableDtype(db, table);
+  return { sql: vecParamSql(dt), blob: embeddingToVecBlob(embedding, dt), dt };
+}
 function getRevisions(db, factId) {
   return db.prepare(
     "SELECT * FROM fact_revisions WHERE fact_id = ? ORDER BY created_at DESC"
@@ -23613,16 +23665,18 @@ function getRevisions(db, factId) {
 }
 function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85) {
   const canonProject = project ? canonicalizeProject(db, project) : project;
-  const buf = Buffer.from(new Float32Array(embedding).buffer);
   const candidateFetch = Math.max(limit * 2, 50);
   const fetch2 = (table) => {
     try {
-      return db.prepare(`
+      const p = vecParamFor(db, table, embedding);
+      const rows = db.prepare(`
         SELECT id, distance FROM ${table}
-        WHERE embedding MATCH ?
+        WHERE embedding MATCH ${p.sql}
         ORDER BY distance
         LIMIT ?
-      `).all(buf, candidateFetch);
+      `).all(p.blob, candidateFetch);
+      for (const r of rows) r.distance = normalizeVecDistance(r.distance, p.dt);
+      return rows;
     } catch {
       return [];
     }
@@ -23635,7 +23689,7 @@ function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85)
   const merged = [...best.entries()].map(([id, distance]) => ({ id, distance })).sort((a, b2) => a.distance - b2.distance);
   const results = [];
   for (const vr of merged) {
-    const similarity = 1 - vr.distance * vr.distance / 2;
+    const similarity = l2DistanceToSimilarity(vr.distance);
     if (similarity < threshold) continue;
     const row = db.prepare(
       "SELECT * FROM facts WHERE id = ? AND is_active = 1 AND embedding_version = ?"
@@ -23649,16 +23703,18 @@ function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85)
   return results;
 }
 function searchAllFacts(db, embedding, limit = 10, threshold = 0.6) {
+  const pAll = vecParamFor(db, "vec_facts", embedding);
   const vecResults = db.prepare(`
     SELECT id, distance
     FROM vec_facts
-    WHERE embedding MATCH ?
+    WHERE embedding MATCH ${pAll.sql}
     ORDER BY distance
     LIMIT ?
-  `).all(Buffer.from(new Float32Array(embedding).buffer), limit * 2);
+  `).all(pAll.blob, limit * 2);
+  for (const r of vecResults) r.distance = normalizeVecDistance(r.distance, pAll.dt);
   const results = [];
   for (const vr of vecResults) {
-    const similarity = 1 - vr.distance * vr.distance / 2;
+    const similarity = l2DistanceToSimilarity(vr.distance);
     if (similarity < threshold) continue;
     const row = db.prepare("SELECT * FROM facts WHERE id = ? AND is_active = 1").get(vr.id);
     if (!row) continue;
@@ -24249,21 +24305,44 @@ async function searchConversations(query2, options = {}) {
     };
   });
 }
+var lineCountCache = /* @__PURE__ */ new Map();
+var LINE_COUNT_CACHE_MAX = 2e3;
 async function countLines(filePath) {
   try {
-    const fileStream = createArchiveReadStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-    let count = 0;
-    for await (const line of rl) {
-      if (line.trim()) count++;
-    }
-    return count;
-  } catch (error2) {
-    return 0;
+    const row = getSearchDb().prepare(
+      "SELECT MAX(line_end) AS n FROM exchanges WHERE archive_path = ?"
+    ).get(filePath);
+    if (row?.n) return row.n;
+  } catch {
   }
+  let key = filePath;
+  try {
+    const st = statArchiveFile(filePath);
+    if (st) key = `${filePath}:${st.mtimeMs}:${st.size}`;
+  } catch {
+  }
+  const hit = lineCountCache.get(key);
+  if (hit !== void 0) return hit;
+  const scan = (async () => {
+    try {
+      const fileStream = createArchiveReadStream(filePath);
+      const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity
+      });
+      let count = 0;
+      for await (const line of rl) {
+        if (line.trim()) count++;
+      }
+      return count;
+    } catch {
+      lineCountCache.delete(key);
+      return 0;
+    }
+  })();
+  if (lineCountCache.size >= LINE_COUNT_CACHE_MAX) lineCountCache.clear();
+  lineCountCache.set(key, scan);
+  return scan;
 }
 function getFileSizeInKB(filePath) {
   const stats = statArchiveFile(filePath);
@@ -24277,6 +24356,7 @@ async function formatResults(results) {
   let output = `Found ${results.length} relevant conversation${results.length > 1 ? "s" : ""}:
 
 `;
+  const lineCounts = await Promise.all(results.map((r) => countLines(r.exchange.archivePath)));
   for (let index = 0; index < results.length; index++) {
     const result = results[index];
     const date3 = new Date(result.exchange.timestamp).toISOString().split("T")[0];
@@ -24304,7 +24384,7 @@ async function formatResults(results) {
 `;
     }
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
+    const totalLines = lineCounts[index];
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
     output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)
 
@@ -24366,7 +24446,7 @@ async function getKnowledgeContext(query2, project, limit = 5) {
     const categoryMap = new Map(categories.map((c) => [c.id, { name: c.name, domainId: c.domain_id }]));
     const enrichedFacts = [];
     for (const { fact, distance } of factResults) {
-      const similarity = parseFloat((1 - distance * distance / 2).toFixed(3));
+      const similarity = parseFloat(l2DistanceToSimilarity(distance).toFixed(3));
       const catInfo = fact.ontology_category_id ? categoryMap.get(fact.ontology_category_id) : void 0;
       const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "Unclassified" : "Unclassified";
       const catName = catInfo ? catInfo.name : "Unclassified";
@@ -24437,6 +24517,342 @@ async function formatMultiConceptResults(results, concepts) {
 `;
   }
   return output;
+}
+
+// src/repeat-detector.ts
+async function detectRepeat(prompt, project, limit = 3, threshold = 0.82, opts = {}) {
+  let embedding = opts.embedding;
+  if (!embedding) {
+    await initEmbeddings();
+    embedding = await generateEmbedding(prompt, "query");
+  }
+  const ownDb = !opts.db;
+  const db = opts.db ?? initDatabase();
+  try {
+    const vecDtype = getVecDtype(db);
+    const vecResults = db.prepare(`
+      SELECT id, distance
+      FROM vec_exchanges
+      WHERE embedding MATCH ${vecParamSql(vecDtype)}
+      ORDER BY distance
+      LIMIT ?
+    `).all(
+      embeddingToVecBlob(embedding, vecDtype),
+      limit * 3
+    );
+    const matches = [];
+    for (const vr of vecResults) {
+      const d2 = normalizeVecDistance(vr.distance, vecDtype);
+      const similarity = l2DistanceToSimilarity(d2);
+      if (similarity < threshold) continue;
+      const row = db.prepare(`
+        SELECT id, project, timestamp, user_message, assistant_message,
+               archive_path, line_start, line_end
+        FROM exchanges WHERE id = ? AND embedding_version = ?
+      `).get(vr.id, EMBEDDING_VERSION);
+      if (!row) continue;
+      if (project && row["project"] !== project) continue;
+      const assistantMsg = row["assistant_message"];
+      const assistantSummary = assistantMsg.split("\n").filter((line) => line.trim().length > 10).slice(0, 3).join("\n").substring(0, 300);
+      matches.push({
+        exchangeId: row["id"],
+        project: row["project"],
+        timestamp: row["timestamp"],
+        userMessage: row["user_message"].substring(0, 200),
+        assistantSummary,
+        similarity,
+        archivePath: row["archive_path"],
+        lineStart: row["line_start"],
+        lineEnd: row["line_end"]
+      });
+      if (matches.length >= limit) break;
+    }
+    return matches;
+  } finally {
+    if (ownDb) db.close();
+  }
+}
+function formatRepeatContext(matches) {
+  if (matches.length === 0) return "";
+  const lines = ["\u{1F504} \uBE44\uC2B7\uD55C \uC9C8\uBB38\uC744 \uC774\uC804\uC5D0 \uD558\uC2E0 \uC801\uC774 \uC788\uC2B5\uB2C8\uB2E4:"];
+  for (const m2 of matches) {
+    const date3 = m2.timestamp.slice(0, 10);
+    const sim = Math.round(m2.similarity * 100);
+    lines.push(`
+[${date3}, ${sim}% \uC720\uC0AC] "${m2.userMessage.trim()}..."`);
+    lines.push(`\u2192 ${m2.assistantSummary.trim()}`);
+    lines.push(`  (Lines ${m2.lineStart}-${m2.lineEnd} in ${m2.archivePath})`);
+  }
+  return lines.join("\n");
+}
+
+// src/inject-log.ts
+import fs5 from "fs";
+import path3 from "path";
+var MAX_LOG_BYTES = 5 * 1024 * 1024;
+function getInjectLogPath() {
+  const dir = path3.join(getIndexDir(), "logs");
+  if (!fs5.existsSync(dir)) {
+    fs5.mkdirSync(dir, { recursive: true });
+  }
+  return path3.join(dir, "inject-context.jsonl");
+}
+function appendInjectLog(entry) {
+  try {
+    const logPath = getInjectLogPath();
+    try {
+      const stat = fs5.statSync(logPath);
+      if (stat.size > MAX_LOG_BYTES) {
+        fs5.renameSync(logPath, `${logPath}.old`);
+      }
+    } catch {
+    }
+    const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...entry });
+    fs5.appendFileSync(logPath, line + "\n");
+  } catch {
+  }
+}
+
+// src/inject-ledger.ts
+import fs6 from "node:fs";
+import path4 from "node:path";
+var MAX_IDS = 400;
+var TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+function ledgerDir() {
+  return path4.join(getIndexDir(), "state", "inject-ledger");
+}
+function sanitizeSessionId(sessionId) {
+  if (!sessionId) return null;
+  const clean = String(sessionId).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+  return clean.length >= 4 ? clean : null;
+}
+function ledgerPath(cleanId) {
+  return path4.join(ledgerDir(), cleanId + ".json");
+}
+function loadLedger(sessionId) {
+  const id = sanitizeSessionId(sessionId);
+  if (!id) return /* @__PURE__ */ new Set();
+  try {
+    const raw = fs6.readFileSync(ledgerPath(id), "utf8");
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return new Set(arr.filter((x2) => typeof x2 === "string"));
+  } catch {
+  }
+  return /* @__PURE__ */ new Set();
+}
+function appendLedger(sessionId, existing, newIds) {
+  const id = sanitizeSessionId(sessionId);
+  if (!id || newIds.length === 0) return;
+  try {
+    const dir = ledgerDir();
+    fs6.mkdirSync(dir, { recursive: true });
+    const ordered = [...existing, ...newIds.filter((n) => !existing.has(n))];
+    const bounded = ordered.length > MAX_IDS ? ordered.slice(ordered.length - MAX_IDS) : ordered;
+    const p = ledgerPath(id);
+    const tmp = p + ".tmp";
+    fs6.writeFileSync(tmp, JSON.stringify(bounded));
+    fs6.renameSync(tmp, p);
+    pruneOldLedgers(dir);
+  } catch {
+  }
+}
+function pruneOldLedgers(dir) {
+  try {
+    const now = Date.now();
+    for (const f of fs6.readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      const fp = path4.join(dir, f);
+      try {
+        if (now - fs6.statSync(fp).mtimeMs > TTL_MS) fs6.unlinkSync(fp);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+
+// src/inject-core.ts
+var TOP_K = 5;
+var BASELINE_MARGIN = 0.045;
+var MAX_CONTEXT_FACTS = 8;
+var FACT_CHAR_CAP = 160;
+var BLOCK_CHAR_BUDGET = 1e3;
+var REPEAT_ELAPSED_BUDGET_MS = 700;
+function truncateFact(text) {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > FACT_CHAR_CAP ? t.slice(0, FACT_CHAR_CAP - 1) + "\u2026" : t;
+}
+async function computeInjectContext(userPrompt, project, via, sessionId) {
+  const t0 = Date.now();
+  if (!userPrompt || userPrompt.length < 20) {
+    appendInjectLog({ status: "skipped", project, prompt_len: userPrompt?.length ?? 0, via });
+    return "";
+  }
+  try {
+    await initEmbeddings();
+    const embedding = await generateEmbedding(userPrompt, "query");
+    const baseline = await queryBaseline(embedding);
+    const db = getSearchDb();
+    {
+      const candidates = searchSimilarFacts(db, embedding, project, TOP_K, 0);
+      const results = candidates.filter((r) => {
+        const similarity = l2DistanceToSimilarity(r.distance);
+        return similarity - baseline >= BASELINE_MARGIN;
+      });
+      if (results.length === 0) {
+        appendInjectLog({
+          status: "no-match",
+          project,
+          prompt_len: userPrompt.length,
+          candidates: candidates.length,
+          injected: 0,
+          duration_ms: Date.now() - t0,
+          via
+        });
+        return "";
+      }
+      const seenIds = new Set(results.map((r) => r.fact.id));
+      const expandedFacts = [...results.map((r) => ({ fact: r.fact, note: "" }))];
+      for (const { fact } of results.slice(0, 3)) {
+        const related = getRelatedFacts(db, fact.id, 1, 0.6, 0.2, project);
+        for (const { fact: relFact, relation } of related) {
+          if (!seenIds.has(relFact.id) && expandedFacts.length < MAX_CONTEXT_FACTS) {
+            seenIds.add(relFact.id);
+            expandedFacts.push({ fact: relFact, note: `[${relation.relation_type}]` });
+          }
+        }
+      }
+      const ledger = loadLedger(sessionId);
+      const fresh = expandedFacts.filter(({ fact }) => !ledger.has(fact.id));
+      const dedupedCount = expandedFacts.length - fresh.length;
+      if (fresh.length === 0) {
+        appendInjectLog({
+          status: "deduped",
+          project,
+          prompt_len: userPrompt.length,
+          candidates: candidates.length,
+          injected: 0,
+          deduped: dedupedCount,
+          duration_ms: Date.now() - t0,
+          via
+        });
+        return "";
+      }
+      const lines = ["\u{1F4CC} \uAD00\uB828 \uACFC\uAC70 \uACB0\uC815:"];
+      let blockChars = lines[0].length;
+      const injectedIds = [];
+      for (const { fact, note } of fresh) {
+        const dateStr = fact.created_at.slice(0, 10);
+        const line = `- ${note ? note + " " : ""}[${fact.category}] ${truncateFact(fact.fact)} (${dateStr})`;
+        if (blockChars + line.length > BLOCK_CHAR_BUDGET && injectedIds.length > 0) break;
+        lines.push(line);
+        blockChars += line.length + 1;
+        injectedIds.push(fact.id);
+      }
+      if (Date.now() - t0 < REPEAT_ELAPSED_BUDGET_MS) {
+        try {
+          const repeats = await detectRepeat(userPrompt, project, 2, 0.85, { embedding, db });
+          const repeatCtx = formatRepeatContext(repeats);
+          if (repeatCtx) {
+            lines.push("");
+            lines.push(repeatCtx);
+          }
+        } catch {
+        }
+      }
+      appendLedger(sessionId, ledger, injectedIds);
+      const block = lines.join("\n") + "\n";
+      appendInjectLog({
+        status: "injected",
+        project,
+        prompt_len: userPrompt.length,
+        candidates: candidates.length,
+        injected: injectedIds.length,
+        deduped: dedupedCount,
+        chars: block.length,
+        duration_ms: Date.now() - t0,
+        via
+      });
+      return block;
+    }
+  } catch (error2) {
+    const message = error2 instanceof Error ? error2.message : String(error2);
+    appendInjectLog({
+      status: "error",
+      project,
+      prompt_len: userPrompt.length,
+      duration_ms: Date.now() - t0,
+      error: message.slice(0, 300),
+      via
+    });
+    return "";
+  }
+}
+
+// src/inject-daemon.ts
+function injectSocketPath() {
+  return path5.join(getIndexDir(), "inject-daemon.sock");
+}
+function startInjectDaemon() {
+  const sockPath = injectSocketPath();
+  const server2 = net.createServer((conn) => {
+    let buf = "";
+    conn.setTimeout(1e4, () => conn.destroy());
+    conn.on("error", () => {
+    });
+    conn.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) {
+        if (buf.length > 1e6) conn.destroy();
+        return;
+      }
+      const line = buf.slice(0, nl);
+      void (async () => {
+        try {
+          const req = JSON.parse(line);
+          const context = await computeInjectContext(
+            String(req.prompt ?? ""),
+            String(req.cwd ?? process.cwd()),
+            "daemon",
+            req.session_id ? String(req.session_id) : void 0
+          );
+          conn.end(JSON.stringify({ ok: true, context }) + "\n");
+        } catch {
+          try {
+            conn.end(JSON.stringify({ ok: false }) + "\n");
+          } catch {
+          }
+        }
+      })();
+    });
+  });
+  server2.on("error", (err) => {
+    if (err.code !== "EADDRINUSE") return;
+    const probe = net.connect(sockPath);
+    probe.setTimeout(500, () => probe.destroy());
+    probe.on("connect", () => probe.destroy());
+    probe.on("error", () => {
+      try {
+        fs7.unlinkSync(sockPath);
+        server2.listen(sockPath, onListen);
+      } catch {
+      }
+    });
+  });
+  const onListen = () => {
+    try {
+      fs7.chmodSync(sockPath, 384);
+    } catch {
+    }
+    void initEmbeddings().catch(() => {
+    });
+  };
+  try {
+    server2.listen(sockPath, onListen);
+    server2.unref();
+  } catch {
+  }
 }
 
 // node_modules/marked/lib/marked.esm.js
@@ -25813,18 +26229,78 @@ ${JSON.stringify(value, null, 2)}
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { execSync } from "child_process";
 import { writeFileSync, unlinkSync } from "fs";
-import fs5 from "node:fs";
-import path4 from "node:path";
+import fs8 from "node:fs";
+import path7 from "node:path";
 import os2 from "node:os";
 import { tmpdir } from "os";
 import { join } from "path";
-var LLM_WORKDIR = path4.join(os2.tmpdir(), "memory-bank-llm");
+var LLM_WORKDIR = path7.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
 function llmWorkdir() {
   try {
-    fs5.mkdirSync(LLM_WORKDIR, { recursive: true });
+    fs8.mkdirSync(LLM_WORKDIR, { recursive: true });
   } catch {
   }
+  pruneLlmTranscripts();
   return LLM_WORKDIR;
+}
+var PRUNE_MARKER = path7.join(LLM_WORKDIR, ".last-transcript-prune");
+var PRUNE_THROTTLE_MS = 60 * 60 * 1e3;
+function transcriptTtlMs() {
+  const raw = process.env.MEMORY_BANK_LLM_TRANSCRIPT_TTL_HOURS;
+  const hours = raw != null && /^\d+$/.test(raw) ? parseInt(raw, 10) : 24;
+  return Math.max(1, hours) * 60 * 60 * 1e3;
+}
+function pruneLlmTranscripts(now = Date.now()) {
+  try {
+    try {
+      const markerAge = now - fs8.statSync(PRUNE_MARKER).mtimeMs;
+      if (markerAge >= 0 && markerAge < PRUNE_THROTTLE_MS) return;
+    } catch {
+    }
+    try {
+      fs8.writeFileSync(PRUNE_MARKER, new Date(now).toISOString());
+    } catch {
+    }
+    const projectsDir = getProjectsDir();
+    const ttl = transcriptTtlMs();
+    let entries;
+    try {
+      entries = fs8.readdirSync(projectsDir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry !== LLM_WORKDIR_BASENAME && !entry.endsWith(`-${LLM_WORKDIR_BASENAME}`)) continue;
+      const dir = path7.join(projectsDir, entry);
+      let stat;
+      try {
+        stat = fs8.lstatSync(dir);
+      } catch {
+        continue;
+      }
+      if (!stat.isDirectory()) continue;
+      let files;
+      try {
+        files = fs8.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith(".jsonl") && !file.endsWith("-summary.txt")) continue;
+        const filePath = path7.join(dir, file);
+        try {
+          const fstat = fs8.lstatSync(filePath);
+          if (fstat.isFile() && now - fstat.mtimeMs > ttl) fs8.unlinkSync(filePath);
+        } catch {
+        }
+      }
+      try {
+        fs8.rmdirSync(dir);
+      } catch {
+      }
+    }
+  } catch {
+  }
 }
 async function callHaiku(systemPrompt, userMessage, maxTokens = 2048) {
   const model = process.env.MEMORY_BANK_FACT_MODEL || "haiku";
@@ -25970,7 +26446,7 @@ async function askAvatar(db, question, project) {
   }
   const factContextLines = [];
   for (const { fact, distance } of vectorResults) {
-    const similarity = (1 - distance * distance / 2).toFixed(2);
+    const similarity = l2DistanceToSimilarity(distance).toFixed(2);
     const catInfo = fact.ontology_category_id ? categoryMap.get(fact.ontology_category_id) : void 0;
     const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "Unknown" : "Unknown";
     const catName = catInfo ? catInfo.name : "Unknown";
@@ -26007,7 +26483,7 @@ async function askAvatar(db, question, project) {
     const catInfo = fact.ontology_category_id ? categoryMap.get(fact.ontology_category_id) : void 0;
     const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "Unknown" : "Unknown";
     const catName = catInfo ? catInfo.name : "Unknown";
-    const relevance = parseFloat((1 - distance * distance / 2).toFixed(3));
+    const relevance = parseFloat(l2DistanceToSimilarity(distance).toFixed(3));
     return {
       fact,
       domain: domainName,
@@ -26024,8 +26500,8 @@ async function askAvatar(db, question, project) {
 }
 
 // src/mcp-server.ts
-import path5 from "path";
-import fs6 from "fs";
+import path8 from "path";
+import fs9 from "fs";
 import os3 from "os";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
@@ -26362,7 +26838,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (name === "read") {
       const params = ShowConversationInputSchema.parse(args);
-      const resolvedPath = path5.resolve(params.path);
+      const resolvedPath = path8.resolve(params.path);
       if (!resolvedPath.endsWith(".jsonl") && !resolvedPath.endsWith(".jsonl.zst")) {
         throw new Error(`Invalid file type: only .jsonl files are supported`);
       }
@@ -26370,19 +26846,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!resolvedFile) {
         throw new Error(`File not found: ${resolvedPath}`);
       }
-      const realFile = fs6.realpathSync(resolvedFile);
+      const realFile = fs9.realpathSync(resolvedFile);
       const allowedRoots = [
         getArchiveDir(),
-        path5.join(os3.homedir(), ".claude", "projects")
+        path8.join(os3.homedir(), ".claude", "projects")
       ].map((root) => {
         try {
-          return fs6.realpathSync(root);
+          return fs9.realpathSync(root);
         } catch {
-          return path5.resolve(root);
+          return path8.resolve(root);
         }
       });
       const isAllowed = allowedRoots.some(
-        (root) => realFile === root || realFile.startsWith(root + path5.sep)
+        (root) => realFile === root || realFile.startsWith(root + path8.sep)
       );
       if (!isAllowed) {
         throw new Error("Access denied: path is outside the conversation archive");
@@ -26891,6 +27367,7 @@ _Total unique facts discovered: ${allDiscovered.size}_
 });
 async function main() {
   console.error("Episodic Memory MCP server running via stdio");
+  startInjectDaemon();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
