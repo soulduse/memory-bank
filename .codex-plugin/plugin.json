@@ -1,6 +1,6 @@
 {
   "name": "memory-bank",
-  "version": "1.5.0+codex.20260811135300",
+  "version": "1.6.0+codex.20260918224257",
   "description": "Shared semantic memory for Claude Code and Codex conversations.",
   "author": {
     "name": "Jung-Wan Kim",

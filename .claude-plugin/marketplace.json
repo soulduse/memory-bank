@@ -8,7 +8,7 @@
     {
       "name": "memory-bank",
       "description": "Shared semantic search for Claude Code and Codex conversations, decisions, and patterns.",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "source": "./",
       "author": {
         "name": "Jung-Wan Kim"

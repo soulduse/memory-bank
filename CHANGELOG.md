@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-31
+
+### Added — 사용자 태그: 자동 분류가 건드리지 않는 유일한 라벨링 축
+
+기존 라벨링 축(scope 2종·category 5종·온톨로지 domain/category)은 전부 자동 생성이라 사용자가 "내 기준으로 묶겠다"를 표현할 방법이 없었다. 스키마에는 자유도가 있는데 그 자유도에 접근할 표면(CLI/MCP/UI)이 0개였다 — MCP 도구 9개 전부 read-only, CLI 6개 명령 전부 읽기, 대시보드 쓰기 엔드포인트 없음. 유일한 경로가 `sqlite3` 직접 조작이었다.
+
+- `facts.tags` 컬럼(JSON 배열) 추가 — 멱등 마이그레이션. **자동 파이프라인(추출·통합·온톨로지 분류·재임베딩)은 이 컬럼을 쓰지 않으므로** fact 내용이 통합으로 바뀌어도 태그는 보존된다
+- CLI: `memory-bank tag <fact-id> [tags...]` (`--remove` / `--set` / `--clear`), `memory-bank tags` (인덱스 / `--find` / `--any` / `--project`)
+- MCP 도구 2종: `tag_fact`(write — 기존 9개는 전부 read-only였다), `list_tags`
+- `search_facts` 에 `tags` 필터 추가 + **결과에 fact ID 노출**(id 없이는 태그를 붙일 수 없다)
+- 정규화: trim → 공백을 `-` 로 → 소문자. `Mobile` 과 `mobile` 은 같은 태그
+- 검증: 허용 문자는 유니코드 문자(한글 포함)·숫자·`-_./:` — `"` 와 `\` 는 JSON 인코딩과 LIKE 매처를 깨뜨릴 수 있어 거부. 태그 64자 / fact당 32개 상한
+- 부분 적용 금지: 여러 태그 중 하나라도 무효면 전체 거부(어느 게 반영됐는지 모르는 상태 차단)
+- 접두어 오매칭 방지: LIKE 패턴에 JSON 따옴표를 포함해 `api` 가 `api-v2` 를 잡지 않는다
+- 손상 내성: 수작업 SQL 편집으로 `tags` 가 깨져도 해당 fact 태그만 빈 값으로 읽히고 검색 전체는 살아 있다(`json_valid` 점검 쿼리는 가이드에 수록)
+- 문서: `docs/tagging-guide.md` — 라벨링 축 5개 비교, 신뢰도 레이어·프로젝트 교차 그룹·커스텀 도메인·케이스 수집·격리 스코프 사용례, SQL 직접 접근 레시피
+
 ## [1.5.0] - 2026-08-02
 
 ### Fixed — LLM 호출 실패·빈 응답에 재시도·복구가 없던 문제 (사용자 피드백)
@@ -45,6 +62,39 @@ fact 가 다시는 추출되지 않았다**. 재시도 부재가 곧 데이터 �
 `extraction_log` 에 `dropped_batches`, `claim_owner` 컬럼이 멱등 마이그레이션으로 추가된다
 (락 경합 시 다음 초기화에서 재시도).
 
+## [1.4.5] - 2026-07-14
+
+### Added
+- **Zero-downtime live plugin updates** — a plugin update now reaches live
+  sessions in real time, with no session restart and no manual /reload-plugins
+  (stdio MCP servers are officially never auto-reconnected, so v1.4.4's
+  "restart required" was the only path until now):
+  - `cli/mcp-server-wrapper.js` became a **supervising stdio proxy**
+    (`src/wrapper-core.ts`, unit-tested): it records the MCP initialize
+    handshake, polls the plugin dir's package.json, and when a new release
+    lands on disk it swaps the server child at an idle moment and replays the
+    handshake — the client keeps one uninterrupted connection (E2E-tested:
+    GEN1→GEN2 over the same pipe, replayed handshake swallowed).
+  - `scripts/live-apply.js` propagates the newest release's code into older
+    versioned cache dirs (backup first; content-version based; idempotent;
+    **node_modules never touched** — dirs with a different dependency set are
+    loudly skipped so native binaries stay known-good). Wired into the
+    SessionStart drift check, so the first session event after an update
+    upgrades every live session's hooks/workers instantly and lets
+    supervising wrappers live-swap their servers.
+  - Startup-crash rescue: a server that dies within seconds of spawn triggers
+    `npm install`, then `npm rebuild` (recompiles broken native binaries) and
+    a retry that re-delivers the still-unanswered initialize. Motivated by a
+    live incident: the v1.4.4 cache's sharp binary
+    (`sharp-darwin-arm64v8.node`) was missing after a fresh cache install, so
+    every new MCP server crashed before answering initialize (fixed on this
+    machine by transplanting the known-good module; the rescue automates it).
+
+### Fixed
+- Worker sweep now judges staleness by the worker dir's **content version**
+  (package.json), not the path segment — after live-apply an old-named dir
+  carries current code and its workers must not be killed.
+
 ## [1.4.4] - 2026-07-14
 
 ### Fixed — 플러그인 업데이트 후 구버전 프로세스 잔존 (버전 드리프트)
@@ -58,6 +108,7 @@ fact 가 다시는 추출되지 않았다**. 재시도 부재가 곧 데이터 �
 
 - SessionStart hook `scripts/version-drift-check.js` — 구버전 detached 워커 sweep +
   드리프트 경고 주입. MCP 서버는 라이브 세션을 소유하므로 sweep 대상에서 제외
+
 
 ## [1.4.3] - 2026-07-12
 
