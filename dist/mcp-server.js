@@ -23607,6 +23607,9 @@ function initDatabase() {
   if (!factColumnNames.has("ontology_last_attempt_at")) {
     db.prepare("ALTER TABLE facts ADD COLUMN ontology_last_attempt_at TEXT").run();
   }
+  if (!factColumnNames.has("tags")) {
+    db.prepare("ALTER TABLE facts ADD COLUMN tags TEXT").run();
+  }
   const exchangeColumns = db.prepare(
     `SELECT name FROM pragma_table_info('exchanges')`
   ).all();
@@ -23649,6 +23652,35 @@ function initDatabase() {
       saved INTEGER NOT NULL DEFAULT 0
     )
   `);
+  {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info('extraction_log')`).all();
+    if (!cols.some((c) => c.name === "dropped_batches")) {
+      try {
+        db.prepare("ALTER TABLE extraction_log ADD COLUMN dropped_batches INTEGER NOT NULL DEFAULT 0").run();
+      } catch (e) {
+        const msg = e?.message ?? "";
+        if (/duplicate column name/i.test(msg)) {
+        } else if (/database is locked|database table is locked|SQLITE_BUSY/i.test(msg)) {
+          console.error("[db] extraction_log.dropped_batches \uB9C8\uC774\uADF8\uB808\uC774\uC158 \uC9C0\uC5F0 \u2014 \uB77D \uACBD\uD569, \uB2E4\uC74C \uCD08\uAE30\uD654\uC5D0\uC11C \uC7AC\uC2DC\uB3C4");
+        } else {
+          throw e;
+        }
+      }
+    }
+    if (!cols.some((c) => c.name === "claim_owner")) {
+      try {
+        db.prepare("ALTER TABLE extraction_log ADD COLUMN claim_owner TEXT").run();
+      } catch (e) {
+        const msg = e?.message ?? "";
+        if (/duplicate column name/i.test(msg)) {
+        } else if (/database is locked|database table is locked|SQLITE_BUSY/i.test(msg)) {
+          console.error("[db] extraction_log.claim_owner \uB9C8\uC774\uADF8\uB808\uC774\uC158 \uC9C0\uC5F0 \u2014 \uB77D \uACBD\uD569, \uB2E4\uC74C \uCD08\uAE30\uD654\uC5D0\uC11C \uC7AC\uC2DC\uB3C4");
+        } else {
+          throw e;
+        }
+      }
+    }
+  }
   autoHealScopeProjects(db);
   return db;
 }
@@ -23744,8 +23776,141 @@ function rowToFact(row) {
     consolidated_count: row["consolidated_count"],
     is_active: Boolean(row["is_active"]),
     ontology_category_id: row["ontology_category_id"] ?? null,
-    coding_agent: row["coding_agent"] ?? null
+    coding_agent: row["coding_agent"] ?? null,
+    tags: parseTags(row["tags"])
   };
+}
+var MAX_TAG_LENGTH = 64;
+var MAX_TAGS_PER_FACT = 32;
+var TAG_ALLOWED = /^[\p{L}\p{N}\-_./:]+$/u;
+function normalizeTag(raw) {
+  if (typeof raw !== "string") return null;
+  const collapsed = raw.trim().replace(/\s+/g, "-").toLowerCase();
+  if (!collapsed) return null;
+  if (collapsed.length > MAX_TAG_LENGTH) return null;
+  if (!TAG_ALLOWED.test(collapsed)) return null;
+  return collapsed;
+}
+function parseTags(raw) {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((t) => typeof t === "string" && t.length > 0);
+  } catch {
+    return [];
+  }
+}
+function requireFactRow(db, factId) {
+  const row = db.prepare("SELECT tags FROM facts WHERE id = ?").get(factId);
+  if (!row) throw new Error(`fact not found: ${factId}`);
+  return { tags: parseTags(row.tags) };
+}
+function writeTags(db, factId, tags) {
+  db.prepare("UPDATE facts SET tags = ? WHERE id = ?").run(
+    tags.length ? JSON.stringify(tags) : null,
+    factId
+  );
+}
+function addFactTags(db, factId, rawTags) {
+  const normalized = [];
+  for (const raw of rawTags) {
+    const tag = normalizeTag(raw);
+    if (!tag) throw new Error(`invalid tag: ${JSON.stringify(raw)}`);
+    normalized.push(tag);
+  }
+  const current = requireFactRow(db, factId).tags;
+  const seen = new Set(current);
+  const added = [];
+  for (const tag of normalized) {
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    added.push(tag);
+  }
+  const next = [...current, ...added];
+  if (next.length > MAX_TAGS_PER_FACT) {
+    throw new Error(
+      `too many tags on ${factId}: ${next.length} > ${MAX_TAGS_PER_FACT}`
+    );
+  }
+  if (added.length) writeTags(db, factId, next);
+  return { tags: next, added };
+}
+function removeFactTags(db, factId, rawTags) {
+  const targets = /* @__PURE__ */ new Set();
+  const absentInput = [];
+  for (const raw of rawTags) {
+    const tag = normalizeTag(raw);
+    if (!tag) {
+      absentInput.push(raw);
+      continue;
+    }
+    targets.add(tag);
+  }
+  const current = requireFactRow(db, factId).tags;
+  const next = current.filter((t) => !targets.has(t));
+  const removed = current.filter((t) => targets.has(t));
+  const absent = [...targets].filter((t) => !current.includes(t)).concat(absentInput);
+  if (removed.length) writeTags(db, factId, next);
+  return { tags: next, removed, absent };
+}
+function setFactTags(db, factId, rawTags) {
+  const next = [];
+  for (const raw of rawTags) {
+    const tag = normalizeTag(raw);
+    if (!tag) throw new Error(`invalid tag: ${JSON.stringify(raw)}`);
+    if (!next.includes(tag)) next.push(tag);
+  }
+  if (next.length > MAX_TAGS_PER_FACT) {
+    throw new Error(`too many tags: ${next.length} > ${MAX_TAGS_PER_FACT}`);
+  }
+  requireFactRow(db, factId);
+  writeTags(db, factId, next);
+  return next;
+}
+function listTags(db, opts = {}) {
+  const where = ["tags IS NOT NULL"];
+  const params = [];
+  if (!opts.includeInactive) where.push("is_active = 1");
+  if (opts.project) {
+    const canon = canonicalizeProject(db, opts.project);
+    where.push("((scope_type = 'project' AND scope_project = ?) OR scope_type = 'global')");
+    params.push(canon);
+  }
+  const rows = db.prepare(`SELECT tags FROM facts WHERE ${where.join(" AND ")}`).all(...params);
+  const counts = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    for (const tag of parseTags(row.tags)) {
+      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()].map(([tag, count]) => ({ tag, count })).sort((a, b2) => b2.count - a.count || a.tag.localeCompare(b2.tag));
+}
+function findFactsByTags(db, rawTags, opts = {}) {
+  const tags = [];
+  for (const raw of rawTags) {
+    const tag = normalizeTag(raw);
+    if (!tag) throw new Error(`invalid tag: ${JSON.stringify(raw)}`);
+    if (!tags.includes(tag)) tags.push(tag);
+  }
+  if (!tags.length) return [];
+  const where = ["tags IS NOT NULL"];
+  const params = [];
+  if (!opts.includeInactive) where.push("is_active = 1");
+  if (opts.project) {
+    const canon = canonicalizeProject(db, opts.project);
+    where.push("((scope_type = 'project' AND scope_project = ?) OR scope_type = 'global')");
+    params.push(canon);
+  }
+  const joiner = opts.match === "any" ? " OR " : " AND ";
+  const tagClauses = tags.map(() => `tags LIKE '%"' || ? || '"%'`);
+  where.push(`(${tagClauses.join(joiner)})`);
+  params.push(...tags);
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
+  const rows = db.prepare(
+    `SELECT * FROM facts WHERE ${where.join(" AND ")} ORDER BY updated_at DESC LIMIT ?`
+  ).all(...params, limit);
+  return rows.map((row) => rowToFact(row));
 }
 
 // src/ontology-db.ts
@@ -26227,13 +26392,63 @@ ${JSON.stringify(value, null, 2)}
 
 // src/llm.ts
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { execSync } from "child_process";
-import { writeFileSync, unlinkSync } from "fs";
+import { execFileSync } from "node:child_process";
 import fs8 from "node:fs";
 import path7 from "node:path";
 import os2 from "node:os";
-import { tmpdir } from "os";
-import { join } from "path";
+
+// src/llm-error-class.ts
+function extractStatus(x2) {
+  const o = x2;
+  for (const c of [o?.status, o?.statusCode, o?.response?.status, o?.response?.statusCode]) {
+    if (typeof c === "number") return c;
+  }
+  return void 0;
+}
+var LlmCallError = class extends Error {
+  reason;
+  status;
+  constructor(reason) {
+    const r = reason;
+    super(r?.message ?? String(reason));
+    this.name = "LlmCallError";
+    this.reason = reason;
+    this.status = extractStatus(reason);
+  }
+};
+var EmptyLlmResponseError = class extends Error {
+  constructor(detail = "LLM returned an empty response") {
+    super(detail);
+    this.name = "EmptyLlmResponseError";
+  }
+};
+function classifyLlmError(err) {
+  const unwrapped = err instanceof LlmCallError ? err.reason : err;
+  if (unwrapped instanceof EmptyLlmResponseError) return "transient";
+  const e = unwrapped;
+  const byCode = (code) => {
+    if (code === 401 || code === 403 || code === 404) return "transient";
+    if (code === 429 || code >= 500) return "transient";
+    if (code === 400 || code === 413 || code === 422) return "deterministic";
+    return "unknown";
+  };
+  const structured = extractStatus(unwrapped);
+  if (structured !== void 0) return byCode(structured);
+  const m2 = (e?.message ?? String(err)).toLowerCase();
+  const labelled = m2.match(/status(?:\s*code)?\s*[:=]?\s*(\d{3})\b/);
+  if (labelled) return byCode(parseInt(labelled[1], 10));
+  const prefixed = m2.match(/\b(?:api|http|request|response|server)\s+(?:error|failure|code)\s*[:=-]?\s*(\d{3})\b/);
+  if (prefixed) return byCode(parseInt(prefixed[1], 10));
+  if (/too (large|long)|prompt is too long|context length|maximum.*token|max_?tokens|content.*too|invalid[_ ]?request|bad request|unprocessable/.test(m2)) {
+    return "deterministic";
+  }
+  if (/unauthor|forbidden|invalid.*(api.?key|access.?token|credential)|timeout|etimedout|econnreset|econnrefused|enotfound|epipe|socket hang up|network|fetch failed|stream (disconnect|closed|ended|aborted)|premature close|overloaded|temporarily|rate.?limit|too many requests|internal server error|server error|service unavailable|bad gateway|gateway timeout/.test(m2)) {
+    return "transient";
+  }
+  return "unknown";
+}
+
+// src/llm.ts
 var LLM_WORKDIR = path7.join(os2.tmpdir(), LLM_WORKDIR_BASENAME);
 function llmWorkdir() {
   try {
@@ -26302,81 +26517,116 @@ function pruneLlmTranscripts(now = Date.now()) {
   } catch {
   }
 }
-async function callHaiku(systemPrompt, userMessage, maxTokens = 2048) {
+function retryBudget() {
+  const raw = process.env.MEMORY_BANK_LLM_RETRIES;
+  if (raw != null && /^\d+$/.test(raw.trim())) return Math.min(5, parseInt(raw.trim(), 10));
+  return 2;
+}
+var MAX_BACKOFF_BASE_MS = 5e3;
+var MAX_BACKOFF_MS = 3e4;
+function backoffMs(attempt) {
+  const raw = process.env.MEMORY_BANK_LLM_RETRY_BASE_MS;
+  const parsed = raw != null && /^\d+$/.test(raw.trim()) ? parseInt(raw.trim(), 10) : 500;
+  const base = Math.min(parsed, MAX_BACKOFF_BASE_MS);
+  return Math.min(base * Math.pow(3, attempt), MAX_BACKOFF_MS);
+}
+var sleep2 = (ms) => ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
+async function callOnce(systemPrompt, userMessage, maxTokens) {
   const model = process.env.MEMORY_BANK_FACT_MODEL || "haiku";
-  const useCli = process.env.MEMORY_BANK_USE_CLI === "true";
-  if (!useCli) {
-    try {
-      for await (const message of query({
-        prompt: `${systemPrompt}
+  const cliMode = process.env.MEMORY_BANK_USE_CLI;
+  const cliOnly = cliMode === "true";
+  const cliFallback = cliOnly || cliMode === "fallback";
+  let agentSdkError;
+  if (!cliOnly) try {
+    for await (const message of query({
+      prompt: `${systemPrompt}
 
 ${userMessage}`,
-        options: {
-          model,
-          max_tokens: maxTokens,
-          systemPrompt,
-          // One-shot classification calls: no tools/turn loops needed, and the
-          // spawned session must NOT load user settings/plugins — otherwise its
-          // own SessionStart/End hooks re-spawn sync/backfill workers and every
-          // LLM call cascades into more sessions (observed as a proxy flood).
-          maxTurns: 1,
-          settingSources: [],
-          cwd: llmWorkdir()
-        }
-      })) {
-        if (message && typeof message === "object" && "type" in message && message.type === "result") {
-          return message.result || "";
-        }
+      options: {
+        model,
+        max_tokens: maxTokens,
+        systemPrompt,
+        // One-shot classification calls: no tools/turn loops needed, and the
+        // spawned session must NOT load user settings/plugins — otherwise its
+        // own SessionStart/End hooks re-spawn sync/backfill workers and every
+        // LLM call cascades into more sessions (observed as a proxy flood).
+        maxTurns: 1,
+        settingSources: [],
+        cwd: llmWorkdir()
       }
-      return "";
-    } catch (agentSdkError) {
+    })) {
+      if (message && typeof message === "object" && "type" in message && message.type === "result") {
+        return message.result || "";
+      }
     }
+    return "";
+  } catch (error2) {
+    agentSdkError = error2;
   }
-  try {
-    return callClaudeCli(systemPrompt, userMessage, maxTokens);
-  } catch (cliError) {
-    console.error("CLI fallback failed:", cliError.message);
-  }
-  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.MEMORY_BANK_API_TOKEN;
-  if (!apiKey) {
-    throw new Error("LLM call failed: Agent SDK, CLI, and API all unavailable. Set ANTHROPIC_API_KEY or ensure claude CLI is installed.");
-  }
-  const { default: Anthropic2 } = await Promise.resolve().then(() => (init_sdk(), sdk_exports));
-  const baseURL = process.env.MEMORY_BANK_API_BASE_URL;
-  const client = new Anthropic2({ apiKey, ...baseURL ? { baseURL } : {} });
-  const response = await client.messages.create({
-    model: process.env.MEMORY_BANK_FACT_MODEL || "claude-haiku-4-5-20251001",
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userMessage }]
-  });
-  const textBlock = response.content.find((b2) => b2.type === "text");
-  return textBlock?.text || "";
-}
-function callClaudeCli(systemPrompt, userMessage, maxTokens = 2048) {
-  const cliModel = process.env.MEMORY_BANK_CLI_MODEL || "haiku";
-  const prompt = `${systemPrompt}
-
-${userMessage}`;
-  const tmpFile = join(tmpdir(), `memory-bank-prompt-${Date.now()}.txt`);
-  try {
-    writeFileSync(tmpFile, prompt, "utf-8");
-    const result = execSync(
-      `claude -p "$(cat '${tmpFile}')" --model ${cliModel} --output-format text`,
-      {
-        encoding: "utf-8",
-        timeout: 12e4,
-        maxBuffer: 1024 * 1024,
-        env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" }
-      }
-    );
-    return result.trim();
-  } finally {
+  if (cliFallback) {
     try {
-      unlinkSync(tmpFile);
-    } catch {
+      return callClaudeCli(systemPrompt, userMessage);
+    } catch (cliError) {
+      console.error(`callOnce: CLI fallback failed: ${cliError instanceof Error ? cliError.message : cliError}`);
+      if (agentSdkError === void 0) agentSdkError = cliError;
     }
   }
+  {
+    const apiKey = process.env.ANTHROPIC_API_KEY || process.env.MEMORY_BANK_API_TOKEN;
+    if (!apiKey) {
+      throw agentSdkError;
+    }
+    const { default: Anthropic2 } = await Promise.resolve().then(() => (init_sdk(), sdk_exports));
+    const baseURL = process.env.MEMORY_BANK_API_BASE_URL;
+    const client = new Anthropic2({ apiKey, ...baseURL ? { baseURL } : {} });
+    const response = await client.messages.create({
+      model: process.env.MEMORY_BANK_FACT_MODEL || "claude-haiku-4-5-20251001",
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }]
+    });
+    const textBlock = response.content.find((b2) => b2.type === "text");
+    return textBlock?.text || "";
+  }
+}
+function callClaudeCli(systemPrompt, userMessage) {
+  const cliModel = process.env.MEMORY_BANK_CLI_MODEL || "haiku";
+  const result = execFileSync(
+    "claude",
+    ["-p", "--model", cliModel, "--output-format", "text", "--setting-sources", "", "--system-prompt", systemPrompt],
+    {
+      input: userMessage,
+      encoding: "utf-8",
+      timeout: 12e4,
+      maxBuffer: 1024 * 1024,
+      cwd: llmWorkdir(),
+      env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" }
+    }
+  );
+  return result.trim();
+}
+async function callHaiku(systemPrompt, userMessage, maxTokens = 2048) {
+  const retries = retryBudget();
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const text = await callOnce(systemPrompt, userMessage, maxTokens);
+      if (text && text.trim() !== "") return text;
+      lastError = new EmptyLlmResponseError(
+        `LLM returned an empty response (attempt ${attempt + 1}/${retries + 1})`
+      );
+    } catch (error2) {
+      lastError = error2;
+      if (classifyLlmError(error2) === "deterministic") throw error2;
+    }
+    if (attempt < retries) {
+      console.error(
+        `callHaiku: attempt ${attempt + 1}/${retries + 1} failed (${lastError instanceof Error ? lastError.message : lastError}) \u2014 retrying`
+      );
+      await sleep2(backoffMs(attempt));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 function parseJsonResponse(text) {
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/(\[[\s\S]*\])/) || text.match(/(\{[\s\S]*\})/);
@@ -26468,11 +26718,22 @@ async function askAvatar(db, question, project) {
     "Past decisions and knowledge:",
     ...factContextLines
   ].join("\n");
-  const response = await callHaiku(AVATAR_SYSTEM_PROMPT, prompt, 1024);
+  let response;
+  try {
+    response = await callHaiku(AVATAR_SYSTEM_PROMPT, prompt, 1024);
+  } catch (error2) {
+    console.error("ask_avatar: LLM call failed after retries:", error2);
+    return {
+      answer: `\u26A0\uFE0F LLM \uD638\uCD9C\uC774 \uC7AC\uC2DC\uB3C4 \uD6C4\uC5D0\uB3C4 \uC2E4\uD328\uD574 \uB2F5\uBCC0\uC744 \uC0DD\uC131\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4 (${classifyLlmError(error2)}). \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.`,
+      sources: [],
+      confidence: 0,
+      relatedDecisions
+    };
+  }
   const parsed = parseJsonResponse(response);
   if (!parsed) {
     return {
-      answer: response || "\uC751\uB2F5\uC744 \uC0DD\uC131\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+      answer: response,
       sources: [],
       confidence: 0,
       relatedDecisions
@@ -26533,8 +26794,21 @@ var SearchFactsInputSchema = external_exports.object({
   project: external_exports.string().max(500).optional(),
   category: external_exports.enum(["decision", "preference", "pattern", "knowledge", "constraint"]).optional(),
   coding_agent: external_exports.string().optional().describe('Filter facts by coding agent (e.g., "claude-code", "codex")'),
+  tags: external_exports.array(external_exports.string().min(1).max(64)).max(32).optional().describe("Filter to facts carrying these user tags (all must match)"),
   include_revisions: external_exports.boolean().default(false),
   limit: external_exports.number().int().min(1).max(50).default(10)
+}).strict();
+var TagFactInputSchema = external_exports.object({
+  fact_id: external_exports.string().min(1).max(200).describe("Fact id from a search_facts result"),
+  add: external_exports.array(external_exports.string().min(1).max(64)).max(32).optional(),
+  remove: external_exports.array(external_exports.string().min(1).max(64)).max(32).optional(),
+  set: external_exports.array(external_exports.string().min(1).max(64)).max(32).optional().describe("Replace all tags with this list; [] clears them")
+}).strict();
+var ListTagsInputSchema = external_exports.object({
+  project: external_exports.string().max(500).optional(),
+  tags: external_exports.array(external_exports.string().min(1).max(64)).max(32).optional().describe("When given, list the facts carrying these tags instead of the tag index"),
+  match: external_exports.enum(["all", "any"]).default("all"),
+  limit: external_exports.number().int().min(1).max(200).default(50)
 }).strict();
 var SearchOntologyInputSchema = external_exports.object({
   domain: external_exports.string().optional().describe("Filter by domain name (case-insensitive partial match)"),
@@ -26630,6 +26904,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Filter by fact category"
             },
             coding_agent: { type: "string", description: 'Filter by coding agent (e.g., "claude-code", "codex", "opencode")' },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Filter to facts carrying ALL of these user tags (see list_tags)"
+            },
             include_revisions: { type: "boolean", description: "Include revision history", default: false },
             limit: { type: "number", minimum: 1, maximum: 50, default: 10, description: "Max results" }
           },
@@ -26638,6 +26917,49 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
         annotations: {
           title: "Search Facts",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: "tag_fact",
+        description: 'Attach or remove user tags on a fact. Tags are the one labelling axis the user controls directly \u2014 the ontology (domain/category) is LLM-generated and not user-addressable. Use for review layers ("verified", "needs-check"), grouping that crosses project scope ("mobile", "billing"), or case collection ("bug-report"). Get fact ids from search_facts.',
+        inputSchema: {
+          type: "object",
+          properties: {
+            fact_id: { type: "string", description: "Fact id shown in search_facts results" },
+            add: { type: "array", items: { type: "string" }, description: "Tags to add" },
+            remove: { type: "array", items: { type: "string" }, description: "Tags to remove" },
+            set: { type: "array", items: { type: "string" }, description: "Replace all tags; [] clears" }
+          },
+          required: ["fact_id"],
+          additionalProperties: false
+        },
+        annotations: {
+          title: "Tag Fact",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: "list_tags",
+        description: "Browse user tags. With no arguments, returns the tag index (tag -> fact count). With `tags`, returns the facts carrying them \u2014 this is how a tag becomes a custom group that ignores project scope.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project: { type: "string", description: "Project path to scope by (defaults to cwd)" },
+            tags: { type: "array", items: { type: "string" }, description: "List facts carrying these tags" },
+            match: { type: "string", enum: ["all", "any"], default: "all" },
+            limit: { type: "number", minimum: 1, maximum: 200, default: 50 }
+          },
+          additionalProperties: false
+        },
+        annotations: {
+          title: "List Tags",
           readOnlyHint: true,
           destructiveHint: false,
           idempotentHint: true,
@@ -26893,6 +27215,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (params.coding_agent) {
           filtered = filtered.filter((r) => (r.fact.coding_agent || "claude-code") === params.coding_agent);
         }
+        if (params.tags && params.tags.length) {
+          const wanted = params.tags.map((t) => t.trim().replace(/\s+/g, "-").toLowerCase()).filter(Boolean);
+          filtered = filtered.filter((r) => {
+            const have = new Set(r.fact.tags ?? []);
+            return wanted.every((t) => have.has(t));
+          });
+        }
         const agentLabel = params.coding_agent ? ` | Agent: ${params.coding_agent}` : "";
         let output = `# Facts Search Results
 
@@ -26914,6 +27243,10 @@ Results: ${filtered.length}
           const domainName = catInfo ? domainMap.get(catInfo.domainId) ?? "" : "";
           const catName = catInfo ? catInfo.name : "";
           output += `## [${fact.category}] ${fact.fact}
+`;
+          output += `- ID: ${fact.id}
+`;
+          if (fact.tags && fact.tags.length) output += `- Tags: ${fact.tags.join(", ")}
 `;
           const factAgent = fact.coding_agent || "claude-code";
           output += `- Scope: ${fact.scope_type}${fact.scope_project ? ` (${fact.scope_project})` : ""} | Agent: ${factAgent}
@@ -26953,6 +27286,98 @@ Results: ${filtered.length}
           content: [{ type: "text", text: handleError(error2) }],
           isError: true
         };
+      } finally {
+        db.close();
+      }
+    }
+    if (name === "tag_fact") {
+      const params = TagFactInputSchema.parse(args);
+      if (!params.add && !params.remove && !params.set) {
+        return {
+          content: [{ type: "text", text: "Nothing to do: pass add, remove, or set." }],
+          isError: true
+        };
+      }
+      const db = initDatabase();
+      try {
+        const lines = [];
+        let tags = [];
+        if (params.set) {
+          tags = setFactTags(db, params.fact_id, params.set);
+          lines.push(`Set tags: ${tags.length ? tags.join(", ") : "(cleared)"}`);
+        }
+        if (params.add) {
+          const r = addFactTags(db, params.fact_id, params.add);
+          tags = r.tags;
+          lines.push(r.added.length ? `Added: ${r.added.join(", ")}` : "Added: (already present)");
+        }
+        if (params.remove) {
+          const r = removeFactTags(db, params.fact_id, params.remove);
+          tags = r.tags;
+          lines.push(r.removed.length ? `Removed: ${r.removed.join(", ")}` : "Removed: (none matched)");
+          if (r.absent.length) lines.push(`Not present: ${r.absent.join(", ")}`);
+        }
+        const text = `# Tagged ${params.fact_id}
+
+${lines.join("\n")}
+
+Current tags: ${tags.length ? tags.join(", ") : "(none)"}
+`;
+        return { content: [{ type: "text", text }] };
+      } catch (error2) {
+        return { content: [{ type: "text", text: handleError(error2) }], isError: true };
+      } finally {
+        db.close();
+      }
+    }
+    if (name === "list_tags") {
+      const params = ListTagsInputSchema.parse(args);
+      const currentProject = params.project || process.cwd();
+      const db = initDatabase();
+      try {
+        if (params.tags && params.tags.length) {
+          const facts = findFactsByTags(db, params.tags, {
+            project: currentProject,
+            match: params.match,
+            limit: params.limit
+          });
+          let output2 = `# Facts tagged ${params.tags.join(params.match === "any" ? " OR " : " AND ")}
+
+Project: ${currentProject}
+Results: ${facts.length}
+
+`;
+          if (!facts.length) output2 += "_No facts carry these tags._\n";
+          for (const fact of facts) {
+            output2 += `## [${fact.category}] ${fact.fact}
+`;
+            output2 += `- ID: ${fact.id}
+`;
+            output2 += `- Tags: ${(fact.tags ?? []).join(", ")}
+`;
+            output2 += `- Scope: ${fact.scope_type}${fact.scope_project ? ` (${fact.scope_project})` : ""}
+
+`;
+          }
+          return { content: [{ type: "text", text: output2 }] };
+        }
+        const tagIndex = listTags(db, { project: currentProject });
+        let output = `# Tag index
+
+Project: ${currentProject}
+Distinct tags: ${tagIndex.length}
+
+`;
+        if (!tagIndex.length) {
+          output += "_No tags yet. Tags are user-assigned \u2014 the automatic pipeline never creates them._\n";
+        }
+        for (const { tag, count } of tagIndex) {
+          output += `- ${tag} (${count})
+`;
+        }
+        return { content: [{ type: "text", text: output }] };
+      } catch (error2) {
+        return { content: [{ type: "text", text: handleError(error2) }], isError: true };
       } finally {
         db.close();
       }

@@ -114,13 +114,16 @@ function callClaudeViaCli(prompt: string, model: string): string {
 }
 
 async function callClaude(prompt: string, sessionId?: string, useFallback = false): Promise<string> {
-  const useCli = process.env.MEMORY_BANK_USE_CLI === 'true';
+  // MEMORY_BANK_USE_CLI: 'true' = CLI 만, 'fallback' = SDK 실패 시 CLI, 미설정 = upstream 과 동일(SDK 만).
+  const cliMode = process.env.MEMORY_BANK_USE_CLI;
+  const cliOnly = cliMode === 'true';
+  const cliFallback = cliOnly || cliMode === 'fallback';
 
-  // If CLI mode is forced, skip Agent SDK
-  if (!useCli) {
+  if (!cliOnly) {
     try {
       return await callClaudeViaAgentSdk(prompt, sessionId, useFallback);
-    } catch {
+    } catch (error) {
+      if (!cliFallback) throw error;
       // Continue to CLI fallback
     }
   }
