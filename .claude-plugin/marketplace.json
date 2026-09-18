@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "memory-bank",
-      "description": "Semantic search for Claude Code conversations. Remember past discussions, decisions, and patterns.",
+      "description": "Shared semantic search for Claude Code and Codex conversations, decisions, and patterns.",
       "version": "1.5.0",
       "source": "./",
       "author": {

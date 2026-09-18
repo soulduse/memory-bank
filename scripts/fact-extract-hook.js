@@ -29,6 +29,10 @@ function readStdin(timeoutMs = 3000) {
 }
 
 async function main() {
+  // Codex indexing must finish before extraction. Its dedicated SessionEnd
+  // worker performs that ordered pipeline; Claude keeps the legacy fast path.
+  if (process.env.PLUGIN_ROOT) return;
+
   const raw = await readStdin();
   let input = {};
   try { input = JSON.parse(raw); } catch { /* not JSON — fall back to env */ }

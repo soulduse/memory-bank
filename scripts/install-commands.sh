@@ -2,6 +2,10 @@
 # Install memory-bank slash commands to user scope (~/.claude/commands/)
 # Runs on SessionStart - idempotent (skips if already installed)
 
+# Codex discovers bundled skills directly and sets PLUGIN_ROOT. Do not install
+# Claude slash-command shims when this shared plugin runs under Codex.
+[ -n "${PLUGIN_ROOT:-}" ] && exit 0
+
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$(dirname "$0")")}"
 USER_COMMANDS="$HOME/.claude/commands"
 

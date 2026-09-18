@@ -1,7 +1,7 @@
 {
   "name": "memory-bank",
   "version": "1.5.0",
-  "description": "Semantic search for Claude Code conversations",
+  "description": "Shared semantic search for Claude Code and Codex conversations",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -20,6 +20,7 @@
   },
   "keywords": [
     "claude-code",
+    "codex",
     "conversations",
     "search",
     "semantic-search",

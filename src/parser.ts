@@ -124,7 +124,9 @@ export async function parseConversation(
         if (parsed.message.role === 'assistant') {
           for (const block of parsed.message.content) {
             if (block.type === 'tool_use') {
-              const toolCallId = crypto.randomUUID();
+              // Reuse the transcript id when present so incremental re-indexes
+              // cannot create duplicate rows for the same tool invocation.
+              const toolCallId = block.id || crypto.randomUUID();
               toolCalls.push({
                 id: toolCallId,
                 exchangeId: '', // Will be set when we know the exchange ID

@@ -58,6 +58,50 @@ function extractSessionIdFromPath(filePath) {
     }
     return null;
 }
+/**
+ * Index already-archived conversations through one shared pipeline. Agent
+ * adapters only need to normalize/copy their transcript format, then hand the
+ * resulting files here.
+ */
+export async function indexConversationFiles(files, codingAgent) {
+    const result = { indexed: 0, errors: [] };
+    if (files.length === 0)
+        return result;
+    const { initDatabase, insertExchange } = await import('./db.js');
+    const { initEmbeddings, generateExchangeEmbedding } = await import('./embeddings.js');
+    const { parseConversation } = await import('./parser.js');
+    const db = initDatabase();
+    try {
+        await initEmbeddings();
+        for (const item of files) {
+            try {
+                if (shouldSkipConversation(item.path))
+                    continue;
+                const project = item.project || path.basename(path.dirname(item.path));
+                const exchanges = await parseConversation(item.path, project, item.path);
+                for (const exchange of exchanges) {
+                    if (isWorkerPromptMessage(exchange.userMessage))
+                        continue;
+                    exchange.codingAgent = codingAgent;
+                    const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
+                    const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
+                    insertExchange(db, exchange, embedding, toolNames);
+                }
+                result.indexed++;
+            }
+            catch (error) {
+                result.errors.push({
+                    file: item.path,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+    }
+    finally {
+        db.close();
+    }
+    return result;
+}
 export async function syncConversations(sourceDir, destDir, options = {}) {
     const result = {
         copied: 0,
@@ -121,39 +165,9 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
     }
     // Index copied files (unless skipIndex is set)
     if (!options.skipIndex && filesToIndex.length > 0) {
-        const { initDatabase, insertExchange } = await import('./db.js');
-        const { initEmbeddings, generateExchangeEmbedding } = await import('./embeddings.js');
-        const { parseConversation } = await import('./parser.js');
-        const db = initDatabase();
-        await initEmbeddings();
-        for (const file of filesToIndex) {
-            try {
-                // Check for DO NOT INDEX marker
-                if (shouldSkipConversation(file)) {
-                    continue; // Skip indexing but file is already copied
-                }
-                const project = path.basename(path.dirname(file));
-                const exchanges = await parseConversation(file, project, file);
-                for (const exchange of exchanges) {
-                    // Worker-prompt exchange = ephemeral state, not knowledge — never index.
-                    if (isWorkerPromptMessage(exchange.userMessage))
-                        continue;
-                    // Tag each exchange with the coding agent
-                    exchange.codingAgent = codingAgent;
-                    const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
-                    const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
-                    insertExchange(db, exchange, embedding, toolNames);
-                }
-                result.indexed++;
-            }
-            catch (error) {
-                result.errors.push({
-                    file,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-            }
-        }
-        db.close();
+        const indexed = await indexConversationFiles(filesToIndex.map(file => ({ path: file })), codingAgent);
+        result.indexed += indexed.indexed;
+        result.errors.push(...indexed.errors);
     }
     // Generate summaries for files that need them
     if (!options.skipSummaries && filesToSummarize.length > 0) {

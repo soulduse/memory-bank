@@ -1,0 +1,37 @@
+{
+  "name": "memory-bank",
+  "version": "1.5.0+codex.20260811135300",
+  "description": "Shared semantic memory for Claude Code and Codex conversations.",
+  "author": {
+    "name": "Jung-Wan Kim",
+    "url": "https://github.com/jung-wan-kim"
+  },
+  "homepage": "https://github.com/jung-wan-kim/memory-bank",
+  "repository": "https://github.com/jung-wan-kim/memory-bank",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "codex",
+    "claude-code",
+    "semantic-search"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Memory Bank",
+    "shortDescription": "Shared memory across Claude Code and Codex",
+    "longDescription": "Search existing Claude Memory Bank data, inject relevant facts, and continuously add sanitized Codex sessions to the same local index.",
+    "developerName": "Jung-Wan Kim",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Memory"
+    ],
+    "websiteURL": "https://github.com/jung-wan-kim/memory-bank",
+    "defaultPrompt": [
+      "Search Memory Bank for prior decisions about this task.",
+      "Trace how we solved a similar issue before."
+    ],
+    "brandColor": "#5B5BD6"
+  }
+}

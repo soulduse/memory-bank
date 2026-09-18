@@ -1,5 +1,6 @@
 import { syncConversations } from './sync.js';
 import { getArchiveDir } from './paths.js';
+import { getCodexSessionsDir, syncCodexConversations } from './codex-sync.js';
 import { parseLockMeta, decideTakeover } from './version-guard.js';
 import path from 'path';
 import os from 'os';
@@ -10,9 +11,9 @@ const args = process.argv.slice(2);
 
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
-Usage: memory-bank sync [--background]
+Usage: memory-bank sync [--agent claude|codex|all] [--session PATH] [--background] [--wait]
 
-Sync conversations from ~/.claude/projects to archive and index them.
+Sync Claude Code and Codex conversations to one archive and index.
 
 This command:
 1. Copies new or updated .jsonl files to conversation archive
@@ -24,10 +25,16 @@ Safe to run multiple times - subsequent runs are fast no-ops.
 
 OPTIONS:
   --background    Run sync in background (for hooks, returns immediately)
+  --agent NAME    Sync claude, codex, or all agents (default: all)
+  --session PATH  Sync one Codex rollout (used by SessionEnd hooks)
+  --wait          Wait for the singleton lock instead of skipping
 
 EXAMPLES:
   # Sync all new conversations
   memory-bank sync
+
+  # Sync only Codex sessions
+  memory-bank sync --agent codex
 
   # Sync in background (for hooks)
   memory-bank sync --background
@@ -41,6 +48,12 @@ EXAMPLES:
 
 // Check if running in background mode
 const isBackground = args.includes('--background');
+const shouldWaitForLock = args.includes('--wait');
+
+function optionValue(name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
+}
 
 // If background mode, fork the process and exit immediately
 if (isBackground) {
@@ -157,9 +170,18 @@ async function __acquireLock(): Promise<boolean> {
   return true;
 }
 
-if (!(await __acquireLock())) {
+let __hasLock = await __acquireLock();
+if (!__hasLock && shouldWaitForLock) {
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (!__hasLock && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    __hasLock = await __acquireLock();
+  }
+}
+
+if (!__hasLock) {
   console.log('Sync already running - skip (singleton lock)');
-  process.exit(0);
+  process.exit(shouldWaitForLock ? 75 : 0);
 }
 process.on('exit', () => { try { fs.rmSync(__lockDir, { recursive: true, force: true }); } catch {} });
 // Default signal death skips 'exit' handlers (observed: SIGTERM left a stale
@@ -168,27 +190,55 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, () => process.exit(143));
 }
 
-const sourceDir = path.join(os.homedir(), '.claude', 'projects');
+const claudeSourceDir = path.join(os.homedir(), '.claude', 'projects');
+const codexSourceDir = getCodexSessionsDir();
 const destDir = getArchiveDir();
+const requestedAgent = optionValue('--agent') || 'all';
+const sessionPath = optionValue('--session');
+
+if (!['claude', 'codex', 'all'].includes(requestedAgent)) {
+  console.error(`Unknown agent: ${requestedAgent}. Expected claude, codex, or all.`);
+  process.exit(1);
+}
+
+if (sessionPath && requestedAgent === 'claude') {
+  console.error('--session is only supported for Codex rollouts');
+  process.exit(1);
+}
 
 console.log('Syncing conversations...');
-console.log(`Source: ${sourceDir}`);
+if (requestedAgent === 'claude' || requestedAgent === 'all') console.log(`Claude source: ${claudeSourceDir}`);
+if (requestedAgent === 'codex' || requestedAgent === 'all') console.log(`Codex source: ${codexSourceDir}`);
 console.log(`Destination: ${destDir}\n`);
 
-syncConversations(sourceDir, destDir)
-  .then(result => {
-    console.log(`\n✅ Sync complete!`);
-    console.log(`  Copied: ${result.copied}`);
-    console.log(`  Skipped: ${result.skipped}`);
-    console.log(`  Indexed: ${result.indexed}`);
-    console.log(`  Summarized: ${result.summarized}`);
+try {
+  const results = [];
+  if (requestedAgent === 'claude' || requestedAgent === 'all') {
+    results.push(await syncConversations(claudeSourceDir, destDir, { codingAgent: 'claude-code' }));
+  }
+  if (requestedAgent === 'codex' || requestedAgent === 'all') {
+    results.push(await syncCodexConversations(codexSourceDir, destDir, { sessionPath }));
+  }
 
-    if (result.errors.length > 0) {
-      console.log(`\n⚠️  Errors: ${result.errors.length}`);
-      result.errors.forEach(err => console.log(`  ${err.file}: ${err.error}`));
-    }
-  })
-  .catch(error => {
-    console.error('Error syncing:', error);
-    process.exit(1);
-  });
+  const result = results.reduce((total, current) => ({
+    copied: total.copied + current.copied,
+    skipped: total.skipped + current.skipped,
+    indexed: total.indexed + current.indexed,
+    summarized: total.summarized + current.summarized,
+    errors: [...total.errors, ...current.errors],
+  }), { copied: 0, skipped: 0, indexed: 0, summarized: 0, errors: [] as Array<{ file: string; error: string }> });
+
+  console.log(`\n✅ Sync complete!`);
+  console.log(`  Copied: ${result.copied}`);
+  console.log(`  Skipped: ${result.skipped}`);
+  console.log(`  Indexed: ${result.indexed}`);
+  console.log(`  Summarized: ${result.summarized}`);
+
+  if (result.errors.length > 0) {
+    console.log(`\n⚠️  Errors: ${result.errors.length}`);
+    result.errors.forEach(err => console.log(`  ${err.file}: ${err.error}`));
+  }
+} catch (error) {
+  console.error('Error syncing:', error);
+  process.exit(1);
+}

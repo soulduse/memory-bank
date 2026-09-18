@@ -1,6 +1,6 @@
 # Memory Bank
 
-> Claude Code 대화를 위한 시맨틱 검색 + 팩트 자동 추출
+> Claude Code와 Codex 대화를 하나로 잇는 시맨틱 검색 + 팩트 자동 추출
 
 ![아키텍처](docs/architecture.svg)
 
@@ -9,10 +9,11 @@
 ## 주요 기능
 
 - **대화 검색** -- 모든 과거 대화에서 시맨틱 벡터 검색
+- **Claude + Codex 공용 보관소** -- 두 에이전트의 대화를 출처(`coding_agent`)와 함께 한 인덱스에 적재
 - **팩트 추출** -- 대화에서 결정, 선호, 패턴을 자동 추출
 - **팩트 통합** -- 중복 감지, 모순 처리, 변화 추적
 - **범위 격리** -- 프로젝트 팩트는 해당 프로젝트에만, 글로벌 팩트는 공유
-- **MCP 연동** -- Claude용 `search`, `read`, `search_facts` 도구 제공
+- **MCP 연동** -- Claude와 Codex에 `search`, `read`, `search_facts` 도구 제공
 - **Web UI** -- 대화 탐색 및 검색을 위한 다크 테마 웹 인터페이스
 
 ## 동작 원리
@@ -34,11 +35,21 @@ graph LR
 
 ## 설치
 
-Claude Code에서:
+Claude Code:
 ```
 /plugin marketplace add https://github.com/jung-wan-kim/memory-bank
 /plugin install memory-bank
 ```
+
+Codex:
+
+```bash
+codex plugin marketplace add https://github.com/jung-wan-kim/memory-bank
+codex plugin add memory-bank@memory-bank-dev
+```
+
+Codex 설치 후 `/hooks`에서 Memory Bank hook 출처를 한 번 검토·신뢰해야 자동 사실 주입과
+SessionEnd 수집이 켜집니다. 신뢰 전에도 MCP 검색과 수동 sync는 사용할 수 있습니다.
 
 ## 업데이트
 
@@ -49,10 +60,20 @@ Claude Code에서:
 ## 빠른 시작
 
 ```bash
-memory-bank sync      # 대화 동기화 및 인덱싱
+memory-bank sync      # Claude + Codex 대화 동기화 및 인덱싱
+memory-bank sync --agent codex  # Codex rollout만 동기화
 memory-bank search "React 인증"  # 시맨틱 검색
 memory-bank stats     # 인덱스 통계
 ```
+
+### Codex 수집 방식
+
+- Codex rollout JSONL을 공용 archive 형식으로 정규화해 `coding_agent=codex`로 저장합니다.
+- 생성된 시스템/권한/플러그인 카탈로그와 raw tool output은 검색 본문에서 제외하고 일반적인
+  자격 증명 패턴을 redaction합니다.
+- SessionEnd에서 해당 세션을 먼저 인덱싱한 뒤 팩트를 추출합니다. mtime·size·정규화 버전
+  상태 파일로 이미 처리한 대화는 다시 읽지 않습니다.
+- `memory-bank sync --agent claude|codex|all`로 이관 범위를 선택할 수 있습니다.
 
 ## 팩트 시스템
 

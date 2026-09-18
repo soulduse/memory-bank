@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Memory Bank is a Claude Code plugin that provides semantic search and fact extraction across past conversations. It runs as an MCP server exposing `search`, `read`, and `search_facts` tools.
+Memory Bank is a Claude Code and Codex plugin that provides shared semantic search and fact extraction across past conversations. It runs as an MCP server exposing `search`, `read`, and `search_facts` tools.
 
 ## Build & Test Commands
 
@@ -22,7 +22,7 @@ The build is two-step: `tsc` compiles `src/` → `dist/`, then `esbuild` bundles
 
 ### Data Flow
 
-1. **Sync** (`src/sync.ts`): Copies JSONL conversation files from `~/.claude/projects/` to `~/.config/superpowers/conversation-archive/`, indexes new files into SQLite
+1. **Sync** (`src/sync.ts`, `src/codex-sync.ts`): Copies Claude JSONL and normalizes Codex rollouts into `~/.config/superpowers/conversation-archive/`, then incrementally indexes both into SQLite
 2. **Index** (`src/indexer.ts`): Parses JSONL → generates 384-dim embeddings via `Xenova/all-MiniLM-L6-v2` → stores in SQLite with `sqlite-vec`
 3. **Search** (`src/search.ts`): Vector search (cosine similarity), text search (FTS), or combined mode
 4. **Fact Extraction** (`src/fact-extractor.ts`): LLM (Haiku) extracts decisions/preferences/patterns from exchanges at session end
@@ -40,6 +40,7 @@ The build is two-step: `tsc` compiles `src/` → `dist/`, then `esbuild` bundles
 | `parser.ts` | JSONL conversation file parser |
 | `paths.ts` | Config/data directory resolution (supports `MEMORY_BANK_CONFIG_DIR` override) |
 | `sync.ts` | File sync + incremental indexing + summary generation |
+| `codex-parser.ts` / `codex-sync.ts` | Sanitized Codex rollout normalization + stateful incremental sync |
 
 ### Plugin Structure
 

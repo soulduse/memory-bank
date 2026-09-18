@@ -1,6 +1,6 @@
 # Memory Bank
 
-> Conversations → Knowledge Graph. Claude Code conversations become searchable, structured knowledge.
+> Conversations → Knowledge Graph. Claude Code and Codex conversations become shared, searchable knowledge.
 
 ![Memory Bank](docs/memory-bank.gif)
 
@@ -19,6 +19,7 @@
 - **Knowledge Graph** -- Ontology classification (Domain → Category) + typed relations (INFLUENCES, SUPPORTS, SUPERSEDES, CONTRADICTS)
 - **RAG Search** -- Search results auto-enriched with related facts and ontology context
 - **Conversation Search** -- Semantic vector search + FTS5 (BM25) full-text search across all past conversations
+- **Claude + Codex Archive** -- Both agents write to one index with `coding_agent` provenance and incremental Codex rollout normalization
 - **Full-History Analysis** -- `memory-bank analyze` + `analyzing-all-conversations` skill: coverage-checked report over the entire conversation *index* (projects, facts, domains, timeline, backfill gaps) — run `memory-bank sync` first so new conversations are indexed
 - **Context Injection** -- Related past decisions are automatically prepended to every prompt (UserPromptSubmit hook): baseline-margin relevance gate + 1-hop ontology expansion + per-session dedup ledger and token budget (v1.4.0), with fail-loud JSONL observability logs
 - **Fact Extraction** -- Automatic extraction of decisions, preferences, patterns from conversations (trivial-exchange filtering, in-session dedup, confidence gating, LLM call budgeting)
@@ -53,7 +54,7 @@
 
 ```mermaid
 graph LR
-    A[Session End] -->|sync| B[Parse JSONL]
+    A[Claude/Codex Session End] -->|sync| B[Normalize + Parse JSONL]
     B --> C[Generate Embeddings]
     C --> D[SQLite + sqlite-vec]
 
@@ -77,11 +78,21 @@ graph LR
 
 ## Install
 
-In Claude Code:
+Claude Code:
 ```
 /plugin marketplace add https://github.com/jung-wan-kim/memory-bank
 /plugin install memory-bank
 ```
+
+Codex:
+
+```bash
+codex plugin marketplace add https://github.com/jung-wan-kim/memory-bank
+codex plugin add memory-bank@memory-bank-dev
+```
+
+After installing in Codex, review and trust the Memory Bank hooks once in `/hooks`. MCP search works
+without hook trust; automatic prompt injection and SessionEnd sync require it.
 
 ## Update
 
@@ -92,7 +103,8 @@ In Claude Code:
 ## Quick Start
 
 ```bash
-memory-bank sync      # Sync & index conversations
+memory-bank sync      # Sync & index Claude + Codex conversations
+memory-bank sync --agent codex  # Sync only Codex rollouts
 memory-bank search "React auth"  # Semantic search
 memory-bank stats     # Index statistics
 memory-bank analyze   # Full-history analysis report (coverage, projects, facts)
@@ -122,6 +134,18 @@ Every user prompt (≥20 chars) triggers the `UserPromptSubmit` hook, which vect
   Node-level crashes (missing `node_modules`, import failures) land in `logs/inject-context.err.log` instead of being discarded.
 
 **Troubleshooting**: if injection never fires, check those two files — an empty/absent JSONL log means the hook isn't running at all (stale plugin install, restart pending), while `"status":"error"` entries or err.log content pinpoint the failure.
+
+## Codex Integration
+
+- Codex rollout JSONL is normalized into the same archive schema and indexed with
+  `coding_agent="codex"`. Generated system/permission/plugin catalog blocks and raw tool outputs are
+  excluded from searchable conversation text; common credential patterns are redacted.
+- SessionEnd performs ordered **single-session sync → fact extraction**. A compact state file keyed by
+  source mtime, size, destination, and normalization version makes repeated syncs fast no-ops.
+- `memory-bank sync --agent claude|codex|all` controls backfill scope, and `--session PATH --wait`
+  supports the SessionEnd hook's ordered ingestion path.
+- The bundled `memory_bank` MCP exposes the same facts and conversations to both agents. Search tools
+  accept `coding_agent` when agent-specific provenance is needed.
 
 ## Full-History Analysis
 

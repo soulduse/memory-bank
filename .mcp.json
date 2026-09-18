@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "memory_bank": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "-e",
+        "const f=require('fs'),p=require('path'),o=require('os'),c=require('child_process');const h=o.homedir();const dirs=[process.env.PLUGIN_ROOT,process.env.CLAUDE_PLUGIN_ROOT];for(const base of [p.join(h,'.codex/plugins/cache/memory-bank-dev/memory-bank'),p.join(h,'.claude/plugins/cache/memory-bank-dev/memory-bank')]){try{const versions=f.readdirSync(base).filter(v=>!v.startsWith('.')).sort((a,b)=>b.localeCompare(a,undefined,{numeric:true}));for(const v of versions)dirs.push(p.join(base,v))}catch{}}dirs.push(p.join(h,'.claude/plugins/marketplaces/memory-bank-dev'));let root=null;for(const dir of dirs.filter(Boolean)){if(f.existsSync(p.join(dir,'cli/mcp-server-wrapper.js'))){root=dir;break}}if(!root){process.stderr.write('memory-bank: MCP launcher could not locate plugin root\\n');process.exit(1)}const child=c.spawn(process.execPath,[p.join(root,'cli/mcp-server-wrapper.js')],{stdio:'inherit',windowsHide:true});for(const signal of ['SIGTERM','SIGINT','SIGHUP'])process.on(signal,()=>{try{child.kill(signal)}catch{}});child.on('exit',(code,signal)=>{if(signal){process.removeAllListeners(signal);try{process.kill(process.pid,signal)}catch{process.exit(1)}}else process.exit(code==null?0:code)})"
+      ]
+    }
+  }
+}
