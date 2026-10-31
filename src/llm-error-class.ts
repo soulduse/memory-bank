@@ -63,6 +63,22 @@ export class EmptyLlmResponseError extends Error {
 }
 
 /**
+ * The model declined the request (`stop_reason: "refusal"`). Claude Haiku 5.5
+ * runs safety classifiers that Haiku 4.5 did not, and a refusal carries no text.
+ * Read as an empty response it would be 'transient' — retried, then held forever
+ * on the one fact the model keeps refusing. The same input is refused again, so
+ * it is a per-request failure: 'deterministic'.
+ */
+export class LlmRefusalError extends Error {
+  readonly category: string | null;
+  constructor(category: string | null = null) {
+    super(`LLM refused the request (stop_reason: refusal${category ? `, category: ${category}` : ''})`);
+    this.name = 'LlmRefusalError';
+    this.category = category;
+  }
+}
+
+/**
  * Classify a callHaiku rejection into three states so the drain loop can satisfy
  * BOTH "an outage must never silently skip the backlog" AND "one un-processable
  * fact must never wedge the cursor forever" — a binary flag cannot do both under
@@ -92,6 +108,7 @@ export function classifyLlmError(err: unknown): LlmErrorClass {
   // An empty body is a call-level failure by construction — no phrase matching.
   const unwrapped = err instanceof LlmCallError ? err.reason : err;
   if (unwrapped instanceof EmptyLlmResponseError) return 'transient';
+  if (unwrapped instanceof LlmRefusalError) return 'deterministic';
 
   // Classify the underlying provider rejection, not the wrapper.
   const e = unwrapped as { message?: string } | undefined;
@@ -126,6 +143,10 @@ export function classifyLlmError(err: unknown): LlmErrorClass {
   if (/too (large|long)|prompt is too long|context length|maximum.*token|max_?tokens|content.*too|invalid[_ ]?request|bad request|unprocessable/.test(m)) {
     return 'deterministic';
   }
+  // A missing Agent SDK platform binary (deps-heal.ts) is an install fault, not
+  // this request's: hold until the self-heal install lands. As 'unknown' the
+  // drain loops would advance past — skip — every fact meanwhile.
+  if (/native cli binary for \S+ not found/.test(m)) return 'transient';
   // TRANSIENT phrases: rate limit / server / network / outage, plus auth-KEY
   // errors (kept narrow — "invalid api key", not "invalid api request").
   // 'internal server error' / 'fetch failed' / stream teardown are added from the

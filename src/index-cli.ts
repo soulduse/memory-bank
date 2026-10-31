@@ -3,8 +3,8 @@ import { verifyIndex, repairIndex } from './verify.js';
 import { indexSession, indexUnprocessed, indexConversations } from './indexer.js';
 import { initDatabase } from './db.js';
 import { getDbPath, getArchiveDir } from './paths.js';
+import { removeAllSummaries } from './archive-io.js';
 import fs from 'fs';
-import path from 'path';
 
 const command = process.argv[2];
 
@@ -86,19 +86,10 @@ async function main() {
           console.log('Deleted existing database');
         }
 
-        // Delete all summary files
+        // Delete all summary files (plain and compressed)
         const archiveDir = getArchiveDir();
         if (fs.existsSync(archiveDir)) {
-          const projects = fs.readdirSync(archiveDir);
-          for (const project of projects) {
-            const projectPath = path.join(archiveDir, project);
-            if (!fs.statSync(projectPath).isDirectory()) continue;
-
-            const summaries = fs.readdirSync(projectPath).filter(f => f.endsWith('-summary.txt'));
-            for (const summary of summaries) {
-              fs.unlinkSync(path.join(projectPath, summary));
-            }
-          }
+          removeAllSummaries(archiveDir);
           console.log('Deleted all summary files');
         }
 

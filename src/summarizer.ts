@@ -1,18 +1,16 @@
 import { ConversationExchange } from './types.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { execSync } from 'child_process';
-import { writeFileSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
-import { llmWorkdir } from './llm.js';
+import { llmWorkdir, ISOLATED_QUERY_OPTIONS, DEFAULT_LLM_MODEL } from './llm.js';
+import { noteSdkFailure } from './deps-heal.js';
+import { classifyLlmError } from './llm-error-class.js';
 
 /**
  * Get API environment overrides for summarization calls.
  * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
  *
  * Env vars (all optional):
- * - MEMORY_BANK_API_MODEL: Model to use (default: haiku)
+ * - MEMORY_BANK_API_MODEL: Model to use (default: DEFAULT_LLM_MODEL, claude-haiku-5-5)
  * - MEMORY_BANK_API_MODEL_FALLBACK: Fallback model on error (default: sonnet)
  * - MEMORY_BANK_API_BASE_URL: Custom API endpoint
  * - MEMORY_BANK_API_TOKEN: Auth token for custom endpoint
@@ -44,18 +42,62 @@ export function formatConversationText(exchanges: ConversationExchange[]): strin
 
 function extractSummary(text: string): string {
   const match = text.match(/<summary>(.*?)<\/summary>/s);
-  if (match) {
-    return match[1].trim();
-  }
-  // Fallback if no tags found
-  return text.trim();
+  const summary = match ? match[1].trim() : text.trim(); // no tags: the whole reply
+  // Written out, an empty summary is never redone (callers only check that the
+  // file exists). A reply with no text is a failed call, retried on a later run.
+  if (!summary) throw new Error('Summary call returned no summary text');
+  return summary;
 }
 
-async function callClaudeViaAgentSdk(prompt: string, sessionId?: string, useFallback = false): Promise<string> {
-  const primaryModel = process.env.MEMORY_BANK_API_MODEL || 'haiku';
+/** The model declined to summarize. The same conversation is declined again. */
+class SummaryRefusedError extends Error {
+  constructor(detail: string) {
+    super(`Summary refused: ${detail}`);
+    this.name = 'SummaryRefusedError';
+  }
+}
+
+/**
+ * The reply hit the output token cap. Taken as a setting to fix (a thinking
+ * model under the cap) rather than a fault of this conversation, as on the API
+ * key path: retried on a later run, never skipped like a rejected chunk. Not
+ * measured: a chunk whose content alone overruns the cap is retried for good.
+ */
+class SummaryCutOffError extends Error {
+  constructor(detail: string) {
+    super(`Summary call cut off at the output token cap: ${detail}`);
+    this.name = 'SummaryCutOffError';
+  }
+}
+
+/**
+ * Written as the summary of a conversation the model declines to summarize.
+ * Writing nothing would have sync retry it on every run, and sync summarizes at
+ * most `summaryLimit` files per run in directory order — conversations that are
+ * declined every time would hold those slots for good. The marker stays until
+ * a rebuild (conversations still in the projects dir) or a repair after the
+ * conversation changed; whether a refusal repeats was not measured.
+ * Failures that may pass (outage, API error, no result) still throw and write
+ * nothing, so they retry.
+ */
+export const REFUSED_SUMMARY = '[No summary: the model declined to summarize this conversation.]';
+
+async function callClaude(prompt: string, sessionId?: string, useFallback = false): Promise<string> {
+  try {
+    return await callClaudeOnce(prompt, sessionId, useFallback);
+  } catch (error) {
+    noteSdkFailure(error, 'memory-bank summarizer');
+    throw error;
+  }
+}
+
+async function callClaudeOnce(prompt: string, sessionId?: string, useFallback = false): Promise<string> {
+  const primaryModel = process.env.MEMORY_BANK_API_MODEL || DEFAULT_LLM_MODEL;
   const fallbackModel = process.env.MEMORY_BANK_API_MODEL_FALLBACK || 'sonnet';
   const model = useFallback ? fallbackModel : primaryModel;
 
+  let refused = false;
+  let cutOff = false;
   for await (const message of query({
     prompt,
     options: {
@@ -69,7 +111,7 @@ async function callClaudeViaAgentSdk(prompt: string, sessionId?: string, useFall
       // hooks would re-spawn sync/backfill workers and cascade into more
       // sessions. Resume works because every call shares this fixed cwd.
       cwd: llmWorkdir(),
-      settingSources: [],
+      ...ISOLATED_QUERY_OPTIONS,
       // Don't override systemPrompt when resuming - it uses the original session's prompt
       // Instead, the prompt itself should provide clear instructions
       ...(sessionId ? {} : {
@@ -77,62 +119,52 @@ async function callClaudeViaAgentSdk(prompt: string, sessionId?: string, useFall
       })
     } as any
   })) {
+    if (message.type === 'system' && message.subtype === 'model_refusal_no_fallback') {
+      refused = true; // the SDK's structured refusal signal; stop_reason may not carry it
+      continue;
+    }
+    if (message.type === 'assistant' && message.error === 'max_output_tokens') {
+      // The SDK's structured signal for the output cap. Only an error turn is
+      // treated as cut off; a turn the CLI recovered (is_error false) is taken
+      // as it is.
+      cutOff = true;
+      continue;
+    }
     if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
       const result = (message as any).result;
 
+      // Check if result is an API error (SDK returns errors as result strings)
       if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens')) {
         if (!useFallback) {
           console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
-          return await callClaudeViaAgentSdk(prompt, sessionId, true);
+          return await callClaude(prompt, sessionId, true);
         }
-        return result;
+        // The fallback hit it too: an error, not a summary to write out.
+        throw new Error(`Summary call failed (${fallbackModel} thinking budget): ${result.slice(0, 300)}`);
+      }
+
+      // An error turn carries its error text in `result`; returned, it would be
+      // written out as the summary. A refusal is final; anything else is
+      // retried on a later run (callers write no summary file on a throw).
+      if (refused || message.stop_reason === 'refusal') {
+        throw new SummaryRefusedError(typeof result === 'string' ? result.slice(0, 300) : '');
+      }
+      if (message.is_error) {
+        const detail = typeof result === 'string' ? result.slice(0, 300) : '';
+        // Read as "max_tokens" by classifyLlmError, i.e. a rejection that repeats,
+        // and a chunk that fails that way would be skipped for good.
+        if (cutOff || message.stop_reason === 'max_tokens') {
+          throw new SummaryCutOffError(detail);
+        }
+        throw new Error(`Summary call failed (${message.stop_reason ?? message.subtype}): ${detail}`);
       }
 
       return result;
     }
   }
-  return '';
-}
-
-function callClaudeViaCli(prompt: string, model: string): string {
-  const tmpFile = join(tmpdir(), `memory-bank-summary-${Date.now()}.txt`);
-  try {
-    writeFileSync(tmpFile, prompt, 'utf-8');
-    const result = execSync(
-      `claude -p "$(cat '${tmpFile}')" --model ${model} --output-format text`,
-      {
-        encoding: 'utf-8',
-        timeout: 120000,
-        maxBuffer: 1024 * 1024,
-        env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
-      }
-    );
-    return result.trim();
-  } finally {
-    try { unlinkSync(tmpFile); } catch {}
-  }
-}
-
-async function callClaude(prompt: string, sessionId?: string, useFallback = false): Promise<string> {
-  // MEMORY_BANK_USE_CLI: 'true' = CLI 만, 'fallback' = SDK 실패 시 CLI, 미설정 = upstream 과 동일(SDK 만).
-  const cliMode = process.env.MEMORY_BANK_USE_CLI;
-  const cliOnly = cliMode === 'true';
-  const cliFallback = cliOnly || cliMode === 'fallback';
-
-  if (!cliOnly) {
-    try {
-      return await callClaudeViaAgentSdk(prompt, sessionId, useFallback);
-    } catch (error) {
-      if (!cliFallback) throw error;
-      // Continue to CLI fallback
-    }
-  }
-
-  // CLI fallback (uses Max/Pro subscription, no API key needed)
-  const model = useFallback
-    ? (process.env.MEMORY_BANK_API_MODEL_FALLBACK || 'sonnet')
-    : (process.env.MEMORY_BANK_API_MODEL || 'haiku');
-  return callClaudeViaCli(prompt, process.env.MEMORY_BANK_CLI_MODEL || model);
+  // No result message: a failed call. Returned as '', it became an empty
+  // summary file that was never redone.
+  throw new Error('Summary call ended without a result');
 }
 
 function chunkExchanges(exchanges: ConversationExchange[], chunkSize: number): ConversationExchange[][] {
@@ -186,7 +218,13 @@ Bad:
 
 ${conversationText}`;
 
-    const result = await callClaude(prompt, sessionId);
+    let result: string;
+    try {
+      result = await callClaude(prompt, sessionId);
+    } catch (error) {
+      if (error instanceof SummaryRefusedError) return REFUSED_SUMMARY;
+      throw error;
+    }
     return extractSummary(result);
   }
 
@@ -202,6 +240,8 @@ ${conversationText}`;
 
   // Summarize each chunk
   const chunkSummaries: string[] = [];
+  let refusedChunks = 0;
+  let rejectedInARow = 0; // rejections since the last chunk that got through
   for (let i = 0; i < chunks.length; i++) {
     const chunkText = formatConversationText(chunks[i]);
     const prompt = `${SUMMARIZER_CONTEXT_MARKER}.
@@ -216,14 +256,32 @@ Example: <summary>Implemented HID keyboard functionality for ESP32. Hit Bluetoot
       const summary = await callClaude(prompt); // No sessionId for chunks
       const extracted = extractSummary(summary);
       chunkSummaries.push(extracted);
+      rejectedInARow = 0;
       console.log(`  Chunk ${i + 1}/${chunks.length}: ${extracted.split(/\s+/).length} words`);
     } catch (error) {
-      console.log(`  Chunk ${i + 1} failed, skipping`);
+      // A refused or rejected chunk (400/413: too long, malformed) fails the
+      // same way next run: skip it, as before — aborting would redo every
+      // earlier chunk on each sync, forever. Any other failure (outage, no
+      // result) would fail the remaining chunks too, and a summary of the
+      // chunks that got through would be written for good: abort instead. No
+      // file is written, and the conversation is retried on a later run.
+      const refused = error instanceof SummaryRefusedError;
+      const rejected = !refused && !(error instanceof SummaryCutOffError) && classifyLlmError(error) === 'deterministic';
+      if (!refused && !rejected) throw error;
+      // Two rejections in a row more likely mean every request is now rejected
+      // (a setting, the account) than two bad chunks side by side: stop, rather
+      // than spend a call per chunk and write what got through for good. The
+      // two cannot be told apart; two adjacent bad chunks are retried for good.
+      if (rejected && ++rejectedInARow >= 2) throw error;
+      if (refused) refusedChunks++;
+      console.log(`  Chunk ${i + 1} ${refused ? 'refused' : 'rejected'}, skipping`);
     }
   }
 
   if (chunkSummaries.length === 0) {
-    return 'Error: Unable to summarize conversation.';
+    if (refusedChunks === chunks.length) return REFUSED_SUMMARY;
+    // Rejected chunks leave nothing to write; the conversation is retried.
+    throw new Error(`Summary failed: all ${chunks.length} chunks were refused or rejected`);
   }
 
   // Synthesize chunks into final summary
@@ -247,6 +305,8 @@ Your summary (max 200 words):`;
     const result = await callClaude(synthesisPrompt); // No sessionId for synthesis
     return extractSummary(result);
   } catch (error) {
+    // Unlike a skipped chunk this loses no content: every part summary is kept,
+    // only not merged into one paragraph.
     console.log(`  Synthesis failed, using chunk summaries`);
     return chunkSummaries.join(' ');
   }

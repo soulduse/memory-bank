@@ -111,6 +111,7 @@ Every user prompt (≥20 chars) triggers the `UserPromptSubmit` hook, which vect
 
 - **Relevance gate** — a fact is injected only when its similarity to the query exceeds the query's own background baseline by a margin (absolute thresholds cannot separate relevant from irrelevant on compressed e5 scores)
 - **1-hop expansion** — top matches pull in related facts via typed ontology relations (max 8 facts total)
+- **Repository family scope (v1.7.8)** — a prompt in a worktree (`<repo>/.auto-issue-worktrees/…`) or a sub-folder (`<repo>/docs`) also sees the project facts of the same repository, and the repository sees what was learned in worktrees placed inside its folder (a worktree placed outside it sees the repository, not the other way round). A path that no longer exists (a cwd or a fact's path) has no family — which repository a deleted path belonged to cannot be told from the disk — so facts learned in a worktree that has since been deleted no longer reach the family (a loss taken for isolation: none of the 83 lines the family added in the replay sample came from a deleted path). Inside a worktree container (`<repo>/.claude/worktrees/`, `<repo>/.auto-issue-worktrees/`) only the root's own linked worktrees count, for a fact's path and a cwd alike — a container can hold other repositories' worktrees, so a session opened in a plain folder there has no family; the container is that of the repository or worktree the path is in, its name compared case-insensitively on macOS (so on a case-sensitive volume a look-alike folder is left out — never pulled in). A Windows path has no family: the exact-path scope. A cwd that is a symbolic link or a file, or that has a symbolic link between it and its repository root (the root itself included), has no family (links above the root are not looked at — the scope is a path, as the exact-path scope always was), and a fact path through a symbolic link under a root is left out (facts are left out, never pulled in); a linked worktree whose main repository is named through a symbolic link joins nothing but itself. A slug-form project resolves to a path through the conversation index (the matching cwd, else the most used one) on both the vector search and the relation path, and gets that path's family; an unresolved slug has none. Worktrees of a bare repository kept in `.bare/` (`.bare/worktrees/…`) are not grouped — each is its own family (a bare repository kept as `<dir>/.git` looks like any repository and is grouped). Roots come from `.git` on disk and must be a real repository (a `.git` folder holding HEAD, or a `.git` file naming an existing git dir; a linked worktree joins its main repository only when its `gitdir` back-reference matches); a home directory (`$HOME` or the account's own) and its ancestors never become a root; matching is on a `/` boundary, so `<repo>` never sees `<repo>-extra`, and never reaches into another repository nested under a root (a separate clone or a submodule). Chosen by the replay bench below; the SessionStart key-facts block is unchanged
 - **Session dedup ledger (v1.4.0)** — a fact already injected in this session is never re-injected (it is already in the conversation context); repeated topics cost 0 extra tokens. Ledger is per-session, bounded (400 ids), TTL-pruned (7 days), and fail-open
 - **Token budget (v1.4.0)** — each fact is truncated to 160 chars and the whole block capped at 1,000 chars (lowest-relevance dropped first); repeated-prompt detection is skipped when injection has already spent >700ms (the sync sqlite search cannot be preempted once started)
 - **Observability (v1.2.1, extended v1.4.0)** — every run appends one JSONL line to `~/.config/superpowers/conversation-index/logs/inject-context.jsonl`:
@@ -120,7 +121,20 @@ Every user prompt (≥20 chars) triggers the `UserPromptSubmit` hook, which vect
   {"ts":"2026-07-12T07:36:41Z","status":"deduped","prompt_len":67,"candidates":5,"injected":0,"deduped":8,"duration_ms":476,"via":"fallback"}
   ```
 
+  Since v1.7.8 a line also carries `top_margins` (each candidate's similarity minus the baseline), `gated_ids` (ids that cleared the gate before the session ledger), `injected_ids`, `session_key` (sha256 prefix of the session id) and `plugin_version`, and the SessionStart key-facts block writes its own `"via":"session-start"` line (count, chars, ids, `source`).
+
   Node-level crashes (missing `node_modules`, import failures) land in `logs/inject-context.err.log` instead of being discarded.
+
+**Injection replay bench (v1.7.8)** — replays prompts the hook really saw (inject log ∩ indexed conversation, as of each prompt's moment) through selection variants and has an isolated LLM judge score each injected line 0/1/2 against random-fact controls:
+
+```bash
+npm run build
+node bench/inject-replay.mjs --build && node bench/inject-replay.mjs --replay && node bench/inject-replay.mjs --check-determinism
+node bench/inject-judge.mjs --smoke && node bench/inject-judge.mjs --judge   # retires rows judged on other text first (--retire-stale), binds every row to its call at the end (--bind-legacy)
+node bench/inject-judge.mjs --report --doc docs/bench/<date>-inject-replay.md && node bench/inject-judge.mjs --leak-check docs/bench/<date>-inject-replay.md
+```
+
+Prompt and fact text stay in `.bench-out/`; the report holds aggregates only. 2026-10-19 result (`docs/bench/2026-10-19-inject-replay.md`, 303 prompts): 55.4% of injected lines judged at least related, 20.5% directly useful; repository family scope kept (+0.126 directly useful lines per affected prompt, 95% CI 0.047–0.228), a query gate on relation neighbours rejected. The family gain came entirely from one repository (its main folder and linked worktrees) — by where the prompt's cwd was (not where the useful facts came from): prompts in worktrees placed inside the repository folder gained +12 directly useful lines, prompts in linked worktrees placed outside it +4, prompts in the repository folder itself 0; the other repositories' 22 affected prompts gained nothing and are too few to judge on their own.
 
 **Troubleshooting**: if injection never fires, check those two files — an empty/absent JSONL log means the hook isn't running at all (stale plugin install, restart pending), while `"status":"error"` entries or err.log content pinpoint the failure.
 
@@ -202,7 +216,7 @@ graph TB
     FA1 x--x FB1
 ```
 
-Project A sees: Project A facts + Global facts (never Project B).
+Project A sees: Project A facts + Global facts (never Project B). Since v1.7.8 the per-prompt injection widens to Project A's repository family (see Context Injection): a worktree or sub-folder sees the repository's facts, and the repository sees what was learned in worktrees placed inside its folder — not those placed outside it (one-way); a different repository stays out.
 
 ## MCP Tools
 
@@ -300,8 +314,8 @@ Claude Desktop will then have access to all your Claude Code conversations and e
 ## Configuration
 
 ```bash
-# Fact extraction model (default: claude-haiku-4-5-20251001)
-export MEMORY_BANK_FACT_MODEL=claude-haiku-4-5-20251001
+# Fact extraction model (default: claude-haiku-5-5)
+export MEMORY_BANK_FACT_MODEL=claude-haiku-5-5
 export ANTHROPIC_API_KEY=your-key
 
 # Summarization model
@@ -324,6 +338,31 @@ export BACKFILL_RELATIONS=0           # 1 = also detect relations during backfil
 # showed only 72% top-1 agreement at sim>=0.93; opt in after re-measuring
 # with scripts/measure-det-gate.mjs)
 # export MEMORY_BANK_ONTOLOGY_DET_GATE=0.94
+
+# Session-start maintenance (pending-work probes + fact-vector compaction):
+# at most once per this many minutes (default 360; 0 = every session start).
+# A run where a step failed retries after 60 minutes instead.
+# Each run is logged to ~/.config/superpowers/conversation-index/logs/maintenance.jsonl
+export MEMORY_BANK_MAINTENANCE_INTERVAL_MIN=360
+
+# Node binary for hooks when the default `node` was built for a different ABI
+# than the installed better-sqlite3 (error: "NODE_MODULE_VERSION … requires …").
+# Hooks find a matching node on PATH / Homebrew / nvm / volta / fnm / asdf on their own;
+# set this only when none is found.
+# export MEMORY_BANK_NODE=/opt/homebrew/opt/node@22/bin/node
+
+# Time budget (ms) of the UserPromptSubmit injection hook, used to bound that
+# re-run. Default 30000 = Claude Code's default for this hook; set it to match
+# if you give the hook a different timeout.
+# export MEMORY_BANK_INJECT_HOOK_BUDGET_MS=30000
+```
+
+Maintenance scripts (run by hand, never automatically):
+
+```bash
+node scripts/compact-vec-tables.mjs [--db PATH] [--min-ratio 0.8] [--dry-run]   # drop deleted slots from the fact vector tables
+node scripts/migrate-vec-facts-int8.mjs --dry-run                              # fact vectors float32 → int8 (scale 600); see the script header
+node scripts/migrate-vec-facts-int8.mjs --restore BACKUP.jsonl.gz              # back to float32 from its verified backup
 ```
 
 ## 3D Knowledge Graph

@@ -1,10 +1,10 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
-import { execFileSync } from 'node:child_process';
+import { query, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { LLM_WORKDIR_BASENAME, getProjectsDir } from './paths.js';
-import { classifyLlmError, EmptyLlmResponseError } from './llm-error-class.js';
+import { classifyLlmError, EmptyLlmResponseError, LlmRefusalError } from './llm-error-class.js';
+import { noteSdkFailure } from './deps-heal.js';
 
 // Isolated working directory for headless Agent SDK sessions. The CLI that
 // query() spawns persists a transcript under ~/.claude/projects/<cwd-slug>/;
@@ -12,6 +12,32 @@ import { classifyLlmError, EmptyLlmResponseError } from './llm-error-class.js';
 // project's dir, where a user `claude --resume` can pick one up as their own
 // session (observed 2026-07-05). A dedicated cwd keeps them in their own slug.
 const LLM_WORKDIR = path.join(os.tmpdir(), LLM_WORKDIR_BASENAME);
+
+/**
+ * Default model for every headless call (fact extraction, consolidation,
+ * classification, summaries, translation). A full model id, not the 'haiku'
+ * alias: the alias resolves per bundled CLI version — Agent SDK 0.1.77 maps it
+ * to claude-haiku-4-5-20251001, 0.3.293 to claude-haiku-5-5 (measured
+ * 2026-10-08) — so the model changed with whatever SDK an install carried.
+ */
+export const DEFAULT_LLM_MODEL = 'claude-haiku-5-5';
+
+/**
+ * Isolation every headless query() shares (callHaiku, summarizer, translate).
+ *  - settingSources: [] — no user settings/plugins, so the spawned session's own
+ *    SessionStart/End hooks can't re-spawn workers (cascade prevention).
+ *  - tools: [] — these are text-in/text-out calls; the bundled CLI otherwise
+ *    sends every built-in tool definition with each request.
+ *  - strictMcpConfig — settingSources: [] does NOT stop the CLI from loading the
+ *    user's MCP servers, so each call also carried (and started) them.
+ * Measured on SDK 0.3.288 / CLI 2.1.288 (2026-10-03), one "pong" call:
+ * default ≈ 32,500 prompt tokens, tools: [] ≈ 3,300, both ≈ 390.
+ */
+export const ISOLATED_QUERY_OPTIONS = {
+  settingSources: [] as never[],
+  tools: [] as string[],
+  strictMcpConfig: true,
+};
 export function llmWorkdir(): string {
   try {
     fs.mkdirSync(LLM_WORKDIR, { recursive: true });
@@ -131,18 +157,17 @@ const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : 
 
 /** 단발 호출 — Agent SDK 우선, 실패 시(그리고 키가 있을 때만) Anthropic SDK 폴백. */
 async function callOnce(systemPrompt: string, userMessage: string, maxTokens: number): Promise<string> {
-  const model = process.env.MEMORY_BANK_FACT_MODEL || 'haiku';
-  // fork: MEMORY_BANK_USE_CLI — 'true' = Agent SDK 를 건너뛰고 CLI 만, 'fallback' = SDK 실패 시
-  // CLI 로 폴백, 미설정 = upstream 과 동일(SDK → API 키 폴백). 기본값을 upstream 과 같게 두는
-  // 이유: SDK 실패를 CLI 가 무조건 삼키면 upstream 의 transient/deterministic 재시도 계약이
-  // 비켜가고(테스트 llm-retry AC2b/AC2c/AC3), 실패마다 CLI 세션이 추가 스폰된다.
-  const cliMode = process.env.MEMORY_BANK_USE_CLI;
-  const cliOnly = cliMode === 'true';
-  const cliFallback = cliOnly || cliMode === 'fallback';
-  let agentSdkError: unknown;
+  const model = process.env.MEMORY_BANK_FACT_MODEL || DEFAULT_LLM_MODEL;
+
+  // The result is judged after the try: a refusal or an error turn thrown inside
+  // it would land in the API-key fallback below and re-send a request that
+  // already failed on the same model.
+  let result: SDKResultMessage | null = null;
+  let refused = false;
+  let refusalCategory: string | null = null;
 
   // Try Claude Agent SDK first (works inside Claude Code without API key)
-  if (!cliOnly) try {
+  try {
     for await (const message of query({
       prompt: `${systemPrompt}\n\n${userMessage}`,
       options: {
@@ -154,32 +179,25 @@ async function callOnce(systemPrompt: string, userMessage: string, maxTokens: nu
         // own SessionStart/End hooks re-spawn sync/backfill workers and every
         // LLM call cascades into more sessions (observed as a proxy flood).
         maxTurns: 1,
-        settingSources: [],
+        ...ISOLATED_QUERY_OPTIONS,
         cwd: llmWorkdir(),
       } as any,
     })) {
-      if (message && typeof message === 'object' && 'type' in message && (message as any).type === 'result') {
-        return (message as any).result || '';
+      if (message.type === 'system' && message.subtype === 'model_refusal_no_fallback') {
+        // The SDK's structured refusal signal; the result's stop_reason may not carry it.
+        refused = true;
+        refusalCategory = message.api_refusal_category ?? null;
+      } else if (message.type === 'system' && message.subtype === 'model_refusal_fallback') {
+        // The answer that follows came from another model, not the one asked for.
+        console.error(`callHaiku: ${message.original_model} refused; answered by ${message.fallback_model}`);
+      } else if (message.type === 'result') {
+        result = message;
+        break;
       }
     }
-    // 스트림이 result 메시지 없이 끝남 — 호출 실패이지 "빈 답변"이 아니다.
-    return '';
-  } catch (error) {
-    agentSdkError = error;
-  }
-
-  // Fallback 1 (fork, opt-in): Claude Code CLI — 구독 과금, API 키 불필요.
-  if (cliFallback) {
-    try {
-      return callClaudeCli(systemPrompt, userMessage);
-    } catch (cliError) {
-      console.error(`callOnce: CLI fallback failed: ${cliError instanceof Error ? cliError.message : cliError}`);
-      if (agentSdkError === undefined) agentSdkError = cliError;
-    }
-  }
-
-  // Fallback 2: direct Anthropic SDK (standalone mode, needs a key)
-  {
+  } catch (agentSdkError) {
+    noteSdkFailure(agentSdkError, 'memory-bank llm');
+    // Fallback to direct Anthropic SDK if agent SDK fails (standalone mode)
     const apiKey = process.env.ANTHROPIC_API_KEY || process.env.MEMORY_BANK_API_TOKEN;
     if (!apiKey) {
       // 키 없음 = 폴백 불가. 원인 에러를 그대로 전파해야 분류기가 transient/deterministic
@@ -192,39 +210,51 @@ async function callOnce(systemPrompt: string, userMessage: string, maxTokens: nu
     const client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
 
     const response = await client.messages.create({
-      model: process.env.MEMORY_BANK_FACT_MODEL || 'claude-haiku-4-5-20251001',
+      model,
       max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
+      // Haiku 5.5 thinks by default and thinking counts toward max_tokens, but
+      // callers size maxTokens for the answer alone (256 for a relation verdict),
+      // so thinking could use up the cap before any text. Run without it, as
+      // Haiku 4.5 did here. Default model only: Opus 5.5 / Sonnet 5.5 reject 'disabled'.
+      ...(model === DEFAULT_LLM_MODEL ? { thinking: { type: 'disabled' as const } } : {}),
     });
 
+    if (response.stop_reason === 'refusal') {
+      throw new LlmRefusalError(response.stop_details?.category ?? null);
+    }
     const textBlock = response.content.find((b: any) => b.type === 'text');
-    return (textBlock as any)?.text || '';
+    const text = (textBlock as any)?.text || '';
+    // The cap ran out: a thinking model under an answer-sized cap. That is a
+    // setting to fix, not this request's fault, so an empty answer stays an
+    // empty (transient) response — deferred, not dropped for good. Logged either
+    // way, since a cut-off answer usually fails to parse.
+    if (response.stop_reason === 'max_tokens') {
+      console.error(`callHaiku: ${model} hit max_tokens (${maxTokens}) — ${text ? 'answer cut off' : 'no answer text'}`);
+    }
+    return text;
   }
+
+  // 스트림이 result 메시지 없이 끝남 — 호출 실패이지 "빈 답변"이 아니다.
+  if (!result) return '';
+  return agentResultText(result, refused, refusalCategory);
 }
 
 /**
- * fork: Claude Code CLI 로 단발 호출 — 사용자의 Max/Pro 구독으로 과금되며 API 키가
- * 필요 없다. 프롬프트는 stdin 으로 넘겨 셸 이스케이프·인자 길이 한계를 피한다.
- * 스폰된 세션이 사용자 설정·플러그인을 읽으면 자기 훅이 sync/backfill 워커를
- * 다시 띄워 캐스케이드가 나므로(upstream 의 settingSources: [] 와 동일하게)
- * --setting-sources '' 로 설정·플러그인을 전부 끊고 CLAUDE_CODE_DISABLE_AUTO_MEMORY 를 켠다.
+ * Text of a finished Agent SDK turn. A turn that ended on an API error still
+ * arrives as subtype 'success' with is_error and the error text in `result`;
+ * returning that text made callers parse an error message as the answer (no
+ * JSON → batch silently empty). Throw instead, so classifyLlmError can read it
+ * ("API Error: 500 …" → transient, "… 400 …" → deterministic).
  */
-function callClaudeCli(systemPrompt: string, userMessage: string): string {
-  const cliModel = process.env.MEMORY_BANK_CLI_MODEL || 'haiku';
-  const result = execFileSync(
-    'claude',
-    ['-p', '--model', cliModel, '--output-format', 'text', '--setting-sources', '', '--system-prompt', systemPrompt],
-    {
-      input: userMessage,
-      encoding: 'utf-8',
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024,
-      cwd: llmWorkdir(),
-      env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
-    },
-  );
-  return result.trim();
+function agentResultText(result: SDKResultMessage, refused: boolean, refusalCategory: string | null): string {
+  if (refused || result.stop_reason === 'refusal') throw new LlmRefusalError(refusalCategory);
+  if ('errors' in result) {
+    throw new Error(`Agent SDK turn ended with ${result.subtype}: ${result.errors.join('; ')}`);
+  }
+  if (result.is_error) throw new Error(result.result || 'Agent SDK turn ended with an error');
+  return result.result || '';
 }
 
 /**
@@ -277,19 +307,57 @@ export async function callHaiku(
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-export function parseJsonResponse<T>(text: string): T | null {
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/)
-    || text.match(/(\[[\s\S]*\])/)
-    || text.match(/(\{[\s\S]*\})/);
-  if (!jsonMatch) {
+/**
+ * Parse the JSON in an LLM reply. `expect: 'array'` is for callers that need a
+ * list (fact extraction, batch classification): a reply that wraps the list in
+ * an object ({"facts": [...]}) yields that list when it is the object's only
+ * array — the old array-first regex unwrapped this by accident.
+ */
+export function parseJsonResponse<T>(text: string, expect?: 'array'): T | null {
+  const value = parseJsonValue(text);
+  if (expect !== 'array' || value === null || Array.isArray(value) || typeof value !== 'object') {
+    return value as T | null;
+  }
+  const arrays = Object.values(value as Record<string, unknown>).filter(Array.isArray);
+  if (arrays.length === 1) return arrays[0] as T;
+  console.error(`parseJsonResponse: expected a JSON array, got an object with ${arrays.length} array fields:`, text.substring(0, 200));
+  return value as T;
+}
+
+function parseJsonValue(text: string): unknown {
+  // The whole reply first: Haiku 5.5 answers with bare JSON, no fence. The
+  // fallbacks below search inside text, and a bare object whose string values
+  // hold brackets ("[ ] checklist item") used to come back as the inner "[ ]"
+  // → [] (measured on a real fact pair; Haiku 4.5 fenced its JSON, hiding this).
+  const whole = text.trim();
+  if (whole.startsWith('{') || whole.startsWith('[')) {
+    try {
+      return JSON.parse(whole);
+    } catch {
+      /* not one JSON value — fall through to extraction */
+    }
+  }
+  // A fenced block wins. In prose, try object / array in the order they start —
+  // not always the array — and move on to the other if the first doesn't parse.
+  const fenced = text.match(/```json\s*([\s\S]*?)\s*```/);
+  const candidates = fenced
+    ? [fenced]
+    : [text.match(/(\[[\s\S]*\])/), text.match(/(\{[\s\S]*\})/)]
+      .filter((m): m is RegExpMatchArray => m !== null)
+      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  if (candidates.length === 0) {
     console.error('parseJsonResponse: no JSON found in LLM response:', text.substring(0, 200));
     return null;
   }
 
-  try {
-    return JSON.parse(jsonMatch[1]) as T;
-  } catch (e) {
-    console.error('parseJsonResponse: invalid JSON:', (e as Error).message, jsonMatch[1].substring(0, 200));
-    return null;
+  let firstError: Error | null = null;
+  for (const match of candidates) {
+    try {
+      return JSON.parse(match[1]);
+    } catch (e) {
+      firstError ??= e as Error;
+    }
   }
+  console.error('parseJsonResponse: invalid JSON:', firstError?.message, candidates[0][1].substring(0, 200));
+  return null;
 }

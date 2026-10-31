@@ -35,11 +35,26 @@ The build is two-step: `tsc` compiles `src/` → `dist/`, then `esbuild` bundles
 | `mcp-server.ts` | MCP server entry point — registers `search`, `read`, `search_facts` tools |
 | `db.ts` | SQLite schema init, migrations, CRUD for exchanges |
 | `fact-db.ts` | CRUD and vector search for facts table |
+| `inject-select.ts` | Which facts a prompt's block carries (KNN → baseline gate → 1-hop) — shared by the live hook and the replay bench; `PRODUCTION_SELECT_OPTIONS` is the bench's decision |
+| `project-family.ts` | Repository family of a cwd (git top-level + linked worktree's main repo, fs only) and the scope predicate both searches use |
+| `inject-log.ts` | `inject-context.jsonl` lines: status, timings, margins, gated/injected ids, session_key, plugin_version, SessionStart lines |
 | `embeddings.ts` | Local embedding generation using `@xenova/transformers` |
 | `llm.ts` | Anthropic API wrapper for Haiku calls (fact extraction/consolidation) |
 | `parser.ts` | JSONL conversation file parser |
+| `vec-compact.ts` | Rebuild a fact-side vec0 table without deleted slots (same ids, bytes, dtype, scale) |
+| `vec-migrate-guard.ts` | Refuses a vec format change while processes or install dirs run older code |
+| `node-abi.ts` | Finds a node whose ABI matches better-sqlite3 and re-runs a hook under it |
+| `cli-args.ts` | Strict argument parsing for scripts that write the live DB |
 | `paths.ts` | Config/data directory resolution (supports `MEMORY_BANK_CONFIG_DIR` override) |
 | `sync.ts` | File sync + incremental indexing + summary generation |
+
+### Injection replay bench
+
+`bench/inject-replay.mjs` (sample from the inject log ∩ indexed prompts, read-only snapshot, replay of selection
+variants) and `bench/inject-judge.mjs` (isolated `callHaiku` judge, random-fact controls, bootstrap CIs,
+pre-registered decisions). Private text stays in `.bench-out/` (gitignored); `docs/bench/` holds aggregates only and
+its decisions block pins `PRODUCTION_SELECT_OPTIONS` (test/inject-select.test.ts). Plan:
+`docs/plans/2026-10-19-memorilla-applicability.md`.
 
 ### Plugin Structure
 
@@ -77,10 +92,15 @@ Consolidation relations: `DUPLICATE` (merge), `CONTRADICTION` (replace), `EVOLUT
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` / `MEMORY_BANK_API_TOKEN` | API key for Haiku LLM calls |
-| `MEMORY_BANK_FACT_MODEL` | Override fact extraction model (default: `claude-haiku-4-5-20251001`) |
+| `MEMORY_BANK_FACT_MODEL` | Override fact extraction model (default: `claude-haiku-5-5`) |
 | `MEMORY_BANK_CONFIG_DIR` | Override config directory (useful for testing) |
 | `MEMORY_BANK_DB_PATH` / `TEST_DB_PATH` | Override database path |
 | `TEST_ARCHIVE_DIR` | Override archive directory for tests |
+| `MEMORY_BANK_MAINTENANCE_INTERVAL_MIN` | Session-start maintenance interval in minutes (default 360, 0 = every start; a partial run retries after 60) |
+| `MEMORY_BANK_NODE` | Node binary for hooks when the default node's ABI does not match better-sqlite3 |
+| `MEMORY_BANK_INJECT_HOOK_BUDGET_MS` | Injection hook time budget that bounds its native-ABI re-run (default 30000 = Claude Code's UserPromptSubmit default) |
+| `MEMORY_BANK_SESSION_START_SPAWN` | `0` = maintenance logs the workers it would spawn instead of spawning them (tests) |
+| `MEMORY_BANK_PLUGIN_CACHE_DIR` / `MEMORY_BANK_PROCESS_SCAN_ROOT` | Test-only: narrow the int8 migration guard's install-dir / process scan (the migration prints them when set) |
 
 ### Ontology System
 
@@ -110,7 +130,7 @@ Automatic classification of facts into domain/category hierarchy:
 
 ### ESM Module System
 - All imports use `.js` extension: `import { foo } from './bar.js'`
-- `require()` is forbidden — use `import` exclusively
+- `require()` is forbidden — use `import` exclusively. One exception: `src/node-abi.ts` loads better-sqlite3 through `createRequire` to catch an ABI mismatch synchronously, before a hook reads stdin (an `import` of a mismatched addon fails at module load, where no hook code can catch it)
 - CommonJS files use `.cjs` extension (e.g., `ui/server.cjs`)
 
 ### Database Patterns

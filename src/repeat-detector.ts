@@ -1,5 +1,6 @@
 import { generateEmbedding, initEmbeddings, EMBEDDING_VERSION } from './embeddings.js';
-import { initDatabase, getVecDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
+import { initDatabase, getVecQuant, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
+import { exchangeProjectKeys } from './project-canon.js';
 
 export interface RepeatMatch {
   exchangeId: string;
@@ -38,26 +39,31 @@ export async function detectRepeat(
   }
   const ownDb = !opts.db;
   const db = opts.db ?? initDatabase();
+  // Callers pass the absolute cwd; exchanges store the archive slug.
+  const projectKeys = project ? exchangeProjectKeys(project) : null;
 
   try {
     // Vector search against past user messages (dtype-aware: int8 tables need
-    // quantized query blobs and return ×127-scaled distances)
-    const vecDtype = getVecDtype(db);
+    // quantized query blobs and return ×scale distances)
+    const vecQuant = getVecQuant(db, 'vec_exchanges');
     const vecResults = db.prepare(`
       SELECT id, distance
       FROM vec_exchanges
-      WHERE embedding MATCH ${vecParamSql(vecDtype)}
+      WHERE embedding MATCH ${vecParamSql(vecQuant)}
       ORDER BY distance
       LIMIT ?
     `).all(
-      embeddingToVecBlob(embedding, vecDtype),
-      limit * 3,
+      embeddingToVecBlob(embedding, vecQuant),
+      // The KNN is global (vec0 has no project column) and the project filter
+      // runs afterwards, so a project-scoped call needs a wider pool or the
+      // nearest rows from other projects crowd out every in-project match.
+      projectKeys ? limit * 20 : limit * 3,
     ) as Array<{ id: string; distance: number }>;
 
     const matches: RepeatMatch[] = [];
 
     for (const vr of vecResults) {
-      const d = normalizeVecDistance(vr.distance, vecDtype);
+      const d = normalizeVecDistance(vr.distance, vecQuant);
       const similarity = l2DistanceToSimilarity(d);
       if (similarity < threshold) continue;
 
@@ -72,7 +78,7 @@ export async function detectRepeat(
       if (!row) continue;
 
       // Skip if different project (unless no project filter)
-      if (project && row['project'] as string !== project) continue;
+      if (projectKeys && !projectKeys.includes(row['project'] as string)) continue;
 
       const assistantMsg = row['assistant_message'] as string;
       // Truncate assistant message to first meaningful paragraph

@@ -1,59 +1,35 @@
 import { pipeline } from '@xenova/transformers';
-/**
- * Multilingual retrieval model (Korean/English/100 langs), 384-dim — same
- * dimension as the original all-MiniLM-L6-v2 so vec tables are unchanged.
- *
- * Model selection (2026-06-12, measured on real-DB Korean/English pairs):
- *   - all-MiniLM-L6-v2: English-only — Korean queries score ~0 vs English facts
- *   - paraphrase-multilingual-MiniLM-L12-v2: top-1 ranking broke on real data
- *     (unrelated Korean pairs up to 0.82 — strong anisotropy)
- *   - multilingual-e5-small: perfect top-1 ranking on the hard set; absolute
- *     scores are compressed (~0.72-0.99) so consumers use either retuned
- *     thresholds (passage↔passage) or probe-baseline normalization (queries).
- *
- * e5 protocol: queries are embedded with a "query: " prefix, stored content
- * with "passage: ". Pass the mode explicitly at call sites.
- *
- * Vectors from different models are NOT comparable; EMBEDDING_VERSION tracks
- * which model produced a stored vector and the re-embed worker upgrades rows.
- */
-const DEFAULT_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
-export const EMBEDDING_MODEL = process.env.MEMORY_BANK_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
-/**
- * Curated model → version map:
- *   1 = all-MiniLM-L6-v2 (English-only)
- *   2 = paraphrase-multilingual-MiniLM-L12-v2 (rejected — anisotropy)
- *   3 = multilingual-e5-small (query/passage prefixes)
- *
- * The version is DERIVED from the model so a MEMORY_BANK_EMBEDDING_MODEL
- * override can never poison stored vectors: an unknown model gets its own
- * deterministic version (1000+), so switching back later re-embeds those
- * rows instead of silently mixing incompatible vector spaces.
- */
-const KNOWN_MODEL_VERSIONS = {
-    'Xenova/all-MiniLM-L6-v2': 1,
-    'Xenova/paraphrase-multilingual-MiniLM-L12-v2': 2,
-    [DEFAULT_EMBEDDING_MODEL]: 3,
-};
-function modelVersion(model) {
-    const known = KNOWN_MODEL_VERSIONS[model];
-    if (known !== undefined)
-        return known;
-    let h = 0;
-    for (let i = 0; i < model.length; i++)
-        h = (h * 31 + model.charCodeAt(i)) >>> 0;
-    return 1000 + (h % 1000000);
-}
-export const EMBEDDING_VERSION = modelVersion(EMBEDDING_MODEL);
+import { EMBEDDING_MODEL, EMBEDDING_VERSION } from './embedding-version.js';
+export { EMBEDDING_MODEL, EMBEDDING_VERSION };
 let embeddingPipeline = null;
+let embeddingLoad = null;
+/**
+ * Load the model once. Concurrent callers share the one load in flight — the
+ * daemon pre-warms on bind, and a prompt arriving meanwhile used to start a
+ * second load of the same model (2026-10-03: daemon embed 7.0s vs 5.3s cold).
+ * A failed load is forgotten so the next call retries.
+ */
 export async function initEmbeddings() {
-    if (!embeddingPipeline) {
+    if (embeddingPipeline)
+        return;
+    if (!embeddingLoad) {
         // stderr: stdout of hook scripts is injected into the session as context,
         // so progress logs must never go to stdout.
         console.error(`Loading embedding model ${EMBEDDING_MODEL} (first run may take time)...`);
-        embeddingPipeline = await pipeline('feature-extraction', EMBEDDING_MODEL);
-        console.error('Embedding model loaded');
+        embeddingLoad = pipeline('feature-extraction', EMBEDDING_MODEL).then((loaded) => {
+            embeddingPipeline = loaded;
+            console.error('Embedding model loaded');
+            return loaded;
+        }, (error) => {
+            embeddingLoad = null;
+            throw error;
+        });
     }
+    await embeddingLoad;
+}
+/** Whether the model is loaded (the daemon tells a waiting client it is still warming). */
+export function embeddingsReady() {
+    return embeddingPipeline !== null;
 }
 function applyModePrefix(text, mode) {
     // e5-family models require asymmetric prefixes; other models take raw text.
@@ -132,16 +108,38 @@ export const BACKGROUND_PROBES = [
     'Let me think about what to do next',
 ];
 let probeEmbeddings = null;
+let probeLoad = null;
+/**
+ * The probe embeddings, computed once and published only when complete.
+ * Filling a shared array in place let a concurrent caller see it empty (or
+ * half-filled) and get baseline -1, which passes every fact through the
+ * relevance gate; a failed fill stayed partial for the process lifetime.
+ * Concurrent callers now share the one computation; a failure is forgotten.
+ */
+function backgroundProbes() {
+    if (probeEmbeddings)
+        return Promise.resolve(probeEmbeddings);
+    if (!probeLoad) {
+        probeLoad = (async () => {
+            const out = [];
+            for (const p of BACKGROUND_PROBES)
+                out.push(await generateEmbedding(p, 'passage'));
+            return out;
+        })().then((done) => {
+            probeEmbeddings = done;
+            return done;
+        }, (error) => {
+            probeLoad = null;
+            throw error;
+        });
+    }
+    return probeLoad;
+}
 /** Max cosine similarity between the query embedding and the background probes. */
 export async function queryBaseline(queryEmbedding) {
-    if (!probeEmbeddings) {
-        probeEmbeddings = [];
-        for (const p of BACKGROUND_PROBES) {
-            probeEmbeddings.push(await generateEmbedding(p, 'passage'));
-        }
-    }
+    const probes = await backgroundProbes();
     let max = -1;
-    for (const probe of probeEmbeddings) {
+    for (const probe of probes) {
         let dot = 0;
         for (let i = 0; i < probe.length; i++)
             dot += probe[i] * queryEmbedding[i];

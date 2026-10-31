@@ -8,4 +8,8 @@ export declare function importFromSync(): Promise<{
     newDomains: number;
     newCategories: number;
     newRelations: number;
+    rejectedJunk: number;
+    detachedCategoryRefs: number;
+    failedFacts: number;
+    failedFactErrors: string[];
 }>;

@@ -1,3 +1,27 @@
+/**
+ * Default model for every headless call (fact extraction, consolidation,
+ * classification, summaries, translation). A full model id, not the 'haiku'
+ * alias: the alias resolves per bundled CLI version — Agent SDK 0.1.77 maps it
+ * to claude-haiku-4-5-20251001, 0.3.293 to claude-haiku-5-5 (measured
+ * 2026-10-08) — so the model changed with whatever SDK an install carried.
+ */
+export declare const DEFAULT_LLM_MODEL = "claude-haiku-5-5";
+/**
+ * Isolation every headless query() shares (callHaiku, summarizer, translate).
+ *  - settingSources: [] — no user settings/plugins, so the spawned session's own
+ *    SessionStart/End hooks can't re-spawn workers (cascade prevention).
+ *  - tools: [] — these are text-in/text-out calls; the bundled CLI otherwise
+ *    sends every built-in tool definition with each request.
+ *  - strictMcpConfig — settingSources: [] does NOT stop the CLI from loading the
+ *    user's MCP servers, so each call also carried (and started) them.
+ * Measured on SDK 0.3.288 / CLI 2.1.288 (2026-10-03), one "pong" call:
+ * default ≈ 32,500 prompt tokens, tools: [] ≈ 3,300, both ≈ 390.
+ */
+export declare const ISOLATED_QUERY_OPTIONS: {
+    settingSources: never[];
+    tools: string[];
+    strictMcpConfig: boolean;
+};
 export declare function llmWorkdir(): string;
 export declare function pruneLlmTranscripts(now?: number): void;
 /**
@@ -21,4 +45,10 @@ export declare function pruneLlmTranscripts(now?: number): void;
  * 호출자 계약: 성공 반환값은 **비어있지 않음이 보장**된다.
  */
 export declare function callHaiku(systemPrompt: string, userMessage: string, maxTokens?: number): Promise<string>;
-export declare function parseJsonResponse<T>(text: string): T | null;
+/**
+ * Parse the JSON in an LLM reply. `expect: 'array'` is for callers that need a
+ * list (fact extraction, batch classification): a reply that wraps the list in
+ * an object ({"facts": [...]}) yields that list when it is the object's only
+ * array — the old array-first regex unwrapped this by accident.
+ */
+export declare function parseJsonResponse<T>(text: string, expect?: 'array'): T | null;

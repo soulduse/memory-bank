@@ -6,6 +6,7 @@ import { insertFact } from './fact-db.js';
 import { generateEmbedding, initEmbeddings } from './embeddings.js';
 import { classifyAndLinkFact } from './ontology-classifier.js';
 import { randomUUID } from 'node:crypto';
+import { factRejectReason } from './fact-validity.js';
 import {
   claimSessionSql, renewClaimSql, failureMarkerUpsertSql, freshClaimPredicate,
   getExtractionConfig, EXTRACTION_STATE, MAX_INTERNAL_RETRIES,
@@ -210,11 +211,16 @@ export async function extractFactsFromExchanges(
 
     try {
       const response = await callHaiku(EXTRACTION_SYSTEM_PROMPT, prompt);
-      const extracted = parseJsonResponse<ExtractedFact[]>(response);
+      const extracted = parseJsonResponse<ExtractedFact[]>(response, 'array');
 
       if (extracted && Array.isArray(extracted)) {
+        let rejected = 0;
         for (const fact of extracted) {
           if (typeof fact?.fact !== 'string' || fact.fact.trim() === '') continue;
+          // Template residue ('...', 'concise statement', 'a|b|c' category) is
+          // dropped here, before the save transaction — insertFact would throw
+          // on it and roll back the whole batch.
+          if (factRejectReason(fact)) { rejected++; continue; }
           if (!passesConfidenceGate(fact.confidence)) continue;
           if (allFacts.length >= MAX_FACTS_PER_SESSION) break;
 
@@ -223,6 +229,7 @@ export async function extractFactsFromExchanges(
           seen.add(key);
           allFacts.push(fact);
         }
+        if (rejected > 0) console.error(`fact-extractor: dropped ${rejected} template-residue fact(s) from batch ${b + 1}`);
       }
     } catch (error) {
       // 실패를 3분류한다 — 예전에는 전부 삼켜서, 공급자 장애로 한 건도 못 뽑은
@@ -248,6 +255,10 @@ export async function extractFactsFromExchanges(
       } else {
         transientFailures.push(error);
         console.error(`Batch ${b} extraction failed (${cls} — session deferred, will retry):`, error);
+        // The whole session is deferred and its facts discarded (throw below),
+        // so the remaining batches would be spent for nothing — during a usage
+        // limit that is up to 12 batches × 3 attempts per session per run.
+        break;
       }
     }
   }

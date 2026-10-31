@@ -11,6 +11,8 @@ vi.mock('../src/embeddings.js', () => ({
   EMBEDDING_VERSION: 2,
   EMBEDDING_MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
 }));
+// fact-db/db read the version stamp from the light module (2026-10-03 split) — keep it in step
+vi.mock('../src/embedding-version.js', () => ({ EMBEDDING_VERSION: 2, EMBEDDING_MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2' }));
 
 const originalEnv = { ...process.env };
 
@@ -138,6 +140,123 @@ describe('sync-export/import', () => {
     expect(result.newCategories).toBe(1);
     expect(result.newFacts).toBe(1);
     expect(result.newRelations).toBe(1);
+  });
+
+  const writeOneFact = async (id: string, factKr: string | null) => {
+    const { getSyncDir } = await import('../src/sync-export.js');
+    const now = new Date().toISOString();
+    fs.writeFileSync(path.join(getSyncDir(), 'facts.jsonl'), JSON.stringify({
+      id, fact: `Imported fact ${id}`, fact_kr: factKr, category: 'decision', scope_type: 'global', scope_project: null,
+      source_exchange_ids: '[]', created_at: now, updated_at: now, consolidated_count: 1, ontology_category_id: null,
+    }) + '\n');
+  };
+
+  it('import writes vectors at the table scale recorded by the int8 migration (600)', async () => {
+    const { initDatabase, embeddingToVecBlob } = await import('../src/db.js');
+    let db = initDatabase();
+    try {
+      for (const t of ['vec_facts', 'vec_facts_kr']) {
+        db.prepare('INSERT OR REPLACE INTO vec_int8_scale (table_name, scale) VALUES (?, 600)').run(t);
+      }
+    } finally {
+      db.close();
+    }
+    await writeOneFact('scale-fact', '배율 600 으로 가져온다');
+    const { importFromSync } = await import('../src/sync-import.js');
+    expect((await importFromSync()).newFacts).toBe(1);
+
+    const expected = embeddingToVecBlob(new Array(384).fill(0.05), { dtype: 'int8', scale: 600 });
+    db = initDatabase();
+    try {
+      for (const t of ['vec_facts', 'vec_facts_kr']) {
+        const row = db.prepare(`SELECT embedding FROM ${t} WHERE id = ?`).get('scale-fact') as { embedding: Buffer };
+        expect(Buffer.from(row.embedding).equals(expected), t).toBe(true);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it('a failed vector write leaves no fact row behind, so the next import retries it (2026-10-16)', async () => {
+    const { initDatabase } = await import('../src/db.js');
+    let db = initDatabase();
+    try {
+      // An unusable scale record makes the vector write throw inside the import.
+      db.prepare("INSERT OR REPLACE INTO vec_int8_scale (table_name, scale) VALUES ('vec_facts', 0)").run();
+    } finally {
+      db.close();
+    }
+    await writeOneFact('retry-fact', null);
+    const { importFromSync } = await import('../src/sync-import.js');
+    const first = await importFromSync();
+    expect(first.newFacts).toBe(0);
+    expect(first.failedFacts).toBe(1); // counted, not only printed to a stderr nobody reads
+    expect(first.failedFactErrors).toEqual([expect.stringMatching(/^retry-fact: .*vec_int8_scale/)]);
+    db = initDatabase();
+    try {
+      // Before the fix the row was already committed here, and the id check skipped it forever.
+      expect(db.prepare('SELECT count(*) AS n FROM facts WHERE id = ?').get('retry-fact')).toEqual({ n: 0 });
+      db.prepare("DELETE FROM vec_int8_scale WHERE table_name = 'vec_facts'").run();
+    } finally {
+      db.close();
+    }
+    expect((await importFromSync()).newFacts).toBe(1);
+    db = initDatabase();
+    try {
+      expect(db.prepare('SELECT count(*) AS n FROM vec_facts WHERE id = ?').get('retry-fact')).toEqual({ n: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('다른 기기가 내보낸 템플릿 쓰레기는 들이지 않고 수를 센다 (2026-10-03)', async () => {
+    const { getSyncDir } = await import('../src/sync-export.js');
+    const syncDir = getSyncDir();
+    const now = new Date().toISOString();
+    fs.writeFileSync(path.join(syncDir, 'ontology-domains.jsonl'), [
+      JSON.stringify({ id: 'junk-dom', name: 'existing or new domain name', description: null, created_at: now }),
+      JSON.stringify({ id: 'ok-dom', name: 'Backend', description: null, created_at: now }),
+    ].join('\n') + '\n');
+    fs.writeFileSync(path.join(syncDir, 'ontology-categories.jsonl'),
+      JSON.stringify({ id: 'junk-cat', domain_id: 'ok-dom', name: 'category name', description: null, created_at: now }) + '\n');
+    fs.writeFileSync(path.join(syncDir, 'facts.jsonl'), [
+      JSON.stringify({ id: 'junk-fact', fact: '...', category: '...', scope_type: '...', scope_project: null,
+        source_exchange_ids: '[]', created_at: now, updated_at: now, consolidated_count: 1, ontology_category_id: null }),
+      JSON.stringify({ id: 'ok-fact', fact: 'Use REST for public APIs', category: 'decision', scope_type: 'global', scope_project: null,
+        source_exchange_ids: '[]', created_at: now, updated_at: now, consolidated_count: 1, ontology_category_id: null }),
+    ].join('\n') + '\n');
+
+    const { importFromSync } = await import('../src/sync-import.js');
+    const result = await importFromSync();
+    expect(result).toMatchObject({ newDomains: 1, newCategories: 0, newFacts: 1, rejectedJunk: 3 });
+  });
+
+  it('거부된 도메인 아래 카테고리와 그 카테고리를 가리키는 fact 는 끊긴 참조로 들이지 않는다', async () => {
+    const { getSyncDir } = await import('../src/sync-export.js');
+    const syncDir = getSyncDir();
+    const now = new Date().toISOString();
+    fs.writeFileSync(path.join(syncDir, 'ontology-domains.jsonl'), [
+      JSON.stringify({ id: 'q-dom', name: '?', description: null, created_at: now }),
+    ].join('\n') + '\n');
+    fs.writeFileSync(path.join(syncDir, 'ontology-categories.jsonl'),
+      JSON.stringify({ id: 'orphan-cat', domain_id: 'q-dom', name: 'State Management', description: null, created_at: now }) + '\n');
+    fs.writeFileSync(path.join(syncDir, 'facts.jsonl'),
+      JSON.stringify({ id: 'ref-fact', fact: 'Redux Toolkit manages client state', category: 'decision', scope_type: 'global', scope_project: null,
+        source_exchange_ids: '[]', created_at: now, updated_at: now, consolidated_count: 1, ontology_category_id: 'orphan-cat' }) + '\n');
+
+    const { importFromSync } = await import('../src/sync-import.js');
+    const result = await importFromSync();
+    expect(result).toMatchObject({ newDomains: 0, newCategories: 0, newFacts: 1, rejectedJunk: 2, detachedCategoryRefs: 1 });
+
+    const { initDatabase } = await import('../src/db.js');
+    const db = initDatabase();
+    try {
+      const row = db.prepare("SELECT ontology_category_id FROM facts WHERE id = 'ref-fact'").get() as { ontology_category_id: string | null };
+      expect(row.ontology_category_id, '재분류 대기(NULL)로 저장').toBeNull();
+      expect(db.prepare("SELECT COUNT(*) AS n FROM ontology_categories WHERE id = 'orphan-cat'").get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
   });
 
   it('should skip duplicate records on re-import', async () => {

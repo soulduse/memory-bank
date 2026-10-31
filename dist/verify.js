@@ -3,7 +3,7 @@ import path from 'path';
 import { parseConversation } from './parser.js';
 import { initDatabase, getAllExchanges, getFileLastIndexed } from './db.js';
 import { getArchiveDir, getExcludedProjects, isExcludedProject } from './paths.js';
-import { archiveFileExists, canonicalArchiveName, statArchiveFile } from './archive-io.js';
+import { archiveFileExists, canonicalArchiveName, removeArchiveFile, statArchiveFile } from './archive-io.js';
 export async function verifyIndex() {
     const result = {
         missing: [],
@@ -94,7 +94,7 @@ export async function repairIndex(issues) {
     const { initDatabase, insertExchange, deleteExchange } = await import('./db.js');
     const { parseConversation } = await import('./parser.js');
     const { initEmbeddings, generateExchangeEmbedding } = await import('./embeddings.js');
-    const { summarizeConversation } = await import('./summarizer.js');
+    const { summarizeConversation, REFUSED_SUMMARY } = await import('./summarizer.js');
     const db = initDatabase();
     await initEmbeddings();
     // Remove orphaned entries first
@@ -121,10 +121,27 @@ export async function repairIndex(issues) {
                 continue;
             }
             // Generate/update summary
+            // A failed summary must not block re-indexing the exchanges. The stale
+            // summary is removed (plain and compressed): kept, it would never be
+            // redone, since the file exists and the exchanges are indexed as current
+            // again. A missing one is written by the next sync while the source
+            // conversation is still in the projects dir, else by the next repair.
             const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
-            const summary = await summarizeConversation(exchanges);
-            fs.writeFileSync(summaryPath, summary, 'utf-8');
-            console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
+            try {
+                const summary = await summarizeConversation(exchanges);
+                if (summary === REFUSED_SUMMARY && archiveFileExists(summaryPath)) {
+                    // An older summary of this conversation beats the refusal marker.
+                    console.log(`  Summary refused, keeping the existing one`);
+                }
+                else {
+                    fs.writeFileSync(summaryPath, summary, 'utf-8');
+                    console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
+                }
+            }
+            catch (error) {
+                removeArchiveFile(summaryPath);
+                console.error(`  Summary failed (re-indexing continues; the summary is redone later): ${error instanceof Error ? error.message : String(error)}`);
+            }
             // Index exchanges
             for (const exchange of exchanges) {
                 const toolNames = exchange.toolCalls?.map(tc => tc.toolName);

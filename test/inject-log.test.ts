@@ -21,6 +21,12 @@ describe('inject-log', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('sessionKey hashes only a non-empty string session id', async () => {
+    const { sessionKey } = await import('../src/inject-log.js');
+    expect(sessionKey('abc')).toMatch(/^[0-9a-f]{12}$/);
+    for (const v of [12345, {}, ['x'], '', null, undefined]) expect(sessionKey(v), JSON.stringify(v)).toBeUndefined();
+  });
+
   it('appends a parseable JSONL entry with timestamp', async () => {
     const { appendInjectLog, getInjectLogPath } = await import('../src/inject-log.js');
 
@@ -64,6 +70,25 @@ describe('inject-log', () => {
     const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0]).status).toBe('skipped');
+  });
+
+  it('decision helpers: shortId is 12 chars, sessionKey is a sha256 prefix, pluginVersion is package.json', async () => {
+    const { shortId, sessionKey, pluginVersion } = await import('../src/inject-log.js');
+    const { createHash } = await import('crypto');
+    expect(shortId('0123456789abcdef-rest')).toBe('0123456789ab');
+    expect(sessionKey('sess-1')).toBe(createHash('sha256').update('sess-1').digest('hex').slice(0, 12));
+    expect(sessionKey(undefined)).toBeUndefined();
+    expect(sessionKey('')).toBeUndefined();
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
+    expect(pluginVersion()).toBe(pkg.version);
+  });
+
+  it('a field holding a newline cannot split the JSONL line', async () => {
+    const { appendInjectLog, getInjectLogPath } = await import('../src/inject-log.js');
+    appendInjectLog({ status: 'skipped', project: '/tmp/a\n{"status":"injected"}\u2028x', reason: 'r\r\nq' });
+    const raw = fs.readFileSync(getInjectLogPath(), 'utf8');
+    expect(raw.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(raw).project).toContain('\n');
   });
 
   it('never throws when the log directory is not writable', async () => {

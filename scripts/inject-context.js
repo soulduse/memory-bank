@@ -14,7 +14,7 @@
  *
  * IMPORTANT: keep the import list here LIGHT — the fast path must not pay for
  * better-sqlite3/transformers imports. Heavy modules load lazily only in the
- * fallback.
+ * fallback. prompt-gate/inject-log are node-builtin-only modules.
  */
 
 import net from 'node:net';
@@ -22,140 +22,259 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { injectionQuery } from '../dist/prompt-gate.js';
+import { appendInjectLog } from '../dist/inject-log.js';
+import { injectSocketPathIn, ownPackageVersion } from '../dist/version-guard.js';
+import { selfHealDeps } from '../dist/deps-heal.js';
+import { loadLedger, appendLedger } from '../dist/inject-ledger.js';
+import { readHookInput } from '../dist/hook-stdin.js';
+import { nativeAbiMismatch, compatibleNode, rerunWithInput, rerunBudgetMs } from '../dist/node-abi.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/**
- * Self-heal missing runtime deps (better-sqlite3 등 native 모듈).
- *
- * 왜: (a) `claude plugin update` 가 npm install 을 비결정적으로 누락한다
- * (실측: 1.4.0 캐시엔 node_modules 생성, 1.4.1 캐시엔 미생성 → 콜드 경로
- * 전체가 Cannot find package 로 사망). (b) cc-sync 는 node_modules 를
- * 제외하고 plugins/cache 를 타 머신에 실어 나르므로, 동기화로 받은 캐시는
- * 항상 deps 가 없다. 두 경우 모두 첫 프롬프트에서 감지해 1회 한정으로
- * detached npm install 을 시도한다 (marker 파일 'wx' 원자 생성으로 중복
- * 방지 — 실패해도 다음 설치 디렉토리에서만 재시도, 무한 루프 없음).
- */
-function selfHealDeps(pluginRoot) {
-  const marker = path.join(pluginRoot, '.deps-heal-attempted');
-  try {
-    fs.writeFileSync(marker, new Date().toISOString(), { flag: 'wx' }); // 원자적 1회 게이트
-  } catch {
-    return false; // 이미 시도됨 (성공/실패 무관 — 재폭주 방지)
-  }
-  try {
-    const child = spawn('npm', ['install', '--no-audit', '--no-fund'], {
-      // windowsHide: 콘솔을 상속하지 않는 detached 프로세스는 Windows 에서 새 conhost
-      // 창을 띄운다. 이 self-heal 은 프롬프트 주입 경로라 창이 반복해 깜빡인다.
-      // (비-Windows 에서는 no-op — PR #3 이 정렬한 나머지 5개 spawn 과 동일 계약)
-      cwd: pluginRoot, detached: true, stdio: 'ignore', windowsHide: true,
-    });
-    child.unref();
-    process.stderr.write('inject-context: missing deps detected — spawned background npm install (one-shot)\n');
-    return true;
-  } catch (e) {
-    process.stderr.write(`inject-context: self-heal spawn failed: ${e && e.message}\n`);
-    return false;
-  }
-}
 
 const SOCKET_CONNECT_TIMEOUT_MS = 300;
 const SOCKET_RESPONSE_TIMEOUT_MS = 3000;
-
-function readStdin(timeoutMs = 2000) {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) return resolve('');
-    let data = '';
-    const timer = setTimeout(() => resolve(data), timeoutMs);
-    process.stdin.on('data', (c) => (data += c));
-    process.stdin.on('end', () => { clearTimeout(timer); resolve(data); });
-    process.stdin.on('error', () => { clearTimeout(timer); resolve(data); });
-  });
-}
+// The daemon says {"warming":true} while its model is still loading (right after
+// session start). Loading a second copy cold costs the same ~5s and doubles the
+// CPU, so wait for the one already loading — but not forever.
+const SOCKET_WARMING_TIMEOUT_MS = 20000;
+// A native-ABI re-run gets what is left of the hook's time budget after this
+// process's own time (the daemon wait above included), minus a margin to write
+// its log line. Claude Code docs, hooks "timeout" row: "Claude Code lowers the
+// `command` … default to 30 on `UserPromptSubmit`" and cancels the hook there,
+// discarding its output. MEMORY_BANK_INJECT_HOOK_BUDGET_MS follows a changed
+// hook timeout. Margin 3s: logging is one appendFileSync; the rest absorbs node
+// start-up before process.uptime() begins and a busy machine.
+const DEFAULT_HOOK_BUDGET_MS = 30_000;
+const LOG_MARGIN_MS = 3_000;
+const MIN_RERUN_MS = 3_000; // the cold path measured ~2.3s
 
 function injectSocketPath() {
   // Mirrors paths.ts getIndexDir() without importing the heavy dist chain.
   const base = process.env.MEMORY_BANK_CONFIG_DIR
     || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'superpowers');
-  return path.join(base, 'conversation-index', 'inject-daemon.sock');
+  // Same version → same socket as this install's daemon (never an older one's).
+  return injectSocketPathIn(path.join(base, 'conversation-index'), ownPackageVersion());
 }
 
-/** Ask the warm daemon; resolve null (not reject) on ANY failure so the caller
- * falls back — the hook must never break a user prompt. */
-function askDaemon(prompt, cwd, sessionId) {
+/**
+ * Ask the warm daemon. Resolves { context, ledgerKeys } on an answer, or
+ * { failed: 'no-daemon' | 'daemon-timeout' | 'daemon-closed' | 'daemon-error' }
+ * (never rejects) so the caller falls back — the hook must never break a user
+ * prompt. 'daemon-closed': the daemon hung up without a full answer; waiting out
+ * the warming deadline after that only delays the fallback.
+ */
+function askDaemon(prompt, cwd, sessionId, meta) {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let connected = false;
+    let timer = null;
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
     let conn;
     try {
       conn = net.connect(injectSocketPath());
     } catch {
-      return done(null);
+      return done({ failed: 'no-daemon' });
     }
-    const connectTimer = setTimeout(() => { conn.destroy(); done(null); }, SOCKET_CONNECT_TIMEOUT_MS);
+    const arm = (ms, why) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { conn.destroy(); done({ failed: why }); }, ms);
+    };
+    arm(SOCKET_CONNECT_TIMEOUT_MS, 'no-daemon');
     conn.on('connect', () => {
-      clearTimeout(connectTimer);
-      conn.setTimeout(SOCKET_RESPONSE_TIMEOUT_MS, () => { conn.destroy(); done(null); });
-      conn.write(JSON.stringify({ prompt, cwd, session_id: sessionId }) + '\n');
+      connected = true;
+      arm(SOCKET_RESPONSE_TIMEOUT_MS, 'daemon-timeout');
+      // Decode as a stream: a multi-byte character split across chunks stays whole.
+      conn.setEncoding('utf8');
+      conn.write(JSON.stringify({ prompt, cwd, session_id: sessionId, ...meta }) + '\n');
       let buf = '';
       conn.on('data', (c) => {
-        buf += c.toString('utf8');
-        const nl = buf.indexOf('\n');
-        if (nl < 0) return;
-        try {
-          const res = JSON.parse(buf.slice(0, nl));
-          done(res && res.ok ? String(res.context ?? '') : null);
-        } catch {
-          done(null);
+        buf += c;
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          let res;
+          try {
+            res = JSON.parse(line);
+          } catch {
+            conn.destroy();
+            return done({ failed: 'daemon-error' });
+          }
+          if (res && res.warming) {
+            arm(SOCKET_WARMING_TIMEOUT_MS, 'daemon-timeout');
+            continue;
+          }
+          conn.destroy();
+          if (!res || !res.ok) return done({ failed: 'daemon-error' });
+          return done({
+            context: String(res.context ?? ''),
+            ledgerKeys: Array.isArray(res.ledger_keys) ? res.ledger_keys.filter((k) => typeof k === 'string') : [],
+          });
         }
-        conn.destroy();
       });
     });
-    conn.on('error', () => { clearTimeout(connectTimer); done(null); });
+    conn.on('error', () => done({ failed: connected ? 'daemon-error' : 'no-daemon' }));
+    // After an answer or a timeout `done` has already run; this only catches a hang-up.
+    conn.on('close', () => done({ failed: connected ? 'daemon-closed' : 'no-daemon' }));
   });
+}
+
+/**
+ * Print the block, then mark its facts as shown for this session — only once
+ * the write has gone through to the hook host's pipe. A host that already left
+ * (EPIPE) received nothing, and recording those facts would keep them out of
+ * every later prompt in the session. Both paths deliver through here, so the
+ * order is the same everywhere: print first, record second.
+ */
+function deliver(context, sessionId, ledgerKeys) {
+  return new Promise((resolve) => {
+    if (!context) return resolve();
+    process.stdout.on('error', () => { /* host gone — the write callback sees it */ });
+    process.stdout.write(context + '\n', (err) => {
+      if (!err && ledgerKeys.length > 0) appendLedger(sessionId, loadLedger(sessionId), ledgerKeys);
+      resolve();
+    });
+  });
+}
+
+/**
+ * A hook envelope passed as text: { ok: true, prompt, cwd, session_id, turn_id }
+ * for a usable UserPromptSubmit envelope, { ok: false } for any other envelope
+ * (wrong event, non-string prompt) — never search one of those as a query —
+ * and null for an ordinary prompt, including JSON that is not an envelope.
+ */
+function parseHookEnvelope(text) {
+  const t = (text || '').trimStart();
+  if (t[0] !== '{') return null;
+  let j;
+  try {
+    j = JSON.parse(t);
+  } catch {
+    return null;
+  }
+  if (!j || typeof j !== 'object' || Array.isArray(j) || !('hook_event_name' in j)) return null;
+  if (j.hook_event_name !== 'UserPromptSubmit' || typeof j.prompt !== 'string') return { ok: false };
+  return {
+    ok: true,
+    prompt: j.prompt,
+    cwd: typeof j.cwd === 'string' ? j.cwd : '',
+    session_id: typeof j.session_id === 'string' ? j.session_id : '',
+    turn_id: j.turn_id,
+  };
 }
 
 async function main() {
   // Parse hook input: stdin JSON first, env fallback (manual runs).
-  const raw = await readStdin();
+  const raw = await readHookInput(process.stdin, 2000);
   let prompt = '';
   let cwd = '';
   let sessionId = '';
+  // Hook host for the inject log. The wrappers export MEMORY_BANK_CLIENT; when
+  // they don't (older Codex wrapper, manual run) infer it from the envelope:
+  // Codex adds turn_id, Claude Code sends transcript_path without it.
+  let client = process.env.MEMORY_BANK_CLIENT || '';
+  let invalidEnvelope = false;
   if (raw) {
     try {
       const j = JSON.parse(raw);
       prompt = String(j.prompt ?? '');
       cwd = String(j.cwd ?? '');
       sessionId = String(j.session_id ?? ''); // 세션 dedup 원장 키 (hook stdin 계약)
+      if (!client) client = j.turn_id ? 'codex' : j.transcript_path ? 'claude-code' : '';
     } catch {
       prompt = raw; // plain-text stdin = the prompt itself
     }
   }
-  if (!prompt) prompt = process.env.USER_PROMPT || '';
+  if (!prompt) {
+    prompt = process.env.USER_PROMPT || '';
+    // The Codex wrapper (~/.codex/hooks/memory-bank/inject-context.sh) reads the
+    // whole hook envelope into USER_PROMPT and leaves stdin empty, so the
+    // "prompt" was JSON: it was embedded as the search query, and with no
+    // session id there was no dedup (174 of 175 multi-injection Codex sessions
+    // re-injected the same facts, measured 2026-10-03). That wrapper is
+    // hash-pinned inside the Codex harness; this script ships with the plugin,
+    // so the envelope is unwrapped here.
+    const envelope = parseHookEnvelope(prompt);
+    if (envelope && envelope.ok) {
+      prompt = envelope.prompt;
+      if (!cwd && envelope.cwd) cwd = envelope.cwd;
+      if (!sessionId && envelope.session_id) sessionId = envelope.session_id;
+      // Only wrappers and manual runs use this path; Claude Code pipes stdin.
+      if (!client) client = envelope.turn_id ? 'codex' : 'manual';
+    } else if (envelope) {
+      invalidEnvelope = true;
+    }
+  }
   if (!cwd) cwd = process.env.CWD || process.cwd();
   if (!sessionId) sessionId = process.env.SESSION_ID || '';
+  const meta = {
+    client: client || 'manual',
+    entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT || undefined,
+    req_id: randomUUID(), // same id on the daemon's log line and on a fallback line
+  };
 
-  if (!prompt || prompt.length < 20) return; // not worth an injection
-
-  // FAST PATH — warm daemon inside a running MCP server.
-  const daemonContext = await askDaemon(prompt, cwd, sessionId);
-  if (daemonContext !== null) {
-    if (daemonContext) process.stdout.write(daemonContext + '\n');
+  // Harness-generated prompts (task notifications, slash-command expansions …)
+  // and very short ones are not worth a search. Logged here so skips stay
+  // measurable — they used to return silently before any log line.
+  const skipReason = invalidEnvelope ? 'hook-envelope' : injectionQuery(prompt).reason;
+  if (skipReason) {
+    appendInjectLog({
+      status: 'skipped', reason: skipReason, project: cwd, prompt_len: prompt.length,
+      via: 'client', has_session: Boolean(sessionId), ...meta,
+    });
     return;
+  }
+
+  // FAST PATH — warm daemon inside a running MCP server. A re-run for the
+  // native ABI (below) skips it: the daemon already failed in the parent.
+  const reexecReason = process.env.MEMORY_BANK_INJECT_FALLBACK_REASON;
+  const answer = reexecReason ? { failed: reexecReason } : await askDaemon(prompt, cwd, sessionId, meta);
+  if (!answer.failed) {
+    await deliver(answer.context, sessionId, answer.ledgerKeys);
+    return;
+  }
+
+  // The cold path loads better-sqlite3. If this node cannot (ABI mismatch —
+  // see dist/node-abi.js), compute under a node that can, feeding it the stdin
+  // this process already consumed; it delivers and logs itself. A re-run that
+  // fails or times out cannot log itself, so that line is written here.
+  if (!reexecReason && nativeAbiMismatch() !== null) {
+    const node = compatibleNode('inject-context');
+    if (node && node !== process.execPath) {
+      const started = Date.now();
+      const envBudget = Number(process.env.MEMORY_BANK_INJECT_HOOK_BUDGET_MS);
+      const budgetMs = Number.isFinite(envBudget) && envBudget > 0 ? envBudget : DEFAULT_HOOK_BUDGET_MS;
+      const elapsedMs = Math.round(process.uptime() * 1000);
+      const timeoutMs = rerunBudgetMs(elapsedMs, { budgetMs, marginMs: LOG_MARGIN_MS, minMs: MIN_RERUN_MS });
+      const failure = timeoutMs === null
+        ? `no time left in the ${budgetMs}ms hook budget (${elapsedMs}ms used, needs ${MIN_RERUN_MS}ms + ${LOG_MARGIN_MS}ms margin)`
+        : rerunWithInput(node, fileURLToPath(import.meta.url), raw, { MEMORY_BANK_INJECT_FALLBACK_REASON: String(answer.failed) }, timeoutMs);
+      if (failure) {
+        appendInjectLog({
+          status: 'error', error: `native-ABI re-run under ${node} failed: ${failure}`, project: cwd,
+          prompt_len: prompt.length, via: 'fallback', duration_ms: Date.now() - started, has_session: Boolean(sessionId), ...meta,
+        });
+      }
+      return;
+    }
   }
 
   // COLD FALLBACK — compute locally (heavy imports load only here).
   try {
-    const { computeInjectContext } = await import(path.join(__dirname, '../dist/inject-core.js'));
-    const context = await computeInjectContext(prompt, cwd, 'fallback', sessionId || undefined);
-    if (context) process.stdout.write(context + '\n');
+    const { computeInjectResult } = await import(path.join(__dirname, '../dist/inject-core.js'));
+    const { context, ledgerKeys } = await computeInjectResult(prompt, cwd, 'fallback', sessionId || undefined,
+      { ...meta, fallback_reason: answer.failed });
+    await deliver(context, sessionId, ledgerKeys);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     process.stderr.write(`inject-context: error: ${msg}\n`);
     // deps 누락(plugin update 미설치 / cc-sync 로 받은 캐시)이면 1회 자가치유
     if (/Cannot find (package|module)|ERR_MODULE_NOT_FOUND/.test(msg)) {
-      selfHealDeps(path.join(__dirname, '..'));
+      selfHealDeps(path.join(__dirname, '..'), 'inject-context');
     }
   }
 }

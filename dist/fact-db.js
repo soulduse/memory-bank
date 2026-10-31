@@ -1,43 +1,77 @@
 import { randomUUID } from 'crypto';
 import { canonicalizeProject } from './project-canon.js';
-import { EMBEDDING_VERSION } from './embeddings.js';
-import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
-/** dtype-aware MATCH/INSERT param for a fact-side vec table: the SQL
- * placeholder (vec_int8(?) wrap for int8) and the correctly-encoded blob.
- * float32 tables (pre-migration DBs) and int8 tables (fresh DBs / migrated)
- * are both served — the actual schema decides. */
+import { EMBEDDING_VERSION } from './embedding-version.js';
+import { getVecQuant, embeddingToVecBlob, vecParamSql, normalizeVecDistance, l2DistanceToSimilarity } from './db.js';
+import { factRejectReason, factTextRejectReason } from './fact-validity.js';
+import { scopeMatcher } from './project-family.js';
+/** dtype/scale-aware MATCH/INSERT param for a fact-side vec table: the SQL
+ * placeholder (vec_int8(?) wrap for int8), the correctly-encoded blob and the
+ * table's VecQuant (to normalize distances). float32 tables (pre-migration
+ * DBs) and int8 tables at 127 (legacy and fresh DBs) or 600 (after
+ * scripts/migrate-vec-facts-int8.mjs) are all served — the schema and the
+ * recorded scale decide. */
 function vecParamFor(db, table, embedding) {
-    const dt = getVecTableDtype(db, table);
-    return { sql: vecParamSql(dt), blob: embeddingToVecBlob(embedding, dt), dt };
+    const q = getVecQuant(db, table);
+    return { sql: vecParamSql(q), blob: embeddingToVecBlob(embedding, q), q };
+}
+/**
+ * DELETE+INSERT one vector (vec0 has no REPLACE). The dtype/scale is read
+ * INSIDE the write transaction (BEGIN IMMEDIATE when outermost, a savepoint
+ * inside a caller's transaction), so a concurrent migration swap can never
+ * leave a blob encoded for the table it replaced.
+ */
+function upsertFactVector(db, table, id, embedding) {
+    db.transaction(() => {
+        const p = vecParamFor(db, table, embedding);
+        db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+        db.prepare(`INSERT INTO ${table} (id, embedding) VALUES (?, ${p.sql})`).run(id, p.blob);
+    }).immediate();
+}
+/**
+ * Run a KNN against a fact-side vec table. Only a MISSING table (very old
+ * DBs) reads as "no candidates". A migration can swap the table's dtype/scale
+ * between reading it and the MATCH, so one retry re-reads it; any other
+ * failure (corrupt scale record, dimension mismatch, closed handle) throws —
+ * returning [] here made it look like "no relevant facts" to injection,
+ * MCP search and consolidation alike.
+ */
+function factKnn(table, run, empty) {
+    try {
+        return run();
+    }
+    catch (e) {
+        if (/no such table/i.test(e instanceof Error ? e.message : String(e)))
+            return empty;
+        return run();
+    }
 }
 export function insertFact(db, params) {
+    // Last line of defence for every writer (extractor, capture-decision, the
+    // cc-sync memory-doc importer): template residue never reaches the table.
+    const rejectReason = factRejectReason(params);
+    if (rejectReason)
+        throw new Error(`insertFact refused (${rejectReason}): ${String(params.fact).slice(0, 60)}`);
     const id = randomUUID();
     const now = new Date().toISOString();
     const scopeProject = params.scope_project
         ? canonicalizeProject(db, params.scope_project)
         : params.scope_project;
-    db.prepare(`
-    INSERT INTO facts (id, fact, category, scope_type, scope_project, source_exchange_ids, embedding, created_at, updated_at, consolidated_count, is_active, coding_agent, fact_kr, embedding_version)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)
-  `).run(id, params.fact, params.category, params.scope_type, scopeProject, JSON.stringify(params.source_exchange_ids), params.embedding ? Buffer.from(new Float32Array(params.embedding).buffer) : null, now, now, params.coding_agent || 'claude-code', params.fact_kr ?? null, EMBEDDING_VERSION);
-    // Insert into vector index (atomic DELETE+INSERT via transaction)
-    if (params.embedding) {
-        const p = vecParamFor(db, 'vec_facts', params.embedding);
-        const upsertVec = db.transaction((vecId, buf) => {
-            db.prepare('DELETE FROM vec_facts WHERE id = ?').run(vecId);
-            db.prepare(`INSERT INTO vec_facts (id, embedding) VALUES (?, ${p.sql})`).run(vecId, buf);
-        });
-        upsertVec(id, p.blob);
-    }
-    // Korean-text vector index (same-language matching for Korean queries)
-    if (params.embedding_kr) {
-        const pk = vecParamFor(db, 'vec_facts_kr', params.embedding_kr);
-        const upsertVecKr = db.transaction((vecId, buf) => {
-            db.prepare('DELETE FROM vec_facts_kr WHERE id = ?').run(vecId);
-            db.prepare(`INSERT INTO vec_facts_kr (id, embedding) VALUES (?, ${pk.sql})`).run(vecId, buf);
-        });
-        upsertVecKr(id, pk.blob);
-    }
+    // Row + vectors in one write transaction (a savepoint inside a caller's): a
+    // failed vector write must not leave a committed row without its vector —
+    // no probe or worker re-creates a missing vec_facts row for a current-
+    // version fact, so it would be invisible to vector search for good.
+    db.transaction(() => {
+        db.prepare(`
+      INSERT INTO facts (id, fact, category, scope_type, scope_project, source_exchange_ids, embedding, created_at, updated_at, consolidated_count, is_active, coding_agent, fact_kr, embedding_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)
+    `).run(id, params.fact, params.category, params.scope_type, scopeProject, JSON.stringify(params.source_exchange_ids), params.embedding ? Buffer.from(new Float32Array(params.embedding).buffer) : null, now, now, params.coding_agent || 'claude-code', params.fact_kr ?? null, EMBEDDING_VERSION);
+        // Insert into vector index (atomic DELETE+INSERT via transaction)
+        if (params.embedding)
+            upsertFactVector(db, 'vec_facts', id, params.embedding);
+        // Korean-text vector index (same-language matching for Korean queries)
+        if (params.embedding_kr)
+            upsertFactVector(db, 'vec_facts_kr', id, params.embedding_kr);
+    }).immediate();
     return id;
 }
 export function getActiveFacts(db) {
@@ -55,6 +89,11 @@ export function getFactsByProject(db, project) {
   `).all(canon).map(rowToFact);
 }
 export function updateFact(db, id, params) {
+    if (params.fact !== undefined) {
+        const reason = factTextRejectReason(params.fact);
+        if (reason)
+            throw new Error(`updateFact refused (${reason}): ${JSON.stringify(String(params.fact)).slice(0, 80)}`);
+    }
     const now = new Date().toISOString();
     const updates = ['updated_at = ?'];
     const values = [now];
@@ -70,16 +109,13 @@ export function updateFact(db, id, params) {
         updates.push('consolidated_count = consolidated_count + 1');
     }
     values.push(id);
-    db.prepare(`UPDATE facts SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    // Update vector index (atomic DELETE+INSERT via transaction)
-    if (params.embedding) {
-        const p = vecParamFor(db, 'vec_facts', params.embedding);
-        const upsertVec = db.transaction((vecId, buf) => {
-            db.prepare('DELETE FROM vec_facts WHERE id = ?').run(vecId);
-            db.prepare(`INSERT INTO vec_facts (id, embedding) VALUES (?, ${p.sql})`).run(vecId, buf);
-        });
-        upsertVec(id, p.blob);
-    }
+    // Row + vector together (see insertFact): the stored embedding and the
+    // index must not disagree after a failed vector write.
+    db.transaction(() => {
+        db.prepare(`UPDATE facts SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+        if (params.embedding)
+            upsertFactVector(db, 'vec_facts', id, params.embedding);
+    }).immediate();
 }
 export function deactivateFact(db, id) {
     db.prepare('UPDATE facts SET is_active = 0, updated_at = ? WHERE id = ?').run(new Date().toISOString(), id);
@@ -104,8 +140,10 @@ export function insertRevision(db, params) {
 export function getRevisions(db, factId) {
     return db.prepare('SELECT * FROM fact_revisions WHERE fact_id = ? ORDER BY created_at DESC').all(factId);
 }
-export function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85) {
+const VISIBLE_FETCH_CAP = 6400;
+export function searchSimilarFacts(db, embedding, project, limit = 5, threshold = 0.85, opts = {}) {
     const canonProject = project ? canonicalizeProject(db, project) : project;
+    const inScope = scopeMatcher(canonProject, opts.scopeFamily === true);
     // Search both language indexes: the query language is unknown, and
     // multilingual models score same-language pairs far higher than
     // cross-language pairs. Keep the best (smallest) distance per fact id.
@@ -116,23 +154,30 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
     // requested scope of candidates entirely.
     const candidateFetch = Math.max(limit * 2, 50);
     // Per-table dtype: the two language indexes can be at DIFFERENT dtypes
-    // mid-migration, and int8 distances come back ×127-scaled — normalize
+    // mid-migration, and int8 distances come back ×scale — normalize
     // BEFORE the cross-table merge or the scales are incomparable.
+    const knn = (table, n) => factKnn(table, () => {
+        const p = vecParamFor(db, table, embedding);
+        const rows = db.prepare(`
+      SELECT id, distance FROM ${table}
+      WHERE embedding MATCH ${p.sql}
+      ORDER BY distance
+      LIMIT ?
+    `).all(p.blob, n);
+        for (const r of rows)
+            r.distance = normalizeVecDistance(r.distance, p.q);
+        return rows;
+    }, []);
+    const visibleId = opts.visibleId;
     const fetch = (table) => {
-        try {
-            const p = vecParamFor(db, table, embedding);
-            const rows = db.prepare(`
-        SELECT id, distance FROM ${table}
-        WHERE embedding MATCH ${p.sql}
-        ORDER BY distance
-        LIMIT ?
-      `).all(p.blob, candidateFetch);
-            for (const r of rows)
-                r.distance = normalizeVecDistance(r.distance, p.dt);
-            return rows;
-        }
-        catch {
-            return []; // table may not exist on very old DBs
+        if (!visibleId)
+            return knn(table, candidateFetch);
+        // Grow the fetch until candidateFetch visible rows are in hand (or the index runs out).
+        for (let n = candidateFetch * 4;; n = Math.min(n * 4, VISIBLE_FETCH_CAP)) {
+            const rows = knn(table, n);
+            const visible = rows.filter((r) => visibleId(r.id));
+            if (visible.length >= candidateFetch || rows.length < n || n >= VISIBLE_FETCH_CAP)
+                return visible.slice(0, candidateFetch);
         }
     };
     const best = new Map();
@@ -157,14 +202,37 @@ export function searchSimilarFacts(db, embedding, project, limit = 5, threshold 
         if (!row)
             continue;
         const fact = rowToFact(row);
-        // Scope filter: same project or global only
-        if (canonProject && fact.scope_type === 'project' && fact.scope_project !== canonProject)
+        // Scope filter: same project (or its repository family, when asked) or global only
+        if (fact.scope_type === 'project' && !inScope(fact.scope_project))
             continue;
         results.push({ fact, distance: vr.distance });
         if (results.length >= limit)
             break;
     }
     return results;
+}
+/**
+ * Distance from `embedding` to one fact's stored vectors: the smaller of its
+ * English and Korean vectors — the same rule the KNN above ranks by (it keeps
+ * the best distance per id across both tables), normalized for int8 tables.
+ * null when the fact has no vector of the current embedding version.
+ */
+export function factVectorDistance(db, factId, embedding) {
+    const row = db.prepare('SELECT embedding_version FROM facts WHERE id = ?').get(factId);
+    if (!row || row.embedding_version !== EMBEDDING_VERSION)
+        return null;
+    let best = null;
+    for (const table of ['vec_facts', 'vec_facts_kr']) {
+        const d = factKnn(table, () => {
+            const p = vecParamFor(db, table, embedding);
+            const hit = db.prepare(`SELECT vec_distance_l2(embedding, ${p.sql}) AS d FROM ${table} WHERE id = ?`)
+                .get(p.blob, factId);
+            return hit ? normalizeVecDistance(hit.d, p.q) : null;
+        }, null);
+        if (d !== null && (best === null || d < best))
+            best = d;
+    }
+    return best;
 }
 /**
  * Nearest active facts restricted to EXACTLY one scope — used by consolidation
@@ -192,22 +260,17 @@ export function searchSimilarFactsSameScope(db, embedding, scope, limit = 5, thr
     // ahead of a valid in-scope row and are only rejected later by the
     // embedding_version filter, so bounding by active facts could stop before
     // reaching the match. `exhausted` is the correct, index-size-independent stop.
-    const fetchN = (table, n) => {
-        try {
-            const p = vecParamFor(db, table, embedding);
-            const rows = db.prepare(`
+    const fetchN = (table, n) => factKnn(table, () => {
+        const p = vecParamFor(db, table, embedding);
+        const rows = db.prepare(`
         SELECT id, distance FROM ${table}
         WHERE embedding MATCH ${p.sql} ORDER BY distance LIMIT ?
       `).all(p.blob, n);
-            // Normalize ×127-scaled int8 distances BEFORE the cross-table merge.
-            for (const r of rows)
-                r.distance = normalizeVecDistance(r.distance, p.dt);
-            return { rows, exhausted: rows.length < n };
-        }
-        catch {
-            return { rows: [], exhausted: true };
-        }
-    };
+        // Normalize ×scale int8 distances BEFORE the cross-table merge.
+        for (const r of rows)
+            r.distance = normalizeVecDistance(r.distance, p.q);
+        return { rows, exhausted: rows.length < n };
+    }, { rows: [], exhausted: true });
     const HARD_CAP = 100_000; // safety ceiling so a pathological index can't loop unbounded
     let fetchCount = Math.max(limit * 20, 200);
     let results = [];
@@ -360,16 +423,19 @@ export function getAllNewFactsSince(db, cursor, limit = 2000) {
  * Used for cross-project knowledge transfer.
  */
 export function searchAllFacts(db, embedding, limit = 10, threshold = 0.6) {
-    const pAll = vecParamFor(db, 'vec_facts', embedding);
-    const vecResults = db.prepare(`
-    SELECT id, distance
-    FROM vec_facts
-    WHERE embedding MATCH ${pAll.sql}
-    ORDER BY distance
-    LIMIT ?
-  `).all(pAll.blob, limit * 2);
-    for (const r of vecResults)
-        r.distance = normalizeVecDistance(r.distance, pAll.dt);
+    const vecResults = factKnn('vec_facts', () => {
+        const pAll = vecParamFor(db, 'vec_facts', embedding);
+        const rows = db.prepare(`
+      SELECT id, distance
+      FROM vec_facts
+      WHERE embedding MATCH ${pAll.sql}
+      ORDER BY distance
+      LIMIT ?
+    `).all(pAll.blob, limit * 2);
+        for (const r of rows)
+            r.distance = normalizeVecDistance(r.distance, pAll.q);
+        return rows;
+    }, []);
     const results = [];
     for (const vr of vecResults) {
         const similarity = l2DistanceToSimilarity(vr.distance);

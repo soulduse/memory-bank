@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { getVecTableDtype, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { getVecQuant, embeddingToVecBlob, vecParamSql, normalizeVecDistance } from './db.js';
+import { ontologyNameRejectReason } from './fact-validity.js';
+import { scopeMatcher } from './project-family.js';
+import { canonicalizeProject } from './project-canon.js';
 import type {
   OntologyDomain,
   OntologyCategory,
@@ -17,6 +20,8 @@ export function createDomain(
   name: string,
   description?: string,
 ): OntologyDomain {
+  const rejectReason = ontologyNameRejectReason(name);
+  if (rejectReason) throw new Error(`createDomain refused (${rejectReason}): ${String(name).slice(0, 60)}`);
   const id = randomUUID();
   const now = new Date().toISOString();
   db.prepare(
@@ -51,6 +56,8 @@ export function createCategory(
   name: string,
   description?: string,
 ): OntologyCategory {
+  const rejectReason = ontologyNameRejectReason(name);
+  if (rejectReason) throw new Error(`createCategory refused (${rejectReason}): ${String(name).slice(0, 60)}`);
   const id = randomUUID();
   const now = new Date().toISOString();
   db.prepare(
@@ -104,13 +111,13 @@ export function upsertCategoryEmbedding(
   categoryId: string,
   embedding: number[],
 ): void {
-  const dt = getVecTableDtype(db, 'vec_categories');
-  const buf = embeddingToVecBlob(embedding, dt);
-  const tx = db.transaction(() => {
+  // dtype/scale read inside the write transaction (see fact-db upsertFactVector).
+  db.transaction(() => {
+    const q = getVecQuant(db, 'vec_categories');
     db.prepare('DELETE FROM vec_categories WHERE id = ?').run(categoryId);
-    db.prepare(`INSERT INTO vec_categories (id, embedding) VALUES (?, ${vecParamSql(dt)})`).run(categoryId, buf);
-  });
-  tx();
+    db.prepare(`INSERT INTO vec_categories (id, embedding) VALUES (?, ${vecParamSql(q)})`)
+      .run(categoryId, embeddingToVecBlob(embedding, q));
+  }).immediate();
 }
 
 export function deleteCategoryEmbedding(db: Database.Database, categoryId: string): void {
@@ -130,17 +137,27 @@ export function searchSimilarCategories(
   embedding: number[],
   k: number = 20,
 ): Array<{ category: OntologyCategory; domainName: string; distance: number }> {
+  const knn = () => {
+    const q = getVecQuant(db, 'vec_categories');
+    const rows = db.prepare(`
+      SELECT id, distance FROM vec_categories
+      WHERE embedding MATCH ${vecParamSql(q)} ORDER BY distance LIMIT ?
+    `).all(embeddingToVecBlob(embedding, q), k) as Array<{ id: string; distance: number }>;
+    // ×scale int8 distances → float32-equivalent scale for callers.
+    for (const h of rows) h.distance = normalizeVecDistance(h.distance, q);
+    return rows;
+  };
   let hits: Array<{ id: string; distance: number }>;
   try {
-    const dt = getVecTableDtype(db, 'vec_categories');
-    hits = db.prepare(`
-      SELECT id, distance FROM vec_categories
-      WHERE embedding MATCH ${vecParamSql(dt)} ORDER BY distance LIMIT ?
-    `).all(embeddingToVecBlob(embedding, dt), k) as Array<{ id: string; distance: number }>;
-    // ×127-scaled int8 distances → float32-equivalent scale for callers.
-    for (const h of hits) h.distance = normalizeVecDistance(h.distance, dt);
-  } catch {
-    return []; // index absent → caller uses the full category list
+    hits = knn();
+  } catch (e) {
+    // Only an absent table (very old DBs) reads as "no candidates". A swap
+    // (compaction, int8 migration) can change dtype/scale between the read and
+    // the MATCH, so one retry; anything else — bad scale record, wrong schema —
+    // throws with its cause. The classifier turns a lookup that stays broken
+    // into IndexRepairError (ontology-classifier.ts categoryHits).
+    if (/no such table/i.test(e instanceof Error ? e.message : String(e))) return [];
+    hits = knn();
   }
 
   const results: Array<{ category: OntologyCategory; domainName: string; distance: number }> = [];
@@ -245,6 +262,16 @@ export function createRelation(
   };
 }
 
+/** Options of getRelatedFacts that only the injection selection (and its replay bench) passes. */
+export interface RelatedFactsOptions {
+  /** Widen scopeProject to its repository family (project-family.ts). */
+  scopeFamily?: boolean;
+  /** Replay bench only: facts that existed at the replayed moment. */
+  visibleFact?: (id: string) => boolean;
+  /** Replay bench only: relations that existed at the replayed moment. */
+  visibleRelation?: (relation: OntologyRelation) => boolean;
+}
+
 /**
  * Get related facts with relevance decay.
  *
@@ -268,7 +295,11 @@ export function getRelatedFacts(
   decay: number = 0.6,
   minRelevance: number = 0.2,
   scopeProject?: string | null,
+  opts: RelatedFactsOptions = {},
 ): Array<{ fact: Fact; relation: OntologyRelation; relevance: number; hop: number }> {
+  // The same canonical project the KNN scope filter uses (searchSimilarFacts): a slug-form project
+  // resolves to its path, so both paths of one injection see the same scope.
+  const inScope = scopeMatcher(scopeProject ? canonicalizeProject(db, scopeProject) : null, opts.scopeFamily === true);
   const visited = new Set<string>([factId]);
   const results: Array<{ fact: Fact; relation: OntologyRelation; relevance: number; hop: number }> = [];
 
@@ -316,7 +347,8 @@ export function getRelatedFacts(
         const fact = rowToFact(rows[0]);
 
         // Scope filter: skip facts from other projects (unless scopeProject is null)
-        if (scopeProject && fact.scope_type === 'project' && fact.scope_project !== scopeProject) continue;
+        if (fact.scope_type === 'project' && !inScope(fact.scope_project)) continue;
+        if (opts.visibleFact && !opts.visibleFact(fact.id)) continue;
 
         // Select the surfaced edge FIRST: a neighbour with no qualifying
         // edge is PRUNED — it must not enter the frontier, or traversal
@@ -326,6 +358,7 @@ export function getRelatedFacts(
         let chosen: { relation: OntologyRelation; relevance: number } | null = null;
         for (const row of rows) {
           const relation = rowToRelation(row);
+          if (opts.visibleRelation && !opts.visibleRelation(relation)) continue;
           // Relation type weight: SUPPORTS/INFLUENCES stronger than CONTRADICTS/SUPERSEDES
           const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
           const relevance = hopRelevance * typeWeight;
@@ -368,13 +401,15 @@ export function getRelatedFacts(
         const fact = rowToFact(rows[0]);
 
         // Scope filter: skip facts from other projects
-        if (scopeProject && fact.scope_type === 'project' && fact.scope_project !== scopeProject) continue;
+        if (fact.scope_type === 'project' && !inScope(fact.scope_project)) continue;
+        if (opts.visibleFact && !opts.visibleFact(fact.id)) continue;
 
         // Same pruning contract as the outgoing side: no qualifying edge →
         // no frontier entry, no path leak.
         let chosen: { relation: OntologyRelation; relevance: number } | null = null;
         for (const row of rows) {
           const relation = rowToRelation(row);
+          if (opts.visibleRelation && !opts.visibleRelation(relation)) continue;
           const typeWeight = (relation.relation_type === 'SUPPORTS' || relation.relation_type === 'INFLUENCES') ? 1.0 : 0.7;
           const relevance = hopRelevance * typeWeight;
           if (relevance >= minRelevance) {
